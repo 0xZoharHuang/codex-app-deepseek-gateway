@@ -1,0 +1,4 @@
+interface:
+  display_name: "Inspect CDAG Baseline"
+  short_description: "Inspect the frozen gateway acceptance inventory"
+  default_prompt: "Use $inspect-cdag-baseline to check this acceptance workspace inventory."

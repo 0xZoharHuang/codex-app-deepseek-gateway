@@ -1,0 +1,488 @@
+diff --git a/codex-rs/windows-sandbox-rs/src/artifact_read_roots.rs b/codex-rs/windows-sandbox-rs/src/artifact_read_roots.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/artifact_read_roots.rs
+@@ -0,0 +1,262 @@
++//! Physical read roots for pure runtime artifacts under a private CODEX_HOME.
++//! This never grants permissions: the existing native ACL path applies the policy.
++use std::fs;
++use std::io;
++use std::os::windows::fs::MetadataExt;
++use std::path::Path;
++use std::path::PathBuf;
++
++const REPARSE_POINT: u32 = 0x400;
++const ROOTS: [(&str, &[&str]); 4] = [
++    ("skills", &["skills"]),
++    ("plugins/cache", &["plugins", "cache"]),
++    ("memories", &["memories"]),
++    ("memories_v2", &["memories_v2"]),
++];
++
++fn physical_directory(path: &Path) -> io::Result<bool> {
++    let metadata = fs::symlink_metadata(path)?;
++    Ok(metadata.is_dir()
++        && !metadata.file_type().is_symlink()
++        && metadata.file_attributes() & REPARSE_POINT == 0)
++}
++
++/// Re-evaluated on every request so a later plugin installation is not cached absent.
++/// A redirected component is skipped with a diagnostic, never resolved into a secret root.
++pub(crate) fn physical_read_roots(
++    home: &Path,
++    mut permitted: impl FnMut(&Path) -> bool,
++    mut diagnostic: impl FnMut(&str),
++) -> Vec<PathBuf> {
++    if !home.is_absolute()
++        || home
++            .ancestors()
++            .any(|p| !physical_directory(p).unwrap_or(false))
++    {
++        diagnostic("artifact read roots skipped: home or ancestor is unavailable or redirected");
++        return Vec::new();
++    }
++    let Ok(canonical_home) = fs::canonicalize(home) else {
++        diagnostic("artifact read roots skipped: home cannot be canonicalized");
++        return Vec::new();
++    };
++    let mut result = Vec::new();
++    for (label, components) in ROOTS {
++        let mut candidate = home.to_path_buf();
++        let mut present = true;
++        for component in components {
++            candidate.push(component);
++            match physical_directory(&candidate) {
++                Ok(true) => {}
++                Err(error) if error.kind() == io::ErrorKind::NotFound => {
++                    present = false;
++                    break;
++                }
++                _ => {
++                    diagnostic(&format!(
++                        "artifact read root {label} skipped: component is unavailable, not a directory, or redirected"
++                    ));
++                    present = false;
++                    break;
++                }
++            }
++        }
++        if !present {
++            continue;
++        }
++        let Ok(canonical) = fs::canonicalize(&candidate) else {
++            diagnostic(&format!(
++                "artifact read root {label} skipped: cannot canonicalize"
++            ));
++            continue;
++        };
++        let within_expected =
++            canonical
++                .strip_prefix(&canonical_home)
++                .ok()
++                .is_some_and(|relative| {
++                    let actual = relative.iter().collect::<Vec<_>>();
++                    actual.len() == components.len()
++                        && actual.iter().zip(components).all(|(a, b)| {
++                            a.to_str()
++                                .is_some_and(|value| value.eq_ignore_ascii_case(b))
++                        })
++                });
++        if !within_expected {
++            diagnostic(&format!(
++                "artifact read root {label} skipped: canonical path escapes its physical location"
++            ));
++            continue;
++        }
++        if !permitted(&candidate) {
++            diagnostic(&format!(
++                "artifact read root {label} skipped: active read policy does not permit it"
++            ));
++            continue;
++        }
++        result.push(canonical);
++    }
++    result
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::process::Command;
++    use std::sync::atomic::{AtomicUsize, Ordering};
++    static NEXT: AtomicUsize = AtomicUsize::new(0);
++    struct Fixture(PathBuf);
++    impl Fixture {
++        fn new() -> Self {
++            let base = std::env::var_os("CDS_ARTIFACT_TEST_ROOT")
++                .map(PathBuf::from)
++                .unwrap_or_else(std::env::temp_dir);
++            let path = PathBuf::from(base).join(format!(
++                "fixture-{}-{}",
++                std::process::id(),
++                NEXT.fetch_add(1, Ordering::SeqCst)
++            ));
++            fs::create_dir(&path).unwrap();
++            Self(path)
++        }
++        fn home(&self) -> PathBuf {
++            let p = self.0.join("private home");
++            fs::create_dir(&p).unwrap();
++            p
++        }
++    }
++    impl Drop for Fixture {
++        fn drop(&mut self) {
++            fs::remove_dir_all(&self.0).unwrap();
++        }
++    }
++    #[test]
++    fn artifact_read_roots_are_only_model_visible_physical_subtrees_and_late_creation_is_seen() {
++        let f = Fixture::new();
++        let home = f.home();
++        let mut warnings = Vec::new();
++        assert!(physical_read_roots(&home, |_| true, |x| warnings.push(x.to_string())).is_empty());
++        assert!(warnings.is_empty());
++        for dir in [
++            "skills",
++            "plugins/cache",
++            "memories",
++            "memories_v2",
++            "sessions",
++            "auth",
++            ".sandbox-secrets",
++        ] {
++            fs::create_dir_all(home.join(dir)).unwrap();
++        }
++        let roots = physical_read_roots(&home, |_| true, |_| panic!("unexpected rejection"));
++        assert_eq!(
++            roots,
++            vec![
++                fs::canonicalize(home.join("skills")).unwrap(),
++                fs::canonicalize(home.join("plugins/cache")).unwrap(),
++                fs::canonicalize(home.join("memories")).unwrap(),
++                fs::canonicalize(home.join("memories_v2")).unwrap()
++            ]
++        );
++        assert!(!roots.contains(&fs::canonicalize(&home).unwrap()));
++        fs::write(home.join("plugins/cache/new-plugin.txt"), b"new artifact").unwrap();
++        assert_eq!(
++            roots,
++            physical_read_roots(&home, |_| true, |_| panic!("unexpected rejection"))
++        );
++    }
++    #[test]
++    fn artifact_read_roots_keep_explicit_policy_denials() {
++        let f = Fixture::new();
++        let home = f.home();
++        fs::create_dir_all(home.join("skills")).unwrap();
++        fs::create_dir_all(home.join("plugins/cache")).unwrap();
++        let mut rejected = Vec::new();
++        let roots = physical_read_roots(
++            &home,
++            |p| p.ends_with("skills"),
++            |x| rejected.push(x.to_string()),
++        );
++        assert_eq!(roots, vec![fs::canonicalize(home.join("skills")).unwrap()]);
++        assert_eq!(rejected.len(), 1);
++        assert!(physical_read_roots(&home, |_| false, |_| {}).is_empty());
++    }
++    #[test]
++    fn artifact_read_roots_skip_files_in_place_of_directories() {
++        let f = Fixture::new();
++        let home = f.home();
++        fs::write(home.join("skills"), b"not directory").unwrap();
++        let mut warnings = Vec::new();
++        assert!(physical_read_roots(&home, |_| true, |x| warnings.push(x.to_string())).is_empty());
++        assert_eq!(warnings.len(), 1);
++    }
++    fn junction(link: &Path, target: &Path) {
++        let output = Command::new("cmd.exe")
++            .args(["/c", "mklink", "/J"])
++            .arg(link)
++            .arg(target)
++            .output()
++            .unwrap();
++        assert!(
++            output.status.success(),
++            "owned junction fixture creation failed"
++        );
++    }
++    #[test]
++    fn artifact_read_roots_refuse_external_junction_and_preserve_target() {
++        let f = Fixture::new();
++        let home = f.home();
++        let target = f.0.join("external");
++        fs::create_dir(&target).unwrap();
++        fs::write(target.join("canary"), b"private").unwrap();
++        let link = home.join("skills");
++        junction(&link, &target);
++        let mut warnings = Vec::new();
++        assert!(physical_read_roots(&home, |_| true, |x| warnings.push(x.to_string())).is_empty());
++        assert_eq!(warnings.len(), 1);
++        assert_eq!(fs::read(target.join("canary")).unwrap(), b"private");
++        fs::remove_dir(link).unwrap();
++    }
++    #[test]
++    fn artifact_read_roots_refuse_in_home_junction_and_redirected_intermediate() {
++        let f = Fixture::new();
++        let home = f.home();
++        let target = home.join("sessions");
++        fs::create_dir_all(target.join("cache")).unwrap();
++        let link = home.join("plugins");
++        junction(&link, &target);
++        assert!(physical_read_roots(&home, |_| true, |_| {}).is_empty());
++        fs::remove_dir(link).unwrap();
++    }
++
++    #[test]
++    fn artifact_read_roots_memory_versions_keep_denies_and_reject_aliases() {
++        let f = Fixture::new();
++        let home = f.home();
++        fs::create_dir(home.join("memories")).unwrap();
++        fs::create_dir(home.join("memories_v2")).unwrap();
++        let roots = physical_read_roots(&home, |p| p.ends_with("memories_v2"), |_| {});
++        assert_eq!(
++            roots,
++            vec![fs::canonicalize(home.join("memories_v2")).unwrap()]
++        );
++        fs::remove_dir(home.join("memories")).unwrap();
++        junction(&home.join("memories"), &home.join("memories_v2"));
++        assert_eq!(
++            physical_read_roots(&home, |_| true, |_| {}),
++            vec![fs::canonicalize(home.join("memories_v2")).unwrap()]
++        );
++        fs::remove_dir(home.join("memories")).unwrap();
++    }
++
++    #[test]
++    fn artifact_read_roots_refuse_redirected_home() {
++        let f = Fixture::new();
++        let target = f.home();
++        fs::create_dir(target.join("skills")).unwrap();
++        let alias = f.0.join("home alias");
++        junction(&alias, &target);
++        assert!(physical_read_roots(&alias, |_| true, |_| {}).is_empty());
++        fs::remove_dir(alias).unwrap();
++    }
++}
+diff --git a/codex-rs/windows-sandbox-rs/src/resolved_permissions.rs b/codex-rs/windows-sandbox-rs/src/resolved_permissions.rs
+--- a/codex-rs/windows-sandbox-rs/src/resolved_permissions.rs
++++ b/codex-rs/windows-sandbox-rs/src/resolved_permissions.rs
+@@ -132,6 +132,13 @@
+ 
+     pub(crate) fn include_platform_defaults(&self) -> bool {
+         self.file_system.include_platform_defaults()
++    }
++
++    pub(crate) fn can_read_artifact_root(&self, path: &Path, cwd: &Path) -> bool {
++        self.file_system.can_read_local_path_with_cwd(path, cwd)
++            && ReadDenyMatcher::try_new_for_local_paths(&self.file_system, cwd).is_ok_and(
++                |matcher| matcher.is_none_or(|matcher| !matcher.is_local_path_read_denied(path)),
++            )
+     }
+ 
+     pub(crate) fn readable_roots_for_cwd(&self, cwd: &Path) -> Vec<PathBuf> {
+diff --git a/codex-rs/windows-sandbox-rs/src/setup.rs b/codex-rs/windows-sandbox-rs/src/setup.rs
+--- a/codex-rs/windows-sandbox-rs/src/setup.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup.rs
+@@ -1,3 +1,6 @@
++#[path = "artifact_read_roots.rs"]
++pub(crate) mod artifact_read_roots;
++
+ pub use crate::runtime_ownership::SetupRuntime;
+ use serde::Deserialize;
+ use serde::Serialize;
+@@ -604,6 +607,13 @@
+     runtime: SetupRuntime,
+ ) -> Vec<PathBuf> {
+     let mut roots = gather_helper_read_roots(codex_home, runtime);
++    // A protected custom home does not inherit the user-profile read grant.
++    // Materialize only already-authorized pure artifacts, never the entire home.
++    roots.extend(artifact_read_roots::physical_read_roots(
++        codex_home,
++        |path| permissions.can_read_artifact_root(path, command_cwd),
++        |message| log_note(message, Some(&sandbox_dir(codex_home))),
++    ));
+     roots.extend(
+         WINDOWS_PLATFORM_DEFAULT_READ_ROOTS
+             .iter()
+@@ -2777,4 +2787,104 @@
+             vec![existing, missing]
+         );
+     }
+-}
++
++    #[test]
++    fn artifact_read_roots_full_profile_keeps_only_pure_resources_and_explicit_denies() {
++        use codex_protocol::permissions::{
++            FileSystemAccessMode, FileSystemPath, FileSystemSandboxEntry, FileSystemSandboxPolicy,
++            FileSystemSpecialPath,
++        };
++        let temp = TempDir::new().expect("fixture");
++        let home = temp.path().join("private-home");
++        let cwd = temp.path().join("workspace");
++        for path in [
++            &cwd,
++            &home.join("skills"),
++            &home.join("plugins/cache"),
++            &home.join("sessions"),
++            &home.join("memories"),
++            &home.join("memories_v2"),
++            &home.join(".sandbox-secrets"),
++        ] {
++            fs::create_dir_all(path).expect("fixture directory");
++        }
++        let workspace_roots = workspace_roots_for(&cwd);
++        let root = FileSystemSandboxEntry::new(
++            FileSystemPath::Special {
++                value: FileSystemSpecialPath::Root,
++            },
++            FileSystemAccessMode::Read,
++        );
++        let denied = FileSystemSandboxEntry::new(
++            AbsolutePathBuf::from_absolute_path(home.join("skills"))
++                .unwrap()
++                .into(),
++            FileSystemAccessMode::Deny,
++        );
++        let denied_v2 = FileSystemSandboxEntry::new(
++            AbsolutePathBuf::from_absolute_path(home.join("memories_v2"))
++                .unwrap()
++                .into(),
++            FileSystemAccessMode::Deny,
++        );
++        let profile = PermissionProfile::from_runtime_permissions(
++            &FileSystemSandboxPolicy::restricted(vec![root, denied, denied_v2]),
++            NetworkSandboxPolicy::Restricted,
++        );
++        let permissions = permissions_for(&profile, &workspace_roots);
++        let roots = gather_read_roots(
++            &cwd,
++            &permissions,
++            &HashMap::new(),
++            &home,
++            super::SetupRuntime::Legacy,
++        );
++        assert!(roots.contains(&dunce::canonicalize(home.join("plugins/cache")).unwrap()));
++        assert!(!roots.contains(&dunce::canonicalize(home.join("skills")).unwrap()));
++        assert!(roots.contains(&dunce::canonicalize(home.join("memories")).unwrap()));
++        assert!(!roots.contains(&dunce::canonicalize(home.join("memories_v2")).unwrap()));
++        assert!(!roots.contains(&dunce::canonicalize(home.join(".sandbox-secrets")).unwrap()));
++        assert!(!roots.contains(&dunce::canonicalize(&home).unwrap()));
++        assert!(!roots.contains(&dunce::canonicalize(home.join("sessions")).unwrap()));
++    }
++
++    #[test]
++    fn artifact_read_roots_do_not_expand_a_restricted_profile() {
++        use codex_protocol::permissions::{
++            FileSystemAccessMode, FileSystemSandboxEntry, FileSystemSandboxPolicy,
++        };
++        let temp = TempDir::new().expect("fixture");
++        let home = temp.path().join("private-home");
++        let cwd = temp.path().join("workspace");
++        for path in [
++            &cwd,
++            &home.join("skills"),
++            &home.join("plugins/cache"),
++            &home.join("memories"),
++            &home.join("memories_v2"),
++        ] {
++            fs::create_dir_all(path).expect("fixture directory");
++        }
++        let workspace_roots = workspace_roots_for(&cwd);
++        let entry = FileSystemSandboxEntry::new(
++            AbsolutePathBuf::from_absolute_path(&cwd).unwrap().into(),
++            FileSystemAccessMode::Read,
++        );
++        let profile = PermissionProfile::from_runtime_permissions(
++            &FileSystemSandboxPolicy::restricted(vec![entry]),
++            NetworkSandboxPolicy::Restricted,
++        );
++        let permissions = permissions_for(&profile, &workspace_roots);
++        let roots = gather_read_roots(
++            &cwd,
++            &permissions,
++            &HashMap::new(),
++            &home,
++            super::SetupRuntime::Legacy,
++        );
++        assert!(!roots.contains(&dunce::canonicalize(home.join("skills")).unwrap()));
++        assert!(!roots.contains(&dunce::canonicalize(home.join("plugins/cache")).unwrap()));
++        assert!(!roots.contains(&dunce::canonicalize(home.join("memories")).unwrap()));
++        assert!(!roots.contains(&dunce::canonicalize(home.join("memories_v2")).unwrap()));
++    }
++}
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+@@ -952,6 +952,33 @@
+         )?;
+     }
+ 
++    // These pure artifacts are intentionally inside a private CODEX_HOME. Ensure
++    // their authorized read grants synchronously before the first workload reads
++    // a skill. General profile read roots retain the existing background helper.
++    let artifact_roots = crate::setup::artifact_read_roots::physical_read_roots(
++        &payload.codex_home,
++        |candidate| {
++            let Ok(candidate) = std::fs::canonicalize(candidate) else {
++                return false;
++            };
++            payload
++                .read_roots
++                .iter()
++                .any(|root| std::fs::canonicalize(root).is_ok_and(|path| path == candidate))
++        },
++        |message| log_note(message, Some(sbx_dir)),
++    );
++    for root in &artifact_roots {
++        unsafe {
++            crate::acl::grant_read_execute_aces(
++                root,
++                &[sandbox_group_psid],
++                OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
++            )
++        }
++        .context("apply authorized artifact read ACL")?;
++    }
++
+     if let Some(user_profile) = payload.user_profile.as_deref()
+         && user_profile.is_absolute()
+     {
+@@ -996,15 +1023,24 @@
+         }
+     }
+ 
+-    if payload.read_roots.is_empty() {
+-        log_line(log, "no read roots to grant; skipping read ACL helper")?;
++    // Do not let the generic background SET_ACCESS path rewrite these narrower
++    // GRANT_ACCESS entries or their existing deny ACEs after synchronous admission.
++    let mut background_payload = payload.clone();
++    background_payload.read_roots.retain(|root| {
++        !std::fs::canonicalize(root).is_ok_and(|path| artifact_roots.contains(&path))
++    });
++    if background_payload.read_roots.is_empty() {
++        log_line(
++            log,
++            "no background read roots to grant; skipping read ACL helper",
++        )?;
+     } else {
+         match read_acl_mutex_exists(&validate_payload_namespace(payload)?.key.read_acl_mutex()) {
+             Ok(true) => {
+                 log_line(log, "read ACL helper already running; skipping spawn")?;
+             }
+             Ok(false) => {
+-                spawn_read_acl_helper(payload, log).map_err(|err| {
++                spawn_read_acl_helper(&background_payload, log).map_err(|err| {
+                     anyhow::Error::new(SetupFailure::new(
+                         SetupErrorCode::HelperReadAclHelperSpawnFailed,
+                         format!("spawn read ACL helper failed: {err}"),
+@@ -1016,7 +1052,7 @@
+                     log,
+                     &format!("read ACL mutex check failed: {err}; spawning anyway"),
+                 )?;
+-                spawn_read_acl_helper(payload, log).map_err(|spawn_err| {
++                spawn_read_acl_helper(&background_payload, log).map_err(|spawn_err| {
+                     anyhow::Error::new(SetupFailure::new(
+                         SetupErrorCode::HelperReadAclHelperSpawnFailed,
+                         format!(

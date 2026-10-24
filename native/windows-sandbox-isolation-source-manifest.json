@@ -1,0 +1,959 @@
+{
+  "schema_version": 1,
+  "upstream_commit": "680c4ba93ec79c292287fb9e0b627dc7a76e3b5e",
+  "upstream_archive_sha256": "b95f2de5822fa83b277207b8c88dd19404427d54a16e87726a4d2039c4619ebb",
+  "patch_sha256": "83385cafd4b4d966a40a5d5b21ef8b279a3b085da5d20324558eda50baf8ba6d",
+  "files": [
+    {
+      "path": "codex-rs/Cargo.lock",
+      "before_sha256": "4f9ac2f9ff02126221aac6df75c41c53fdbcc3c9ee8aa5dbfa9fd8faaac2b4b2",
+      "after_sha256": "9a6c986a8b0cd11339b71b7634462d8d46a2dcf024af63b4d4a116d19a109b96"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/Cargo.toml",
+      "before_sha256": "1695a3007995156a1933d5d7daae3f68a58b3d40e9ba329684b296b341c67fd8",
+      "after_sha256": "395c9037aaa22aad40ac3c8ee4ecddc54b1b80e8a913fa79d4a91f474bdb5403"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/bin/command_runner/win.rs",
+      "before_sha256": "bcfb3e05e642c26fa75a54814c93c4bf198385067e342f758d82e7097c383fd9",
+      "after_sha256": "985091bb55b53263c5954f74355f4e10ea8dd1906de9df834c84d0e08e721cf1"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/identity.rs",
+      "before_sha256": "3b6c3ad4f48a19c5b294392fd18eb83a351751245d43716305baf4d6bd638327",
+      "after_sha256": "52a02313eba711d71e59dd585403fd4ad8eb6920ca601fd2b79700a933cc14e4"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/identity_integration_tests.rs",
+      "before_sha256": "3478d6f93aac49d9f79bc7d09f3bd3e1c5b9f330406bf5d6f8b3a02a145a31bd",
+      "after_sha256": "e44f1207a08e507c4cb1a23e0d66b916fa3bc450b3d54e437d273150237ca6e9"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/installation_record.rs",
+      "before_sha256": "f56bf16c340cf45a2178d60b8446c5127a3760a3d146383a9f78033fe73b8bdc",
+      "after_sha256": "d81de4c4d53323293fe46ec2e3e36ade2b6620cc11e626d8cba54a313dc634b2"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/lib.rs",
+      "before_sha256": "0d2487a95614027f5a85d03309ad789b2a9a35a64c5c3641d3bebff3e0881a1f",
+      "after_sha256": "2466f2d44b8e8ecc4ec1e540b5ef450b6a9c004135f357e71b99104dc19ffca1"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/namespace.rs",
+      "before_sha256": null,
+      "after_sha256": "fb8ef21678010e39947dda7bb882bedce37212a4a0f2e930e1f744d3572109e5"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/namespace_key.rs",
+      "before_sha256": null,
+      "after_sha256": "d4e5a246a138fe9eebb3e3e0aee2d481ac97cf541f02c2678170041540a26b48"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/provisioning_client.rs",
+      "before_sha256": "b13589cf51f837fdd67e4569030dafc17001ece377460c54e9be0f7b9310e20d",
+      "after_sha256": "25788c0aaeeeab487d1e9488008e77898dc8965f43cdbccd2bbf1e92ccfb4204"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/runtime_ownership.rs",
+      "before_sha256": "7b41010207ad5cd9f3822bac9962e4def6a66714f53944cd620d0845e9248f8d",
+      "after_sha256": "9588d2d89de98704341cd3fa893fef10dcf8dbb9ee026d2f8e7f88db5ac73d67"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/service_diagnostics.rs",
+      "before_sha256": "a1b04734627b10526a5b0951da11657ae181d4bf20349d3fdff60a32dd9ddd7b",
+      "after_sha256": "e77ee5e4f6754210aac148e1817351b01a1da6102fe2626106dc1744f55fb6af"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/setup.rs",
+      "before_sha256": "8b839f4f3828198914ad8293504cd996fe50a31e350f499cd2e11880292cc92a",
+      "after_sha256": "0529ef4f9229c62b6e7f13f9a3d4e6ff122e5057d5d99bdbbc3a1230d410b3fd"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/setup_provisioning.rs",
+      "before_sha256": "7f85d132adf69bca810db5a77f4faa5b1e021b764aad889020e47abba6f06ac3",
+      "after_sha256": "1dafded013791a1d9af68151832607eb66bfc7ff3b6265b6ce1ead4134a33754"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/setup_provisioning/firewall.rs",
+      "before_sha256": "798143ed6115dadd36ba35cc3edf6beb94def870269e954a8a01dc74a3c23306",
+      "after_sha256": "c5d0782bad3b5e564c86921b738b73b2db54897317cee40483bfe0e3a6654d30"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/setup_provisioning/read_acl_mutex.rs",
+      "before_sha256": "aab81d06b5c0c869a220d05986e832661b433b42859adf5c344290c1dc0839a9",
+      "after_sha256": "dc14b0cd2125beb183bb9141c3fef52c2dc658e405043262b04615e74c9f7f2a"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/setup_provisioning/sandbox_users.rs",
+      "before_sha256": "20bc1739fa0f5bac87b7168d4f0b394339b04f15489137724067f9a7dc7df92d",
+      "after_sha256": "3fbf218a28b6f9ace8db4971f0a9f243c6f396849613e82056eccfc7f661191c"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/uninstall_windows.rs",
+      "before_sha256": "d185eba1a8a70863a065512d8d0ecc75d9e1ed40063a253cba6ca0d89acc7caa",
+      "after_sha256": "1ffc03ab3362aa6849ca698bb2842ad6ec0204bca083cab3e01f028d3f27857f"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/uninstall_windows/firewall.rs",
+      "before_sha256": "211f70f95d0d5b355a4dfcb8cea159cec25bcef010660b290233e0870961b966",
+      "after_sha256": "3eb074912236b4787235824b310a817de6c239863b57d055e0a1e0ac8fb8fc2b"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/uninstall_windows/principals.rs",
+      "before_sha256": "a6802d9c719d2909008661e75e04c237e71a372365b8320737235db322e162b9",
+      "after_sha256": "bac22f6fbf73064be7fa7f7cf04b05852be68ba0d099bbfbe80658bc3ceaaf71"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/uninstall_windows/principals_tests.rs",
+      "before_sha256": "c4952bf9201b15a135beae62cf4d2ce3c45f9b4c64b6a38c268406d480ebbf65",
+      "after_sha256": "6fc480ec8846d81a3ab79f77a38158554e7b6230d33b7eb1b62e425ad31f86fd"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/wfp.rs",
+      "before_sha256": "82effcda9c951ad62d1f1b4afa9b4f0ad59b3d35d7c2feab53a9b6838dd93fc4",
+      "after_sha256": "2275a55429c890fe6bdc8f850cfbabbf0babd7a3242bfea39de67187b8bc36cf"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/wfp_setup.rs",
+      "before_sha256": "d164be982d39e6f87ef818bfaafb3539512784d75e1712a3bdf4a95b065a4186",
+      "after_sha256": "580a9a2af9d6d4fb01fae0e34e28506d819ae34ec8b6479ca77ac53a87e8c06b"
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/winutil.rs",
+      "before_sha256": "5620770d64aee14ba9d6918822c858f1fceb308d97db53a86a97808adadf510b",
+      "after_sha256": "6acba1cac20b91bff4ba6060864f10cabde902eda2e345224d09ce37f96c6b72"
+    }
+  ],
+  "lock_normalization": {
+    "reason": "synchronize published workspace versions with the fixed release Cargo.toml; preserve all external pins",
+    "external_records_unchanged": true,
+    "external_records_count": 1315,
+    "workspace_version_changes": [
+      {
+        "name": "app_test_support",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-agent-extension",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-agent-graph-store",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-agent-identity",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-agent-message-board-client",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-agent-message-board-extension",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-agent-roles",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-analytics",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-ansi-escape",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-api",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-app-server",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-app-server-client",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-app-server-daemon",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-app-server-protocol",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-app-server-protocol-noop-macros",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-app-server-test-client",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-app-server-transport",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-apply-patch",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-arg0",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-async-utils",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-attachment-store",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-aws-auth",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-backend-client",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-backend-openapi-models",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-build-info",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-bwrap",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-chatgpt",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-cli",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-client",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-cloud-client",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-cloud-config",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-cloud-tasks",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-cloud-tasks-client",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-cloud-tasks-mock-client",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-code-mode",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-code-mode-host",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-code-mode-protocol",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-code-mode-runtime",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-collaboration-mode-templates",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-config",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-config-schema",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-connectors",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-connectors-extension",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-context-fragments",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-core",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-core-api",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-core-plugin-common",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-core-plugins",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-diagnostics",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-exec",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-exec-server",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-exec-server-protocol",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-exec-server-test-support",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-execpolicy",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-experimental-api-macros",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-extension-api",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-extension-items",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-external-agent-migration",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-features",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-feedback",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-file-search",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-file-system",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-file-watcher",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-git-attribution",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-git-utils",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-goal-extension",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-guardian-context",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-guardian-reviewer",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-guardian-v2",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-history",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-history-notes-extension",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-home",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-hooks",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-http-client",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-image-generation-extension",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-install-context",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-keyring-store",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-linux-sandbox",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-lmstudio",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-login",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-mcp",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-mcp-extension",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-memories-extension",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-memories-read",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-memories-write",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-mermaid",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-message-history",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-model-provider",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-model-provider-info",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-models-manager",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-mxc-sandbox",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-network-proxy",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-ollama",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-otel",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-otel-trace-websocket",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-plugin",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-process-hardening",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-prompts",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-protocol",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-queue-extension",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-realtime-webrtc",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-response-debug-context",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-responses-api-proxy",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-rmcp-client",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-rollout",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-rollout-trace",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-sandboxing",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-secrets",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-shell-command",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-skills",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-skills-extension",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-state",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-stdio-to-uds",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-tcp-tunnel",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-terminal-detection",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-test-binary-support",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-thread-manager-sample",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-thread-store",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-tools",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-tui",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-uds",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-user-verification",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-absolute-path",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-approval-presets",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-audio",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-cache",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-cargo-bin",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-cli",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-elapsed",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-fuzzy-match",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-git-discovery",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-home-dir",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-image",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-json-to-toml",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-oss",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-output-truncation",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-path",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-path-uri",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-plugins",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-process",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-pty",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-readiness",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-redacted-string",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-rustls-provider",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-sandbox-summary",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-sleep-inhibitor",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-stream-parser",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-string",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-utils-template",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-v8-poc",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-voice-host",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-web-search-extension",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-websocket-auth",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-websocket-client",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-windows-sandbox",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-windows-sandbox-service",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-windows-sandbox-test-support",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-workload-identity",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "codex-worktree",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      },
+      {
+        "name": "core_test_support",
+        "before": "0.0.0",
+        "after": "0.163.0-alpha.11.1"
+      }
+    ],
+    "added_existing_dependency": "codex-windows-sandbox -> sha2 0.10.9"
+  },
+  "scope": "home-scoped resource identities and native ownership admission; original sandbox algorithms retained",
+  "verification": {
+    "pure_namespace_tests": 8,
+    "pure_evidence": {
+      "report": "sandbox-namespace-pure-tests-v6.json",
+      "source_sha256": "d4e5a246a138fe9eebb3e3e0aee2d481ac97cf541f02c2678170041540a26b48",
+      "passed": 8,
+      "scope": "only pure namespace identity module, not native runtime"
+    },
+    "complete_runtime_build": true,
+    "native_setup_executed": false,
+    "app_acceptance": false,
+    "native_build_evidence": {
+      "report": ".evidence/native-release-build-r3.json",
+      "report_sha256": "d20a1f5379884f352ee537398ca88d2bfe570d58668812538cf2dd2da857433b",
+      "full_source_sha256": "d7e66b3fc22e3759cbf4d59ec806a281f6f7b612a43c3bafe5959f771c6b57ad",
+      "candidate_manifest_sha256": "d0c2e716e71565e596f274e24888c4f13a45073692fdbec0ac7a5c911dd7aea6",
+      "four_explicit_binary_targets_passed": true,
+      "independent_verification": ".evidence/native-final-candidate-c-verification.json",
+      "independent_verification_sha256": "3b63ac4c28e1a487c0266e358a3d49b85cacfa072b15b80eefd705da5d418e63"
+    }
+  },
+  "shared_acl_concurrency": "See docs/windows-sandbox-isolation.md; namespace isolation is not proof of overlapping ACL update safety."
+}

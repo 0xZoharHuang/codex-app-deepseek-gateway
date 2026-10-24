@@ -1,0 +1,20 @@
+{
+  "name": "cdag-acceptance-local",
+  "interface": {
+    "displayName": "CDAG Acceptance Fixtures"
+  },
+  "plugins": [
+    {
+      "name": "cdag-source-reference",
+      "source": {
+        "source": "local",
+        "path": "./plugins/cdag-source-reference"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

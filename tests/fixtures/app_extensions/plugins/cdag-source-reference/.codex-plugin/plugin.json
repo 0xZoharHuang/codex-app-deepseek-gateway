@@ -1,0 +1,10 @@
+{
+  "name": "cdag-source-reference",
+  "version": "1.0.0",
+  "description": "Read-only source-tracing skill for the isolated Codex App gateway acceptance workspace.",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "CDAG Source Reference",
+    "shortDescription": "Trace native gateway facts to official sources"
+  }
+}

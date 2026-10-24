@@ -1,0 +1,597 @@
+--- a/codex-rs/windows-sandbox-rs/src/resolved_permissions.rs
++++ b/codex-rs/windows-sandbox-rs/src/resolved_permissions.rs
+@@ -142,10 +142,19 @@
+     }
+ 
+     pub(crate) fn readable_roots_for_cwd(&self, cwd: &Path) -> Vec<PathBuf> {
+-        self.file_system
++        // The platform-independent policy omits explicit read leaves when
++        // :root already permits reads. Windows still needs their concrete ACLs.
++        // Remove only that broad selector while resolving the explicit entries;
++        // retain all denies and confirm each result against the original policy.
++        let mut explicit = self.file_system.clone();
++        explicit
++            .entries
++            .retain(|entry| !matches!(&entry.path, FileSystemPath::Special { value: Root }));
++        explicit
+             .get_readable_roots_with_cwd(cwd)
+             .into_iter()
+             .map(AbsolutePathBuf::into_path_buf)
++            .filter(|path| self.can_read_artifact_root(path, cwd))
+             .collect()
+     }
+ 
+@@ -687,4 +696,39 @@
+                 .contains("full-disk filesystem writes, which cannot be enforced")
+         );
+     }
++    #[test]
++    fn critical_read_root_keeps_explicit_leaf_under_symbolic_full_read() {
++        let tmp = TempDir::new().unwrap();
++        let leaf = tmp.path().join("explicit.txt");
++        std::fs::write(&leaf, "input").unwrap();
++        let profile = permission_profile_with_entries(vec![
++            FileSystemSandboxEntry::new(
++                FileSystemPath::Special {
++                    value: FileSystemSpecialPath::Root,
++                },
++                FileSystemAccessMode::Read,
++            ),
++            FileSystemSandboxEntry::new(
++                AbsolutePathBuf::from_absolute_path(&leaf).unwrap().into(),
++                FileSystemAccessMode::Read,
++            ),
++        ]);
++        let permissions =
++            ResolvedWindowsSandboxPermissions::try_from_permission_profile(&profile).unwrap();
++        assert!(permissions.has_full_disk_read_access());
++        assert_eq!(
++            permissions.readable_roots_for_cwd(tmp.path()),
++            vec![dunce::canonicalize(&leaf).unwrap()]
++        );
++    }
++
++    #[test]
++    fn critical_read_root_does_not_turn_symbolic_full_read_into_disk_traversal() {
++        let tmp = TempDir::new().unwrap();
++        let permissions = ResolvedWindowsSandboxPermissions::try_from_permission_profile(
++            &PermissionProfile::read_only(),
++        )
++        .unwrap();
++        assert!(permissions.readable_roots_for_cwd(tmp.path()).is_empty());
++    }
+ }
+--- a/codex-rs/windows-sandbox-rs/src/setup.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup.rs
+@@ -258,6 +258,7 @@
+         },
+         /*offline_proxy_settings_override*/ None,
+         current_setup_runtime(),
++        &[],
+     )
+ }
+ 
+@@ -271,6 +272,7 @@
+         overrides,
+         Some(offline_proxy_settings),
+         current_setup_runtime(),
++        &[],
+     )
+ }
+ 
+@@ -296,7 +298,7 @@
+         setup_refresh_deny_read_paths(permission_profile, workspace_roots, command_cwd)?;
+     let runtime = current_setup_runtime();
+     let mut read_roots = gather_read_roots(command_cwd, &permissions, env_map, codex_home, runtime);
+-    read_roots.extend(extra_read_roots);
++    read_roots.extend(extra_read_roots.iter().cloned());
+     run_setup_refresh_inner(
+         SandboxSetupRequest {
+             permissions: &permissions,
+@@ -314,6 +316,7 @@
+         },
+         /*offline_proxy_settings_override*/ None,
+         runtime,
++        &extra_read_roots,
+     )
+ }
+ 
+@@ -341,12 +344,37 @@
+     overrides: SetupRootOverrides,
+     offline_proxy_settings_override: Option<&OfflineProxySettings>,
+     runtime: SetupRuntime,
++    extra_critical_read_roots: &[PathBuf],
+ ) -> Result<()> {
+     request
+         .permissions
+         .validate_elevated_filesystem_policy(request.command_cwd)?;
+     crate::namespace::SandboxNamespace::current(request.codex_home)?.validate_existing_state()?;
++    let managed_package = managed_package_read_root(
++        request.codex_home,
++        &std::env::current_exe()?,
++        request.permissions,
++        request.command_cwd,
++    )?;
++    let mut overrides = overrides;
++    if let Some(root) = &managed_package {
++        let mut roots = overrides.read_roots.take().unwrap_or_else(|| {
++            gather_read_roots(
++                request.command_cwd,
++                request.permissions,
++                request.env_map,
++                request.codex_home,
++                runtime,
++            )
++        });
++        roots.push(root.clone());
++        overrides.read_roots = Some(roots);
++    }
++    // Current-package assets pass through the same final override/deny filters.
+     let (read_roots, write_roots) = build_payload_roots(&request, &overrides, runtime);
++    let mut critical = extra_critical_read_roots.to_vec();
++    critical.extend(managed_package);
++    let critical_read_roots = build_critical_read_roots(&request, &read_roots, &critical);
+     let deny_read_paths = build_payload_deny_read_paths(overrides.deny_read_paths);
+     let deny_write_paths = build_payload_deny_write_paths(&request, overrides.deny_write_paths);
+     let offline_proxy_settings =
+@@ -360,6 +388,7 @@
+         codex_home: request.codex_home.to_path_buf(),
+         command_cwd: request.command_cwd.to_path_buf(),
+         read_roots,
++        critical_read_roots,
+         write_roots,
+         deny_read_paths,
+         deny_write_paths,
+@@ -730,6 +759,7 @@
+     codex_home: PathBuf,
+     command_cwd: PathBuf,
+     read_roots: Vec<PathBuf>,
++    critical_read_roots: Vec<PathBuf>,
+     write_roots: Vec<PathBuf>,
+     #[serde(default)]
+     deny_read_paths: Vec<PathBuf>,
+@@ -1186,6 +1216,7 @@
+         codex_home: request.codex_home.to_path_buf(),
+         command_cwd: request.codex_home.to_path_buf(),
+         read_roots: Vec::new(),
++        critical_read_roots: Vec::new(),
+         write_roots: Vec::new(),
+         deny_read_paths: Vec::new(),
+         deny_write_paths: Vec::new(),
+@@ -1273,6 +1304,7 @@
+         codex_home: codex_home.to_path_buf(),
+         command_cwd: codex_home.to_path_buf(),
+         read_roots: Vec::new(),
++        critical_read_roots: Vec::new(),
+         write_roots: Vec::new(),
+         deny_read_paths: Vec::new(),
+         deny_write_paths: Vec::new(),
+@@ -1354,6 +1386,115 @@
+             .any(|denied| Path::new(&root_key).starts_with(denied))
+     });
+     (read_roots, write_roots)
++}
++
++// Daemon prepare_install validates and publishes a complete immutable copy;
++// only that running CLI's own canonical release may become a sandbox read root.
++fn managed_package_read_root(
++    codex_home: &Path,
++    executable: &Path,
++    permissions: &ResolvedWindowsSandboxPermissions,
++    cwd: &Path,
++) -> Result<Option<PathBuf>> {
++    use std::os::windows::fs::MetadataExt;
++
++    let executable = dunce::canonicalize(executable)?;
++    let Some(bin) = executable.parent() else {
++        return Ok(None);
++    };
++    let Some(root) = bin.parent() else {
++        return Ok(None);
++    };
++    let expected = dunce::canonicalize(codex_home)?.join("packages/app-server-daemon/releases");
++    if bin.file_name() != Some(std::ffi::OsStr::new("bin"))
++        || root.parent() != Some(expected.as_path())
++    {
++        return Ok(None);
++    }
++    if !permissions.can_read_artifact_root(root, cwd) {
++        return Ok(None);
++    }
++    anyhow::ensure!(
++        executable == root.join("bin/codex.exe"),
++        "managed daemon read root does not contain the running CLI"
++    );
++    let manifest: serde_json::Value =
++        serde_json::from_slice(&std::fs::read(root.join("codex-package.json"))?)?;
++    anyhow::ensure!(
++        manifest["layoutVersion"] == 1
++            && manifest["variant"] == "codex"
++            && manifest["target"] == "x86_64-pc-windows-msvc"
++            && manifest["entrypoint"] == "bin/codex.exe"
++            && manifest["pathDir"] == "codex-path"
++            && manifest["resourcesDir"] == "codex-resources",
++        "managed daemon read root has an incompatible package layout"
++    );
++    for name in [
++        "bin/codex.exe",
++        "bin/codex-code-mode-host.exe",
++        "codex-path/rg.exe",
++        "codex-resources/codex-command-runner.exe",
++        "codex-resources/codex-windows-sandbox-setup.exe",
++    ] {
++        anyhow::ensure!(
++            root.join(name).is_file(),
++            "managed daemon package is missing {name}"
++        );
++    }
++    let mut pending = vec![root.to_owned()];
++    while let Some(path) = pending.pop() {
++        let metadata = std::fs::symlink_metadata(&path)?;
++        anyhow::ensure!(
++            metadata.file_attributes()
++                & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
++                == 0,
++            "managed daemon read root contains a reparse point"
++        );
++        if metadata.is_dir() {
++            for entry in std::fs::read_dir(path)? {
++                pending.push(entry?.path());
++            }
++        } else {
++            anyhow::ensure!(
++                metadata.is_file(),
++                "managed daemon read root contains a special file"
++            );
++        }
++    }
++    Ok(Some(root.to_owned()))
++}
++
++// Only concrete requested reads are launch-critical. Broad platform/profile
++// discovery remains background work; the final payload read set has already
++// applied explicit overrides, write-root separation and denied-read filtering.
++fn build_critical_read_roots(
++    request: &SandboxSetupRequest<'_>,
++    read_roots: &[PathBuf],
++    extra_read_roots: &[PathBuf],
++) -> Vec<PathBuf> {
++    let mut requested = request
++        .permissions
++        .readable_roots_for_cwd(request.command_cwd);
++    if request
++        .permissions
++        .can_read_artifact_root(request.command_cwd, request.command_cwd)
++    {
++        requested.push(request.command_cwd.to_owned());
++    }
++    requested.extend(extra_read_roots.iter().cloned());
++    let allowed: HashSet<_> = read_roots
++        .iter()
++        .map(|path| canonical_path_key(path))
++        .collect();
++    let mut seen = HashSet::new();
++    canonical_existing(&requested)
++        .into_iter()
++        .filter(|path| path.parent().is_some())
++        .filter(|path| {
++            let key = canonical_path_key(path);
++            allowed.contains(&key) && seen.insert(key)
++        })
++        .collect()
+ }
+ 
+ pub(crate) fn build_payload_deny_write_paths(
+@@ -2887,4 +3028,113 @@
+         assert!(!roots.contains(&dunce::canonicalize(home.join("memories")).unwrap()));
+         assert!(!roots.contains(&dunce::canonicalize(home.join("memories_v2")).unwrap()));
+     }
+-}
++    #[test]
++    fn critical_read_selection_preserves_cwd_and_leaf_but_not_profile_roots() {
++        let tmp = TempDir::new().unwrap();
++        let cwd = tmp.path().join("workspace");
++        let leaf = tmp.path().join("explicit.txt");
++        let common = tmp.path().join("large-profile");
++        fs::create_dir(&cwd).unwrap();
++        fs::create_dir(&common).unwrap();
++        fs::write(&leaf, "input").unwrap();
++        let profile = PermissionProfile::Managed {
++            file_system: ManagedFileSystemPermissions::Restricted {
++                entries: vec![
++                    FileSystemSandboxEntry::new(
++                        FileSystemPath::Special {
++                            value: FileSystemSpecialPath::Root,
++                        },
++                        FileSystemAccessMode::Read,
++                    ),
++                    FileSystemSandboxEntry::new(
++                        AbsolutePathBuf::from_absolute_path(&leaf).unwrap().into(),
++                        FileSystemAccessMode::Read,
++                    ),
++                ],
++                glob_scan_max_depth: None,
++            },
++            network: NetworkSandboxPolicy::Restricted,
++        };
++        let permissions = permissions_for(&profile, &[]);
++        let env = HashMap::new();
++        let request = super::SandboxSetupRequest {
++            permissions: &permissions,
++            command_cwd: &cwd,
++            env_map: &env,
++            codex_home: tmp.path(),
++            proxy_enforced: false,
++        };
++        let allowed = vec![cwd.clone(), leaf.clone(), common.clone()];
++        let actual = super::build_critical_read_roots(&request, &allowed, &[]);
++        let actual: HashSet<_> = actual.into_iter().collect();
++        assert_eq!(
++            actual,
++            HashSet::from([
++                dunce::canonicalize(&cwd).unwrap(),
++                dunce::canonicalize(&leaf).unwrap()
++            ])
++        );
++        // An override/denial removing an authorized leaf must not be undone.
++        assert_eq!(
++            super::build_critical_read_roots(&request, &[common], &[]),
++            Vec::<PathBuf>::new()
++        );
++    }
++
++    #[test]
++    fn critical_read_managed_package_binds_only_running_canonical_release() {
++        let tmp = TempDir::new().unwrap();
++        let home = dunce::canonicalize(tmp.path()).unwrap();
++        let package = home.join("packages/app-server-daemon/releases/owned-release");
++        for name in [
++            "bin/codex.exe",
++            "bin/codex-code-mode-host.exe",
++            "codex-path/rg.exe",
++            "codex-resources/codex-command-runner.exe",
++            "codex-resources/codex-windows-sandbox-setup.exe",
++        ] {
++            let path = package.join(name);
++            fs::create_dir_all(path.parent().unwrap()).unwrap();
++            fs::write(path, "fixture").unwrap();
++        }
++        let manifest = serde_json::json!({
++            "layoutVersion":1, "variant":"codex", "target":"x86_64-pc-windows-msvc",
++            "entrypoint":"bin/codex.exe", "pathDir":"codex-path", "resourcesDir":"codex-resources"
++        });
++        fs::write(
++            package.join("codex-package.json"),
++            serde_json::to_vec(&manifest).unwrap(),
++        )
++        .unwrap();
++        let permissions = permissions_for(&PermissionProfile::read_only(), &[]);
++        let root = super::managed_package_read_root(
++            &home,
++            &package.join("bin/codex.exe"),
++            &permissions,
++            &home,
++        )
++        .unwrap();
++        assert_eq!(root, Some(package.clone()));
++        fs::create_dir(home.join("other-home")).unwrap();
++        assert!(
++            super::managed_package_read_root(
++                &home.join("other-home"),
++                &package.join("bin/codex.exe"),
++                &permissions,
++                &home
++            )
++            .unwrap()
++            .is_none()
++        );
++        fs::remove_file(package.join("codex-path/rg.exe")).unwrap();
++        assert!(
++            super::managed_package_read_root(
++                &home,
++                &package.join("bin/codex.exe"),
++                &permissions,
++                &home
++            )
++            .is_err()
++        );
++    }
++}
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+@@ -111,6 +111,8 @@
+     codex_home: PathBuf,
+     command_cwd: PathBuf,
+     read_roots: Vec<PathBuf>,
++    #[serde(default)]
++    critical_read_roots: Vec<PathBuf>,
+     write_roots: Vec<PathBuf>,
+     #[serde(default)]
+     deny_read_paths: Vec<PathBuf>,
+@@ -917,6 +919,52 @@
+     Ok(())
+ }
+ 
++fn grant_critical_read_acls(
++    payload: &Payload,
++    artifact_roots: &[PathBuf],
++    sandbox_group_psid: *mut c_void,
++    log: &mut dyn Write,
++) -> Result<Vec<PathBuf>> {
++    let mut critical_roots = artifact_roots
++        .iter()
++        .map(dunce::canonicalize)
++        .collect::<std::io::Result<Vec<_>>>()?;
++    for root in &payload.critical_read_roots {
++        let physical = dunce::canonicalize(root)
++            .with_context(|| format!("resolve critical read root {}", root.display()))?;
++        anyhow::ensure!(
++            payload.read_roots.iter().any(|allowed| {
++                dunce::canonicalize(allowed).is_ok_and(|allowed| allowed == physical)
++            }),
++            "critical read root is outside the authorized payload"
++        );
++        if !critical_roots.contains(&physical) {
++            critical_roots.push(physical);
++        }
++    }
++    for root in &critical_roots {
++        let inheritance = if root.is_dir() {
++            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
++        } else {
++            0
++        };
++        unsafe { crate::acl::grant_read_execute_aces(root, &[sandbox_group_psid], inheritance) }
++            .with_context(|| format!("apply critical read ACL to {}", root.display()))?;
++        anyhow::ensure!(
++            path_mask_allows(
++                root,
++                &[sandbox_group_psid],
++                FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
++                true,
++            )?,
++            "critical read root remains denied: {}",
++            root.display()
++        );
++        log_line(log, &format!("critical read ACL ready: {}", root.display()))?;
++    }
++    Ok(critical_roots)
++}
++
+ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Result<()> {
+     let refresh_only = payload.refresh_only;
+     if !refresh_only {
+@@ -980,16 +1028,8 @@
+         },
+         |message| log_note(message, Some(sbx_dir)),
+     );
+-    for root in &artifact_roots {
+-        unsafe {
+-            crate::acl::grant_read_execute_aces(
+-                root,
+-                &[sandbox_group_psid],
+-                OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+-            )
+-        }
+-        .context("apply authorized artifact read ACL")?;
+-    }
++    let critical_roots =
++        grant_critical_read_acls(payload, &artifact_roots, sandbox_group_psid, log)?;
+ 
+     if let Some(user_profile) = payload.user_profile.as_deref()
+         && user_profile.is_absolute()
+@@ -1038,9 +1078,9 @@
+     // Do not let the generic background SET_ACCESS path rewrite these narrower
+     // GRANT_ACCESS entries or their existing deny ACEs after synchronous admission.
+     let mut background_payload = payload.clone();
+-    background_payload.read_roots.retain(|root| {
+-        !std::fs::canonicalize(root).is_ok_and(|path| artifact_roots.contains(&path))
+-    });
++    background_payload
++        .read_roots
++        .retain(|root| !dunce::canonicalize(root).is_ok_and(|path| critical_roots.contains(&path)));
+     if background_payload.read_roots.is_empty() {
+         log_line(
+             log,
+@@ -1576,8 +1616,11 @@
+ 
+ #[cfg(test)]
+ mod home_metadata_tests {
++    use super::tests::payload_json;
+     use super::*;
+     use crate::LocalSid;
++    use serde_json::json;
++    use std::fs;
+     use windows_sys::Win32::Security::{ACE_HEADER, GetAce};
+     use windows_sys::Win32::Storage::FileSystem::FILE_LIST_DIRECTORY;
+ 
+@@ -1640,4 +1683,68 @@
+         assert!(ensure_codex_home_metadata(home.path(), sid.as_ptr()).is_err());
+         assert_eq!(acl_entries(home.path()), before);
+     }
+-}
++    #[test]
++    fn critical_read_leaf_gets_rx_without_write_or_sibling_access() {
++        let temp = tempfile::tempdir().expect("tempdir");
++        let leaf = temp.path().join("explicit-input.txt");
++        let sibling = temp.path().join("private-sibling.txt");
++        fs::write(&leaf, "allowed").unwrap();
++        fs::write(&sibling, "private").unwrap();
++        let sid = crate::workspace_write_cap_sid_for_root(temp.path(), temp.path(), &leaf).unwrap();
++        let psid = unsafe { convert_string_sid_to_sid(&sid).unwrap() };
++        let mut value = payload_json();
++        value["read_roots"] = json!([leaf]);
++        value["critical_read_roots"] = json!([leaf]);
++        let payload: Payload = serde_json::from_value(value).unwrap();
++        let result = super::grant_critical_read_acls(&payload, &[], psid, &mut Vec::new());
++        let mask = super::FILE_GENERIC_READ | super::FILE_GENERIC_EXECUTE;
++        let read = path_mask_allows(&leaf, &[psid], mask, true).unwrap();
++        let write = path_mask_allows(
++            &leaf,
++            &[psid],
++            windows_sys::Win32::Storage::FileSystem::FILE_WRITE_DATA
++                | windows_sys::Win32::Storage::FileSystem::FILE_APPEND_DATA
++                | super::DELETE
++                | super::WRITE_DAC,
++            false,
++        )
++        .unwrap();
++        let sibling_read = path_mask_allows(
++            &sibling,
++            &[psid],
++            windows_sys::Win32::Storage::FileSystem::FILE_READ_DATA,
++            false,
++        )
++        .unwrap();
++        unsafe {
++            LocalFree(psid as HLOCAL);
++        }
++        result.expect("critical read ACL");
++        assert!(read);
++        assert!(!write && !sibling_read);
++    }
++
++    #[test]
++    fn critical_read_outside_final_payload_is_rejected_before_grant() {
++        let temp = tempfile::tempdir().unwrap();
++        let leaf = temp.path().join("unapproved.txt");
++        fs::write(&leaf, "private").unwrap();
++        let sid = crate::workspace_write_cap_sid_for_root(temp.path(), temp.path(), &leaf).unwrap();
++        let psid = unsafe { convert_string_sid_to_sid(&sid).unwrap() };
++        let mut value = payload_json();
++        value["critical_read_roots"] = json!([leaf]);
++        let payload: Payload = serde_json::from_value(value).unwrap();
++        let result = super::grant_critical_read_acls(&payload, &[], psid, &mut Vec::new());
++        let read = path_mask_allows(&leaf, &[psid], super::FILE_GENERIC_READ, false).unwrap();
++        unsafe {
++            LocalFree(psid as HLOCAL);
++        }
++        assert!(
++            result
++                .unwrap_err()
++                .to_string()
++                .contains("outside the authorized payload")
++        );
++        assert!(!read);
++    }
++}
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning/acl_tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning/acl_tests.rs
+@@ -125,6 +125,7 @@
+             codex_home: workspace.clone(),
+             command_cwd: workspace.clone(),
+             read_roots: Vec::new(),
++            critical_read_roots: Vec::new(),
+             write_roots: Vec::new(),
+             deny_read_paths: Vec::new(),
+             deny_write_paths: Vec::new(),
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning/service.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning/service.rs
+@@ -27,6 +27,7 @@
+         codex_home: codex_home.to_path_buf(),
+         command_cwd: codex_home.to_path_buf(),
+         read_roots: Vec::new(),
++        critical_read_roots: Vec::new(),
+         write_roots: Vec::new(),
+         deny_read_paths: Vec::new(),
+         deny_write_paths: Vec::new(),

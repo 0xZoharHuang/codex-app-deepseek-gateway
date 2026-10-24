@@ -1,0 +1,105 @@
+{
+  "fixture_record": true,
+  "qualification": "inventory for testing; all actual App observations belong in independent receipts",
+  "capabilities": [
+    {
+      "id": "web-navigation",
+      "family": "web",
+      "mechanisms": [
+        "search_query",
+        "open",
+        "find",
+        "click"
+      ],
+      "source_urls": [
+        "https://learn.chatgpt.com/docs/enterprise/connect-to-a-gateway",
+        "https://learn.chatgpt.com/docs/enterprise/gateway-compatibility"
+      ],
+      "runtime_owner": "native standalone web tool dispatch"
+    },
+    {
+      "id": "web-media",
+      "family": "web",
+      "mechanisms": [
+        "image_query",
+        "screenshot"
+      ],
+      "source_urls": [
+        "https://openrouter.ai/docs/guides/features/server-side-tools"
+      ],
+      "runtime_owner": "native standalone web tool dispatch",
+      "external_data_note": "Search indices and provider data contracts must be distinguished from dispatch behavior."
+    },
+    {
+      "id": "mcp-extensions",
+      "family": "extensions",
+      "mechanisms": [
+        "tools/list",
+        "tools/call",
+        "resources/list",
+        "resources/templates/list",
+        "resources/read"
+      ],
+      "source_urls": [
+        "https://modelcontextprotocol.io/specification/latest/server/tools",
+        "https://modelcontextprotocol.io/specification/latest/server/resources"
+      ],
+      "runtime_owner": "native MCP client"
+    },
+    {
+      "id": "skills-plugins",
+      "family": "extensions",
+      "mechanisms": [
+        "project skill discovery",
+        "local plugin discovery"
+      ],
+      "source_urls": [
+        "https://learn.chatgpt.com/docs/build-skills",
+        "https://developers.openai.com/plugins/build/plugins"
+      ],
+      "runtime_owner": "native skill and plugin loaders"
+    },
+    {
+      "id": "windows-permissions",
+      "family": "permissions",
+      "mechanisms": [
+        "workspace-write",
+        "approval",
+        "network policy"
+      ],
+      "source_urls": [
+        "https://learn.chatgpt.com/docs/windows/windows-sandbox",
+        "https://learn.chatgpt.com/docs/enterprise/windows-deployment"
+      ],
+      "runtime_owner": "native permissions and Windows sandbox"
+    },
+    {
+      "id": "native-agents",
+      "family": "agents",
+      "mechanisms": [
+        "spawn",
+        "wait",
+        "follow-up",
+        "interrupt",
+        "close"
+      ],
+      "source_urls": [
+        "https://developers.openai.com/codex/multi-agent"
+      ],
+      "runtime_owner": "native agent threads"
+    },
+    {
+      "id": "responses-stream",
+      "family": "protocol",
+      "mechanisms": [
+        "SSE",
+        "tool call identifiers",
+        "terminal failures"
+      ],
+      "source_urls": [
+        "https://learn.chatgpt.com/docs/enterprise/gateway-compatibility"
+      ],
+      "runtime_owner": "native responses client and protocol gateway"
+    }
+  ]
+}

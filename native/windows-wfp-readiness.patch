@@ -1,0 +1,631 @@
+diff --git a/codex-rs/windows-sandbox-rs/src/identity.rs b/codex-rs/windows-sandbox-rs/src/identity.rs
+--- a/codex-rs/windows-sandbox-rs/src/identity.rs
++++ b/codex-rs/windows-sandbox-rs/src/identity.rs
+@@ -321,12 +321,50 @@
+     request: &SandboxSetupRequest<'_>,
+     proxy_settings_mode: crate::WindowsSandboxProxySettingsMode,
+ ) -> Result<(SandboxCreds, OfflineProxySettings)> {
+-    require_sandbox_account_with_setup(
++    let mut ready = require_sandbox_account_with_setup(
+         request,
+         proxy_settings_mode,
+         run_automatic_setup,
+         local_user_flags,
+-    )
++    )?;
++    if SandboxNetworkIdentity::from_permissions(request.permissions, request.proxy_enforced)
++        .uses_offline_identity()
++    {
++        let namespace = crate::namespace::SandboxNamespace::current(request.codex_home)?;
++        // Read actual kernel policy on every new offline execution, including cold resume.
++        // Do not trust a persistent marker after BFE restarted or a rule disappeared.
++        let repaired = crate::wfp::ensure_network_policy_ready(
++            &namespace.key,
++            &ready.1.proxy_ports,
++            ready.1.allow_local_binding,
++            || {
++                crate::logging::log_note(
++                    "sandbox setup required: WFP policy missing or disabled",
++                    Some(&crate::setup::sandbox_dir(request.codex_home)),
++                );
++                run_automatic_setup(
++                    SandboxSetupRequest {
++                        permissions: request.permissions,
++                        command_cwd: request.command_cwd,
++                        env_map: request.env_map,
++                        codex_home: request.codex_home,
++                        proxy_enforced: request.proxy_enforced,
++                    },
++                    &ready.1,
++                )
++            },
++        )?;
++        if repaired {
++            // Native setup may rotate this home's passwords; never return the stale pair.
++            ready = require_sandbox_account_with_setup(
++                request,
++                proxy_settings_mode,
++                run_automatic_setup,
++                local_user_flags,
++            )?;
++        }
++    }
++    Ok(ready)
+ }
+ 
+ fn require_sandbox_account_with_setup(
+diff --git a/codex-rs/windows-sandbox-rs/src/setup.rs b/codex-rs/windows-sandbox-rs/src/setup.rs
+--- a/codex-rs/windows-sandbox-rs/src/setup.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup.rs
+@@ -49,8 +49,8 @@
+ use windows_sys::Win32::Security::FreeSid;
+ use windows_sys::Win32::Security::SECURITY_NT_AUTHORITY;
+ 
+-// Version 6 requires native WFP enforcement of the offline loopback policy.
+-pub const SETUP_VERSION: u32 = 6;
++// Version 7 adds owner-readable WFP state and an execution-time readiness gate.
++pub const SETUP_VERSION: u32 = 7;
+ pub const OFFLINE_USERNAME: &str = "CodexSandboxOffline";
+ pub const ONLINE_USERNAME: &str = "CodexSandboxOnline";
+ const ERROR_CANCELLED: u32 = 1223;
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+@@ -765,6 +765,7 @@
+         &payload.codex_home,
+         &payload.offline_username,
+         &namespace.key,
++        &namespace.owner_sid,
+         &payload.proxy_ports,
+         payload.allow_local_binding,
+         payload.otel.as_ref(),
+diff --git a/codex-rs/windows-sandbox-rs/src/wfp.rs b/codex-rs/windows-sandbox-rs/src/wfp.rs
+--- a/codex-rs/windows-sandbox-rs/src/wfp.rs
++++ b/codex-rs/windows-sandbox-rs/src/wfp.rs
+@@ -1,6 +1,9 @@
+ mod filter_specs;
+ mod loopback;
+ pub(crate) mod loopback_policy;
++mod object_security;
++mod readiness;
++pub(crate) use readiness::ensure_ready as ensure_network_policy_ready;
+ 
+ use crate::to_wide;
+ use anyhow::Result;
+@@ -37,6 +40,7 @@
+ use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_FILTER_FLAG_PERSISTENT;
+ use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_FILTER0;
+ use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_FILTER0_0;
++use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_PROVIDER_FLAG_DISABLED;
+ use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_PROVIDER_FLAG_PERSISTENT;
+ use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_PROVIDER0;
+ use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWPM_SESSION0;
+@@ -97,11 +101,19 @@
+ pub(crate) fn install_namespaced_wfp_filters_for_account(
+     account: &str,
+     namespace: &crate::namespace_key::NamespaceKey,
++    owner_sid: &str,
+     proxy_ports: &[u16],
+     allow_local_binding: bool,
+ ) -> Result<usize> {
+     let engine = Engine::open(INFINITE)?;
+     let mut transaction = engine.begin_transaction()?;
++    // BFE can retain a disabled provider after startup. Recreate only this validated
++    // namespace inside the existing policy transaction; never bind to another service.
++    if readiness::provider_flags(engine.handle, namespace)?
++        .is_some_and(|flags| flags & FWPM_PROVIDER_FLAG_DISABLED != 0)
++    {
++        remove_wfp_filters_in_engine(engine.handle, namespace)?;
++    }
+     ensure_provider(engine.handle, namespace)?;
+     ensure_sublayer(engine.handle, namespace)?;
+ 
+@@ -121,36 +133,83 @@
+         allow_local_binding,
+     )?;
+     transaction.commit()?;
++    // WFP forbids security updates inside transactions. Policy is already enforced;
++    // a failed read-ACE update still fails setup before its ready marker is committed.
++    use object_security::{ObjectKind, grant_owner_read};
++    grant_owner_read(
++        engine.handle,
++        namespaced_guid(namespace, PROVIDER_KEY),
++        owner_sid,
++        ObjectKind::Provider,
++    )?;
++    grant_owner_read(
++        engine.handle,
++        namespaced_guid(namespace, SUBLAYER_KEY),
++        owner_sid,
++        ObjectKind::Sublayer,
++    )?;
++    for spec in FILTER_SPECS {
++        grant_owner_read(
++            engine.handle,
++            namespaced_guid(namespace, spec.key),
++            owner_sid,
++            ObjectKind::Filter,
++        )?;
++    }
++    let rules = loopback_policy::rules(proxy_ports, allow_local_binding);
++    if !rules.is_empty() {
++        grant_owner_read(
++            engine.handle,
++            namespaced_guid(namespace, loopback::SUBLAYER_KEY),
++            owner_sid,
++            ObjectKind::Sublayer,
++        )?;
++    }
++    for rule in rules {
++        grant_owner_read(
++            engine.handle,
++            namespaced_guid(namespace, GUID::from_u128(rule.key())),
++            owner_sid,
++            ObjectKind::Filter,
++        )?;
++    }
++    anyhow::ensure!(
++        readiness::ready_in_engine(engine.handle, namespace, proxy_ports, allow_local_binding)?,
++        "Windows sandbox WFP policy is not active after setup"
++    );
+     Ok(installed_filter_count)
+ }
+ 
+ pub(crate) fn remove_wfp_filters(namespace: &crate::namespace_key::NamespaceKey) -> Result<()> {
+-    // Leave time for other cleanup if a WFP policy writer holds the transaction lock.
+-    let engine = Engine::open(/*transaction_wait_timeout_ms*/ 1_000)?;
++    let engine = Engine::open(1_000)?;
+     let mut transaction = engine.begin_transaction()?;
+-    loopback::remove(engine.handle, namespace)?;
++    remove_wfp_filters_in_engine(engine.handle, namespace)?;
++    transaction.commit()
++}
++
++fn remove_wfp_filters_in_engine(
++    engine: HANDLE,
++    namespace: &crate::namespace_key::NamespaceKey,
++) -> Result<()> {
++    loopback::remove(engine, namespace)?;
+     for spec in FILTER_SPECS {
+-        delete_filter_if_present(engine.handle, &namespaced_guid(namespace, spec.key))?;
++        delete_filter_if_present(engine, &namespaced_guid(namespace, spec.key))?;
+     }
+     for (result, operation, missing) in [
+         (
+-            unsafe {
+-                FwpmSubLayerDeleteByKey0(engine.handle, &namespaced_guid(namespace, SUBLAYER_KEY))
+-            },
++            unsafe { FwpmSubLayerDeleteByKey0(engine, &namespaced_guid(namespace, SUBLAYER_KEY)) },
+             "FwpmSubLayerDeleteByKey0",
+             FWP_E_SUBLAYER_NOT_FOUND as u32,
+         ),
+         (
+-            unsafe {
+-                FwpmProviderDeleteByKey0(engine.handle, &namespaced_guid(namespace, PROVIDER_KEY))
+-            },
++            unsafe { FwpmProviderDeleteByKey0(engine, &namespaced_guid(namespace, PROVIDER_KEY)) },
+             "FwpmProviderDeleteByKey0",
+             FWP_E_PROVIDER_NOT_FOUND as u32,
+         ),
+     ] {
+         ensure_success_or(result, operation, &[missing, FWP_E_NOT_FOUND as u32])?;
+     }
+-    transaction.commit()
++    Ok(())
+ }
+ 
+ /// Owns an open WFP engine handle and closes it on drop.
+diff --git a/codex-rs/windows-sandbox-rs/src/wfp_setup.rs b/codex-rs/windows-sandbox-rs/src/wfp_setup.rs
+--- a/codex-rs/windows-sandbox-rs/src/wfp_setup.rs
++++ b/codex-rs/windows-sandbox-rs/src/wfp_setup.rs
+@@ -143,6 +143,7 @@
+     codex_home: &Path,
+     offline_username: &str,
+     namespace: &crate::namespace_key::NamespaceKey,
++    owner_sid: &str,
+     proxy_ports: &[u16],
+     allow_local_binding: bool,
+     otel: Option<&StatsigMetricsSettings>,
+@@ -155,6 +156,7 @@
+         install_namespaced_wfp_filters_for_account(
+             offline_username,
+             namespace,
++            owner_sid,
+             proxy_ports,
+             allow_local_binding,
+         )
+diff --git a/codex-rs/windows-sandbox-rs/src/wfp/loopback.rs b/codex-rs/windows-sandbox-rs/src/wfp/loopback.rs
+--- a/codex-rs/windows-sandbox-rs/src/wfp/loopback.rs
++++ b/codex-rs/windows-sandbox-rs/src/wfp/loopback.rs
+@@ -35,7 +35,7 @@
+ };
+ use windows_sys::core::GUID;
+ 
+-const SUBLAYER_KEY: GUID = GUID::from_u128(0xd26d371d_8cef_4e6c_ae77_73b4677e0cac);
++pub(super) const SUBLAYER_KEY: GUID = GUID::from_u128(0xd26d371d_8cef_4e6c_ae77_73b4677e0cac);
+ 
+ fn same_guid(left: GUID, right: GUID) -> bool {
+     left.data1 == right.data1
+diff --git a/codex-rs/windows-sandbox-rs/src/wfp/readiness.rs b/codex-rs/windows-sandbox-rs/src/wfp/readiness.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/wfp/readiness.rs
+@@ -0,0 +1,227 @@
++//! Read-only execution preflight. A persistent marker is not proof BFE loaded an active policy.
++use super::{
++    Engine, FILTER_SPECS, PROVIDER_KEY, SUBLAYER_KEY, ensure_success, loopback, loopback_policy,
++    namespaced_guid,
++};
++use crate::namespace_key::NamespaceKey;
++use anyhow::Result;
++use std::ptr::null_mut;
++use windows_sys::Win32::Foundation::{
++    FWP_E_FILTER_NOT_FOUND, FWP_E_NOT_FOUND, FWP_E_PROVIDER_NOT_FOUND, HANDLE,
++};
++use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
++    FWP_ACTION_BLOCK, FWPM_FILTER_FLAG_DISABLED, FWPM_FILTER_FLAG_PERSISTENT, FWPM_FILTER0,
++    FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
++    FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
++    FWPM_PROVIDER_FLAG_DISABLED, FWPM_PROVIDER_FLAG_PERSISTENT, FWPM_PROVIDER0,
++    FwpmFilterGetByKey0, FwpmFreeMemory0, FwpmProviderGetByKey0,
++};
++use windows_sys::core::GUID;
++fn same_guid(a: GUID, b: GUID) -> bool {
++    a.data1 == b.data1 && a.data2 == b.data2 && a.data3 == b.data3 && a.data4 == b.data4
++}
++
++pub(super) fn provider_flags(engine: HANDLE, namespace: &NamespaceKey) -> Result<Option<u32>> {
++    let mut item: *mut FWPM_PROVIDER0 = null_mut();
++    let result = unsafe {
++        FwpmProviderGetByKey0(engine, &namespaced_guid(namespace, PROVIDER_KEY), &mut item)
++    };
++    if result == FWP_E_PROVIDER_NOT_FOUND as u32 || result == FWP_E_NOT_FOUND as u32 {
++        return Ok(None);
++    }
++    ensure_success(result, "query owned Windows sandbox WFP provider")?;
++    anyhow::ensure!(!item.is_null(), "WFP provider query returned no object");
++    let flags = unsafe { (*item).flags };
++    unsafe { FwpmFreeMemory0((&mut item as *mut *mut FWPM_PROVIDER0).cast()) };
++    Ok(Some(flags))
++}
++
++pub(crate) fn ready(
++    namespace: &NamespaceKey,
++    proxy_ports: &[u16],
++    allow_local_binding: bool,
++) -> Result<bool> {
++    let engine = Engine::open(1000)?;
++    ready_in_engine(engine.handle, namespace, proxy_ports, allow_local_binding)
++}
++
++/// Returns whether native setup ran. Any inspection or repair error prevents launch.
++pub(crate) fn ensure_ready(
++    namespace: &NamespaceKey,
++    proxy_ports: &[u16],
++    allow_local_binding: bool,
++    repair: impl FnOnce() -> Result<()>,
++) -> Result<bool> {
++    ensure_ready_with(
++        || ready(namespace, proxy_ports, allow_local_binding),
++        repair,
++    )
++}
++
++fn ensure_ready_with(
++    mut inspect: impl FnMut() -> Result<bool>,
++    repair: impl FnOnce() -> Result<()>,
++) -> Result<bool> {
++    if inspect()? {
++        return Ok(false);
++    }
++    repair()?;
++    anyhow::ensure!(
++        inspect()?,
++        "Windows sandbox WFP policy is still missing or disabled after setup"
++    );
++    Ok(true)
++}
++
++pub(super) fn ready_in_engine(
++    engine: HANDLE,
++    namespace: &NamespaceKey,
++    proxy_ports: &[u16],
++    allow_local_binding: bool,
++) -> Result<bool> {
++    let Some(flags) = provider_flags(engine, namespace)? else {
++        return Ok(false);
++    };
++    if !active_provider(flags) {
++        return Ok(false);
++    }
++    let provider = namespaced_guid(namespace, PROVIDER_KEY);
++    let mut expected = FILTER_SPECS
++        .iter()
++        .map(|spec| {
++            (
++                namespaced_guid(namespace, spec.key),
++                spec.layer_key,
++                namespaced_guid(namespace, SUBLAYER_KEY),
++            )
++        })
++        .collect::<Vec<_>>();
++    for rule in loopback_policy::rules(proxy_ports, allow_local_binding) {
++        let layer = match (rule.inbound, rule.ipv6) {
++            (false, false) => FWPM_LAYER_ALE_AUTH_CONNECT_V4,
++            (false, true) => FWPM_LAYER_ALE_AUTH_CONNECT_V6,
++            (true, false) => FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
++            (true, true) => FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
++        };
++        expected.push((
++            namespaced_guid(namespace, GUID::from_u128(rule.key())),
++            layer,
++            namespaced_guid(namespace, loopback::SUBLAYER_KEY),
++        ));
++    }
++    for (key, layer, sublayer) in expected {
++        let mut item: *mut FWPM_FILTER0 = null_mut();
++        let result = unsafe { FwpmFilterGetByKey0(engine, &key, &mut item) };
++        if result == FWP_E_FILTER_NOT_FOUND as u32 || result == FWP_E_NOT_FOUND as u32 {
++            return Ok(false);
++        }
++        ensure_success(result, "query owned Windows sandbox WFP filter")?;
++        anyhow::ensure!(!item.is_null(), "WFP filter query returned no object");
++        let valid = unsafe {
++            active_filter((*item).flags, (*item).action.r#type)
++                && same_guid((*item).filterKey, key)
++                && same_guid((*item).layerKey, layer)
++                && same_guid((*item).subLayerKey, sublayer)
++                && !(*item).providerKey.is_null()
++                && same_guid(*(*item).providerKey, provider)
++        };
++        unsafe { FwpmFreeMemory0((&mut item as *mut *mut FWPM_FILTER0).cast()) };
++        if !valid {
++            return Ok(false);
++        }
++    }
++    Ok(true)
++}
++fn active_provider(flags: u32) -> bool {
++    flags & FWPM_PROVIDER_FLAG_PERSISTENT != 0 && flags & FWPM_PROVIDER_FLAG_DISABLED == 0
++}
++
++fn active_filter(flags: u32, action: u32) -> bool {
++    flags & FWPM_FILTER_FLAG_PERSISTENT != 0
++        && flags & FWPM_FILTER_FLAG_DISABLED == 0
++        && action == FWP_ACTION_BLOCK
++}
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn persistent_disabled_or_volatile_provider_is_not_ready() {
++        assert!(active_provider(FWPM_PROVIDER_FLAG_PERSISTENT));
++        assert!(!active_provider(
++            FWPM_PROVIDER_FLAG_PERSISTENT | FWPM_PROVIDER_FLAG_DISABLED
++        ));
++        assert!(!active_provider(0));
++    }
++    #[test]
++    fn healthy_policy_does_not_run_setup() {
++        assert!(!ensure_ready_with(|| Ok(true), || panic!("unexpected setup")).unwrap());
++    }
++    #[test]
++    fn missing_policy_is_repaired_and_rechecked() {
++        let mut checks = 0;
++        let mut repairs = 0;
++        assert!(
++            ensure_ready_with(
++                || {
++                    checks += 1;
++                    Ok(checks == 2)
++                },
++                || {
++                    repairs += 1;
++                    Ok(())
++                }
++            )
++            .unwrap()
++        );
++        assert_eq!((checks, repairs), (2, 1));
++    }
++    #[test]
++    fn read_access_error_fails_closed_without_setup() {
++        let result = ensure_ready_with(
++            || anyhow::bail!("access denied"),
++            || panic!("unexpected setup"),
++        );
++        assert_eq!(result.unwrap_err().to_string(), "access denied");
++    }
++    #[test]
++    fn failed_repair_does_not_recheck_or_succeed() {
++        let mut checks = 0;
++        let result = ensure_ready_with(
++            || {
++                checks += 1;
++                Ok(false)
++            },
++            || anyhow::bail!("setup failed"),
++        );
++        assert_eq!(result.unwrap_err().to_string(), "setup failed");
++        assert_eq!(checks, 1);
++    }
++    #[test]
++    fn policy_still_missing_after_repair_fails_closed() {
++        let mut checks = 0;
++        let result = ensure_ready_with(
++            || {
++                checks += 1;
++                Ok(false)
++            },
++            || Ok(()),
++        );
++        assert!(
++            result
++                .unwrap_err()
++                .to_string()
++                .contains("still missing or disabled")
++        );
++        assert_eq!(checks, 2);
++    }
++    #[test]
++    fn a_persistent_disabled_filter_is_not_ready() {
++        assert!(active_filter(FWPM_FILTER_FLAG_PERSISTENT, FWP_ACTION_BLOCK));
++        assert!(!active_filter(
++            FWPM_FILTER_FLAG_PERSISTENT | FWPM_FILTER_FLAG_DISABLED,
++            FWP_ACTION_BLOCK
++        ));
++        assert!(!active_filter(0, FWP_ACTION_BLOCK));
++        assert!(!active_filter(FWPM_FILTER_FLAG_PERSISTENT, 0));
++    }
++}
+diff --git a/codex-rs/windows-sandbox-rs/src/wfp/object_security.rs b/codex-rs/windows-sandbox-rs/src/wfp/object_security.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/wfp/object_security.rs
+@@ -0,0 +1,146 @@
++//! Allow only the namespace owner to inspect its WFP state without elevation.
++//! Preserve the existing privileged owner and every existing ACE; no engine ACL changes.
++use super::ensure_success;
++use crate::to_wide;
++use anyhow::Result;
++use std::ffi::OsStr;
++use std::ptr::null_mut;
++use windows_sys::Win32::Foundation::{GetLastError, HANDLE, HLOCAL, LocalFree};
++use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::{
++    FWPM_ACTRL_READ, FwpmFilterGetSecurityInfoByKey0, FwpmFilterSetSecurityInfoByKey0,
++    FwpmFreeMemory0, FwpmProviderGetSecurityInfoByKey0, FwpmProviderSetSecurityInfoByKey0,
++    FwpmSubLayerGetSecurityInfoByKey0, FwpmSubLayerSetSecurityInfoByKey0,
++};
++use windows_sys::Win32::Security::Authorization::{
++    ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, SetEntriesInAclW, TRUSTEE_IS_SID,
++    TRUSTEE_IS_USER, TRUSTEE_W,
++};
++use windows_sys::Win32::Security::{ACL, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID};
++use windows_sys::core::GUID;
++
++pub(super) enum ObjectKind {
++    Provider,
++    Sublayer,
++    Filter,
++}
++
++// Security changes are forbidden inside WFP transactions. Call only after the policy
++// transaction commits and before the setup helper commits its ready marker.
++pub(super) fn grant_owner_read(
++    engine: HANDLE,
++    key: GUID,
++    owner_sid: &str,
++    kind: ObjectKind,
++) -> Result<()> {
++    let mut sid: PSID = null_mut();
++    let name = to_wide(OsStr::new(owner_sid));
++    if unsafe { ConvertStringSidToSidW(name.as_ptr(), &mut sid) } == 0 {
++        return ensure_success(
++            unsafe { GetLastError() },
++            "resolve WFP namespace reader SID",
++        );
++    }
++    let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
++    let mut old_acl: *mut ACL = null_mut();
++    let mut new_acl: *mut ACL = null_mut();
++    let result = (|| {
++        let status = unsafe {
++            match kind {
++                ObjectKind::Provider => FwpmProviderGetSecurityInfoByKey0(
++                    engine,
++                    &key,
++                    DACL_SECURITY_INFORMATION,
++                    null_mut(),
++                    null_mut(),
++                    &mut old_acl,
++                    null_mut(),
++                    &mut descriptor,
++                ),
++                ObjectKind::Sublayer => FwpmSubLayerGetSecurityInfoByKey0(
++                    engine,
++                    &key,
++                    DACL_SECURITY_INFORMATION,
++                    null_mut(),
++                    null_mut(),
++                    &mut old_acl,
++                    null_mut(),
++                    &mut descriptor,
++                ),
++                ObjectKind::Filter => FwpmFilterGetSecurityInfoByKey0(
++                    engine,
++                    &key,
++                    DACL_SECURITY_INFORMATION,
++                    null_mut(),
++                    null_mut(),
++                    &mut old_acl,
++                    null_mut(),
++                    &mut descriptor,
++                ),
++            }
++        };
++        ensure_success(status, "read owned WFP object security")?;
++        anyhow::ensure!(!old_acl.is_null(), "owned WFP object has a null DACL");
++        let entry = EXPLICIT_ACCESS_W {
++            // READ_CONTROL plus FWPM_ACTRL_READ only: no write, delete, or owner change.
++            grfAccessPermissions: 0x0002_0000 | FWPM_ACTRL_READ,
++            grfAccessMode: GRANT_ACCESS,
++            grfInheritance: 0,
++            Trustee: TRUSTEE_W {
++                pMultipleTrustee: null_mut(),
++                MultipleTrusteeOperation: 0,
++                TrusteeForm: TRUSTEE_IS_SID,
++                TrusteeType: TRUSTEE_IS_USER,
++                ptstrName: sid as *mut u16,
++            },
++        };
++        ensure_success(
++            unsafe { SetEntriesInAclW(1, &entry, old_acl, &mut new_acl) },
++            "merge owned WFP read ACE",
++        )?;
++        let status = unsafe {
++            match kind {
++                ObjectKind::Provider => FwpmProviderSetSecurityInfoByKey0(
++                    engine,
++                    &key,
++                    DACL_SECURITY_INFORMATION,
++                    null_mut(),
++                    null_mut(),
++                    new_acl,
++                    null_mut(),
++                ),
++                ObjectKind::Sublayer => FwpmSubLayerSetSecurityInfoByKey0(
++                    engine,
++                    &key,
++                    DACL_SECURITY_INFORMATION,
++                    null_mut(),
++                    null_mut(),
++                    new_acl,
++                    null_mut(),
++                ),
++                ObjectKind::Filter => FwpmFilterSetSecurityInfoByKey0(
++                    engine,
++                    &key,
++                    DACL_SECURITY_INFORMATION,
++                    null_mut(),
++                    null_mut(),
++                    new_acl,
++                    null_mut(),
++                ),
++            }
++        };
++        ensure_success(
++            status,
++            "grant namespace owner read access to owned WFP object",
++        )
++    })();
++    unsafe {
++        if !new_acl.is_null() {
++            LocalFree(new_acl as HLOCAL);
++        }
++        if !descriptor.is_null() {
++            FwpmFreeMemory0(&mut descriptor);
++        }
++        LocalFree(sid as HLOCAL);
++    }
++    result
++}

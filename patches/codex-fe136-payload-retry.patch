@@ -1,0 +1,71 @@
+--- a/codex-rs/protocol/src/error.rs
++++ b/codex-rs/protocol/src/error.rs
+@@ -438,6 +438,14 @@
+             CodexErrorDetails::ServerOverloaded | CodexErrorDetails::RetryLimit(_) => {
+                 self.server_retry_delay()
+             }
++            // A body-size rejection is permanent for an unchanged request unless
++            // the server explicitly advises retrying (RFC 9110 section 15.5.14).
++            // Keep the original HTTP error; this is not a model context overflow.
++            CodexErrorDetails::UnexpectedStatus(error)
++                if error.status == http::StatusCode::PAYLOAD_TOO_LARGE =>
++            {
++                self.server_retry_delay()
++            }
+             CodexErrorDetails::Stream(..)
+             | CodexErrorDetails::ContentFilter
+             | CodexErrorDetails::RateLimitExceeded(_)
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -371,7 +371,18 @@
+             Err(e) => {
+                 if retries < max_retries {
+                     retries += 1;
+-                    let delay = backoff(retries);
++                    let delay = if matches!(
++                        e.details(),
++                        CodexErrorDetails::UnexpectedStatus(error)
++                            if error.status == http::StatusCode::PAYLOAD_TOO_LARGE
++                    ) {
++                        let Some(delay) = e.retry_delay(retries) else {
++                            return Err(e);
++                        };
++                        delay
++                    } else {
++                        backoff(retries)
++                    };
+                     sess.notify_stream_error(
+                         turn_context.as_ref(),
+                         format!("Reconnecting... {retries}/{max_retries}"),
+--- a/codex-rs/protocol/src/error_tests.rs
++++ b/codex-rs/protocol/src/error_tests.rs
+@@ -755,3 +755,29 @@
+         assert_eq!(err.to_string(), expected);
+     });
+ }
++
++
++#[tokio::test(start_paused = true)]
++async fn payload_too_large_requires_explicit_server_retry_advice() {
++    let error = CodexErr::UnexpectedStatus(UnexpectedResponseError {
++        status: StatusCode::PAYLOAD_TOO_LARGE,
++        body: "<html>Request Entity Too Large</html>".to_string(),
++        user_message: None,
++        url: None,
++        cf_ray: None,
++        request_id: None,
++        identity_authorization_error: None,
++        identity_error_code: None,
++    });
++    assert_eq!(error.retry_delay(1), None);
++    assert_eq!(error.retry_delay(5), None);
++    assert_eq!(error.http_status_code_value(), Some(413));
++    assert!(matches!(error.details(), CodexErrorDetails::UnexpectedStatus(_)));
++
++    let delay = Duration::from_secs(3);
++    let advice = RetryAfter::from_delay(delay).expect("retry deadline");
++    let transient = error.with_retry_after(advice);
++    assert_eq!(transient.retry_delay(1), Some(delay));
++    assert_eq!(transient.retry_delay(5), Some(delay));
++    assert!(matches!(transient.details(), CodexErrorDetails::UnexpectedStatus(_)));
++}

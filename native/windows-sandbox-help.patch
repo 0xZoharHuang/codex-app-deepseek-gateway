@@ -1,0 +1,17 @@
+--- a/codex-rs/cli/src/sandbox_uninstall.rs
++++ b/codex-rs/cli/src/sandbox_uninstall.rs
+@@ -1,11 +1,11 @@
+-//! Uninstalls the legacy Windows sandbox without loading config or removing user data.
++//! Uninstalls this isolated home's Windows sandbox without removing user data.
+ 
+ use clap::Args;
+ 
+ #[derive(Debug, Args)]
+ #[command(
+-    about = "Remove the legacy Windows sandbox's machine-wide accounts and network rules",
+-    after_help = "Run as administrator after stopping apps using the legacy sandbox and its provisioning service, if installed.\nPreserves Codex home, including sandbox directories and filesystem permissions."
++    about = "Remove this isolated Codex home's Windows sandbox accounts and network rules",
++    after_help = "Run as administrator with the intended CODEX_HOME after stopping work in that home.\nRequires matching namespace ownership and preserves Codex home, including sandbox directories and filesystem permissions.\nLegacy shared sandbox resources require separate maintenance and are not removed by this command."
+ )]
+ pub(crate) struct SandboxUninstallCommand {}
+ 

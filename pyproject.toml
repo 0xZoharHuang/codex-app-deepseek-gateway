@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools==84.2.0", "wheel==0.48.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-app-deepseek-gateway"
+version = "0.1.0.dev0"
+description = "A protocol gateway for the official Codex desktop application and DeepSeek"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "licenses/*"]
+requires-python = ">=3.11"
+dependencies = ["codex-deepseek-runtime @ https://github.com/0xZoharHuang/codex-deepseek-runtime/archive/83056e7cf320461c30a609e911f3bcf0bea41be0.zip#sha256=7ed67dbcb59d3d80e821e509d2204cec5ce93fcf8e76b606ee889448985af1e1", "aiohttp==3.13.2", "tomlkit==0.15.2", "truststore==0.10.5", "psutil==7.2.2", "beautifulsoup4==4.15.0", "pypdfium2==5.14.0", "Pillow==13.0.0"]
+
+[project.optional-dependencies]
+test = ["pytest==9.0.2", "pytest-asyncio==1.3.0", "mcp==2.3.0", "PyYAML==6.0.3"]
+windows-qa = ["pywinauto==0.6.9; sys_platform == 'win32'", "pywin32==312; sys_platform == 'win32'", "comtypes==1.4.17; sys_platform == 'win32'"]
+
+[project.scripts]
+codex-app-deepseek = "codex_app_deepseek.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+codex_app_deepseek = ["assets/*.json", "assets/*.ps1"]

@@ -1,0 +1,341 @@
+--- a/codex-rs/rmcp-client/src/oauth.rs
++++ b/codex-rs/rmcp-client/src/oauth.rs
+@@ -97,7 +97,18 @@
+ use self::resolved_store::try_resolve_oauth_tokens_from_store_policy;
+ pub(crate) use self::runtime::OAuthRuntime;
+ 
+-const KEYRING_SERVICE: &str = "Codex MCP Credentials";
++// This private runtime never borrows or migrates the default App MCP keyring service.
++const KEYRING_SERVICE: &str = "Codex App DeepSeek MCP Credentials";
++
++fn keyring_service_name() -> Result<String> {
++    let home = find_codex_home()?.canonicalize()?;
++    anyhow::ensure!(
++        home.is_dir(),
++        "isolated MCP keyring home is not a directory"
++    );
++    let digest = format!("{:x}", Sha256::digest(home.to_string_lossy().as_bytes()));
++    Ok(format!("{KEYRING_SERVICE}|{}", &digest[..32]))
++}
+ const MCP_OAUTH_SECRET_PREFIX: &str = "MCP_OAUTH";
+ const REFRESH_SKEW_MILLIS: u64 = 30_000;
+ 
+@@ -400,7 +411,7 @@
+     url: &str,
+ ) -> Result<Option<StoredOAuthTokens>> {
+     let key = compute_store_key(server_name, url)?;
+-    match keyring_store.load(KEYRING_SERVICE, &key) {
++    match keyring_store.load(&keyring_service_name()?, &key) {
+         Ok(Some(serialized)) => {
+             let mut tokens: StoredOAuthTokens = serde_json::from_str(&serialized)
+                 .context("failed to deserialize OAuth tokens from keyring")?;
+@@ -536,7 +547,7 @@
+ 
+     let key = compute_store_key(server_name, &tokens.url)?;
+     keyring_store
+-        .save(KEYRING_SERVICE, &key, &serialized)
++        .save(&keyring_service_name()?, &key, &serialized)
+         .map_err(std::io::Error::from)
+         .context("failed to write OAuth tokens to keyring")
+ }
+@@ -722,7 +733,7 @@
+ ) -> Result<bool> {
+     let key = compute_store_key(server_name, url)?;
+     keyring_store
+-        .delete(KEYRING_SERVICE, &key)
++        .delete(&keyring_service_name()?, &key)
+         .map_err(|error| Error::new(std::io::Error::from(error)))
+ }
+ 
+@@ -1196,6 +1207,8 @@
+     use std::sync::Arc;
+     #[path = "credential_store_tests.rs"]
+     mod credential_store_tests;
++    #[path = "keyring_isolation_tests.rs"]
++    mod keyring_isolation_tests;
+     #[path = "persistor_tests.rs"]
+     mod persistor_tests;
+     #[path = "telemetry_tests.rs"]
+--- /dev/null
++++ b/codex-rs/rmcp-client/src/oauth/tests/keyring_isolation_tests.rs
+@@ -0,0 +1,280 @@
++//! In-memory fixture keys include both service and account; no OS vault is accessed.
++use super::*;
++use codex_keyring_store::CredentialStoreError;
++use codex_keyring_store::KeyringStore;
++use std::collections::HashMap;
++use std::sync::Mutex;
++use std::sync::PoisonError;
++
++const UNSCOPED_SERVICE: &str = "Codex MCP Credentials";
++
++#[derive(Clone, Default, Debug)]
++struct ScopedFixtureStore {
++    values: Arc<Mutex<HashMap<(String, String), String>>>,
++    services: Arc<Mutex<Vec<String>>>,
++}
++
++impl KeyringStore for ScopedFixtureStore {
++    fn load(
++        &self,
++        service: &str,
++        account: &str,
++    ) -> std::result::Result<Option<String>, CredentialStoreError> {
++        self.services
++            .lock()
++            .unwrap_or_else(PoisonError::into_inner)
++            .push(service.into());
++        Ok(self
++            .values
++            .lock()
++            .unwrap_or_else(PoisonError::into_inner)
++            .get(&(service.into(), account.into()))
++            .cloned())
++    }
++    fn save(
++        &self,
++        service: &str,
++        account: &str,
++        value: &str,
++    ) -> std::result::Result<(), CredentialStoreError> {
++        self.services
++            .lock()
++            .unwrap_or_else(PoisonError::into_inner)
++            .push(service.into());
++        self.values
++            .lock()
++            .unwrap_or_else(PoisonError::into_inner)
++            .insert((service.into(), account.into()), value.into());
++        Ok(())
++    }
++    fn delete(
++        &self,
++        service: &str,
++        account: &str,
++    ) -> std::result::Result<bool, CredentialStoreError> {
++        self.services
++            .lock()
++            .unwrap_or_else(PoisonError::into_inner)
++            .push(service.into());
++        Ok(self
++            .values
++            .lock()
++            .unwrap_or_else(PoisonError::into_inner)
++            .remove(&(service.into(), account.into()))
++            .is_some())
++    }
++}
++impl ScopedFixtureStore {
++    fn seed_default(&self, key: &str) {
++        self.values
++            .lock()
++            .unwrap_or_else(PoisonError::into_inner)
++            .insert(
++                (UNSCOPED_SERVICE.into(), key.into()),
++                "fixture-default".into(),
++            );
++    }
++    fn assert_default_untouched(&self, key: &str) {
++        std::assert_eq!(
++            self.values
++                .lock()
++                .unwrap_or_else(PoisonError::into_inner)
++                .get(&(UNSCOPED_SERVICE.into(), key.into()))
++                .map(String::as_str),
++            Some("fixture-default")
++        );
++        assert!(
++            self.services
++                .lock()
++                .unwrap_or_else(PoisonError::into_inner)
++                .iter()
++                .all(|service| service != UNSCOPED_SERVICE)
++        );
++    }
++}
++fn select_fixture_home(env: &TempCodexHome, name: &str) -> Result<PathBuf> {
++    let home = env.path().join(name);
++    fs::create_dir_all(&home)?;
++    // TempCodexHome owns the crate-wide CODEX_HOME mutation guard.
++    unsafe {
++        std::env::set_var("CODEX_HOME", &home);
++    }
++    Ok(home)
++}
++fn save_fixture_policy(
++    store: &ScopedFixtureStore,
++    mode: OAuthCredentialsStoreMode,
++    kind: AuthKeyringBackendKind,
++    tokens: &StoredOAuthTokens,
++) -> Result<()> {
++    match mode {
++        OAuthCredentialsStoreMode::File => save_oauth_tokens_to_file(tokens),
++        OAuthCredentialsStoreMode::Auto => save_oauth_tokens_with_keyring_with_fallback_to_file(
++            store,
++            kind,
++            &tokens.server_name,
++            tokens,
++        ),
++        OAuthCredentialsStoreMode::Keyring => save_oauth_tokens_with_keyring_and_cleanup_file(
++            store,
++            mode,
++            kind,
++            &tokens.server_name,
++            tokens,
++        ),
++    }
++}
++#[test]
++fn cdag_keyring_isolation_canonical_home_namespace() -> Result<()> {
++    let env = TempCodexHome::new();
++    let first = select_fixture_home(&env, "first")?;
++    let first_service = keyring_service_name()?;
++    select_fixture_home(&env, "second")?;
++    assert_ne!(first_service, keyring_service_name()?);
++    assert!(first_service.starts_with("Codex App DeepSeek MCP Credentials|"));
++    unsafe {
++        std::env::set_var("CODEX_HOME", first.join("..").join("first"));
++    }
++    std::assert_eq!(keyring_service_name()?, first_service);
++    Ok(())
++}
++#[test]
++fn cdag_keyring_isolation_same_identity_does_not_cross_homes() -> Result<()> {
++    let env = TempCodexHome::new();
++    let store = ScopedFixtureStore::default();
++    let first = sample_tokens();
++    let mut second = first.clone();
++    second
++        .token_response
++        .0
++        .set_access_token(AccessToken::new("fixture-second-home".into()));
++    let key = compute_store_key(&first.server_name, &first.url)?;
++    store.seed_default(&key);
++    select_fixture_home(&env, "first")?;
++    save_oauth_tokens_to_direct_keyring(&store, &first.server_name, &first)?;
++    select_fixture_home(&env, "second")?;
++    assert!(
++        load_oauth_tokens_from_direct_keyring(&store, &first.server_name, &first.url)?.is_none()
++    );
++    save_oauth_tokens_to_direct_keyring(&store, &second.server_name, &second)?;
++    assert_tokens_match_without_expiry(
++        &load_oauth_tokens_from_direct_keyring(&store, &second.server_name, &second.url)?
++            .expect("second token"),
++        &second,
++    );
++    delete_oauth_tokens_from_direct_keyring(&store, &second.server_name, &second.url)?;
++    select_fixture_home(&env, "first")?;
++    assert_tokens_match_without_expiry(
++        &load_oauth_tokens_from_direct_keyring(&store, &first.server_name, &first.url)?
++            .expect("first remains"),
++        &first,
++    );
++    store.assert_default_untouched(&key);
++    Ok(())
++}
++#[test]
++fn cdag_keyring_isolation_logout_preserves_other_home_for_all_store_modes() -> Result<()> {
++    let env = TempCodexHome::new();
++    let modes = [
++        OAuthCredentialsStoreMode::File,
++        OAuthCredentialsStoreMode::Auto,
++        OAuthCredentialsStoreMode::Keyring,
++    ];
++    let kinds = [
++        AuthKeyringBackendKind::Direct,
++        AuthKeyringBackendKind::Secrets,
++    ];
++    for (mi, mode) in modes.into_iter().enumerate() {
++        for (ki, kind) in kinds.into_iter().enumerate() {
++            let store = ScopedFixtureStore::default();
++            let first = sample_tokens();
++            let mut second = first.clone();
++            second
++                .token_response
++                .0
++                .set_access_token(AccessToken::new("fixture-second-home".into()));
++            let key = compute_store_key(&first.server_name, &first.url)?;
++            store.seed_default(&key);
++            let home_a = format!("first-{mi}-{ki}");
++            let home_b = format!("second-{mi}-{ki}");
++            select_fixture_home(&env, &home_a)?;
++            save_fixture_policy(&store, mode, kind, &first)?;
++            select_fixture_home(&env, &home_b)?;
++            assert!(
++                resolve_oauth_tokens_from_store_policy(
++                    &store,
++                    &first.server_name,
++                    &first.url,
++                    mode,
++                    kind
++                )?
++                .is_none()
++            );
++            save_fixture_policy(&store, mode, kind, &second)?;
++            // Exercise public logout cleanup, including Direct and File leftovers.
++            save_oauth_tokens_to_direct_keyring(&store, &second.server_name, &second)?;
++            save_oauth_tokens_to_file(&second)?;
++            assert!(delete_oauth_tokens_from_keyring_and_file(
++                &store,
++                mode,
++                kind,
++                &second.server_name,
++                &second.url
++            )?);
++            assert!(load_oauth_tokens_from_file(&second.server_name, &second.url)?.is_none());
++            assert!(
++                load_oauth_tokens_from_direct_keyring(&store, &second.server_name, &second.url)?
++                    .is_none()
++            );
++            if kind == AuthKeyringBackendKind::Secrets {
++                assert!(
++                    load_oauth_tokens_from_secrets_keyring(
++                        &store,
++                        &second.server_name,
++                        &second.url
++                    )?
++                    .is_none()
++                );
++            }
++            select_fixture_home(&env, &home_a)?;
++            let loaded = resolve_oauth_tokens_from_store_policy(
++                &store,
++                &first.server_name,
++                &first.url,
++                mode,
++                kind,
++            )?
++            .expect("first remains");
++            assert_tokens_match_without_expiry(&loaded.tokens, &first);
++            store.assert_default_untouched(&key);
++        }
++    }
++    Ok(())
++}
++#[test]
++fn cdag_keyring_isolation_invalid_home_never_falls_back_to_global_service() -> Result<()> {
++    let env = TempCodexHome::new();
++    let store = ScopedFixtureStore::default();
++    let tokens = sample_tokens();
++    let key = compute_store_key(&tokens.server_name, &tokens.url)?;
++    store.seed_default(&key);
++    unsafe {
++        std::env::set_var("CODEX_HOME", env.path().join("missing-home"));
++    }
++    assert!(
++        load_oauth_tokens_from_direct_keyring(&store, &tokens.server_name, &tokens.url).is_err()
++    );
++    assert!(save_oauth_tokens_to_direct_keyring(&store, &tokens.server_name, &tokens).is_err());
++    assert!(
++        delete_oauth_tokens_from_direct_keyring(&store, &tokens.server_name, &tokens.url).is_err()
++    );
++    assert!(
++        store
++            .services
++            .lock()
++            .unwrap_or_else(PoisonError::into_inner)
++            .is_empty()
++    );
++    store.assert_default_untouched(&key);
++    Ok(())
++}

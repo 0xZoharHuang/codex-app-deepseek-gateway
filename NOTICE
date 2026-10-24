@@ -1,0 +1,17 @@
+Codex App DeepSeek Gateway
+
+This repository contains an independent integration for the official Codex App.
+The integration code is distributed under the Apache License, Version 2.0.
+
+It depends on pure protocol modules from codex-deepseek-runtime at
+83056e7cf320461c30a609e911f3bcf0bea41be0 (Apache-2.0).
+
+The native patches modify OpenAI Codex source at
+680c4ba93ec79c292287fb9e0b627dc7a76e3b5e (Apache-2.0).
+Upstream LICENSE and NOTICE are retained in licenses/.
+Modified source identities and patch provenance are recorded in native/.
+
+The proprietary desktop App package is obtained separately from its official
+publisher; it is not included in this source repository or Python package.
+Additional binary dependencies require their corresponding license notices
+in any assembled native distribution.

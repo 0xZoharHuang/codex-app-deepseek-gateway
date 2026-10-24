@@ -1,0 +1,113 @@
+from __future__ import annotations
+import hashlib
+import json
+from pathlib import Path
+import pytest
+from codex_app_deepseek import gateway_policy as gp
+from codex_deepseek import protocol
+
+
+def test_versioned_app_default_covers_actual_pinned_prepare_routes(tmp_path):
+    assert gp.PINNED_MODEL == protocol.MODEL
+    assert set(gp.DEFAULT_PROVIDERS) == {protocol.PROVIDER, protocol.STRUCTURED_PROVIDER,
+                                        protocol.SERIAL_PROVIDER, protocol.PEER_HOSTED_PROVIDER}
+    tool = {"type": "function", "name": "fixture", "parameters": {"type": "object", "properties": {}}}
+    ordinary, _ = protocol.prepare({"model": protocol.MODEL, "input": "fixture"})
+    serial, _ = protocol.prepare({"model": protocol.MODEL, "input": "fixture", "tools": [tool],
+                                 "parallel_tool_calls": False})
+    schema, _ = protocol.prepare({"model": protocol.MODEL, "input": "fixture",
+                                 "text": {"format": {"type": "json_schema", "schema": {"type": "object"}}}})
+    assert {ordinary["provider"]["only"][0], serial["provider"]["only"][0],
+            schema["provider"]["only"][0]} == set(gp.DEFAULT_PROVIDERS)
+    config, receipt = gp.ensure_app_policy(tmp_path / "new")
+    assert receipt["status"] == "created_fixed_app_policy"
+    assert config.policy_origin["provider_reasons"]["primeintellect"] == "explicit_parallel_tool_calls_false"
+
+
+def test_config_snapshot_parses_and_hashes_same_single_read(tmp_path, monkeypatch):
+    home = tmp_path / "gateway"; home.mkdir()
+    path = home / "gateway.json"
+    old = b'{"accepted_models":["old"],"allowed_providers":["deepseek"]}\n'
+    new = b'{"accepted_models":["new"],"allowed_providers":["deepseek"]}\n'
+    path.write_bytes(old)
+    original = Path.read_bytes
+    reads = []
+    def changed_after_read(self):
+        raw = original(self)
+        if self == path:
+            reads.append(self); self.write_bytes(new)
+        return raw
+    monkeypatch.setattr(Path, "read_bytes", changed_after_read)
+    config = gp.load_service_config(home)
+    assert config.accepted_models == ("old",)
+    assert config.config_sha256 == hashlib.sha256(old).hexdigest()
+    assert reads == [path] and original(path) == new
+
+
+def test_existing_custom_policy_is_byte_preserved_with_extra_explicit_alias(tmp_path):
+    home = tmp_path / "gateway"; home.mkdir()
+    raw = json.dumps({"upstream_proxy": "http://127.0.0.1:3128",
+                      "accepted_models": ["explicit-helper", *reversed(gp.REQUEST_MODEL_IDS)],
+                      "allowed_providers": list(reversed(gp.DEFAULT_PROVIDERS))}, indent=4).encode()
+    path = home / "gateway.json"; path.write_bytes(raw)
+    config, info = gp.ensure_app_policy(home)
+    gp.require_app_policy(config, ["explicit-helper", *gp.REQUEST_MODEL_IDS])
+    assert path.read_bytes() == raw and info["status"] == "existing_policy_preserved"
+    assert config.policy_origin is None
+
+
+@pytest.mark.parametrize("field", ["accepted_models", "allowed_providers"])
+def test_existing_narrowed_policy_is_not_silently_expanded(tmp_path, field):
+    home = tmp_path / "gateway"; home.mkdir()
+    value = gp.default_app_policy(); value[field].pop()
+    raw = json.dumps(value).encode(); path = home / "gateway.json"; path.write_bytes(raw)
+    with pytest.raises(gp.ServiceConfigError):
+        gp.ensure_app_policy(home)
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.skipif(gp.os.name != "nt", reason="Windows no-replace atomic rename")
+def test_concurrent_custom_policy_wins_initialization_without_overwrite(tmp_path, monkeypatch):
+    home = tmp_path / "gateway"; home.mkdir()
+    winner = json.dumps({"accepted_models": list(reversed(gp.REQUEST_MODEL_IDS)),
+                         "allowed_providers": list(reversed(gp.DEFAULT_PROVIDERS))}).encode()
+    original = gp.os.rename
+    def competing_write(source, target):
+        Path(target).write_bytes(winner)
+        return original(source, target)
+    monkeypatch.setattr(gp.os, "rename", competing_write)
+    config, receipt = gp.ensure_app_policy(home)
+    assert (home / "gateway.json").read_bytes() == winner
+    assert receipt["status"] == "existing_policy_preserved" and config.policy_origin is None
+    assert sorted(x.name for x in home.iterdir()) == ["gateway.json"]
+
+
+@pytest.mark.parametrize("origin", [{"policy_id": "unknown"}, {}, False, "fixed"])
+def test_unknown_policy_origin_is_explicitly_rejected(tmp_path, origin):
+    home = tmp_path / "gateway"; home.mkdir()
+    value = gp.default_app_policy(); value["policy_origin"] = origin
+    (home / "gateway.json").write_text(json.dumps(value))
+    with pytest.raises(gp.ServiceConfigError, match="unrecognized policy_origin"):
+        gp.load_service_config(home)
+
+
+@pytest.mark.asyncio
+async def test_real_health_retains_startup_policy_fingerprint(tmp_path):
+    from aiohttp import web
+    from test_bridge import harness, HEADERS
+    calls = []
+    async def handler(request):
+        calls.append("unexpected upstream")
+        return web.json_response({})
+    raw = json.dumps(gp.default_app_policy()).encode()
+    policy = tmp_path / "gateway.json"; policy.write_bytes(raw)
+    config = gp.load_service_config(tmp_path)
+    async with harness(tmp_path, handler, settings={"config_sha256": config.config_sha256,
+                         "accepted_models": gp.REQUEST_MODEL_IDS}) as (client, state):
+        policy.write_bytes(raw + b" ")
+        response = await client.get("/healthz", headers=HEADERS)
+        health = await response.json()
+        assert health["config_sha256"] == hashlib.sha256(raw).hexdigest()
+        assert health["accepted_models"] == list(gp.REQUEST_MODEL_IDS)
+        assert set(health["allowed_providers"]) == set(gp.DEFAULT_PROVIDERS)
+        assert calls == [] and state.list_receipts() == []

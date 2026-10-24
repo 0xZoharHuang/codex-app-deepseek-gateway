@@ -1,0 +1,111 @@
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+@@ -914,6 +914,26 @@
+     Ok(())
+ }
+ 
++// PowerShell resolves every ancestor of its initial CWD, including the private
++// Codex home above the native junction. Only directory attributes are needed:
++// never grant listing, data access, or inheritance to sessions and secrets.
++fn ensure_codex_home_metadata(home: &Path, sandbox_group_psid: *mut c_void) -> Result<()> {
++    unsafe {
++        ensure_allow_mask_aces_with_inheritance(
++            home,
++            &[sandbox_group_psid],
++            FILE_READ_ATTRIBUTES,
++            /*inheritance*/ 0,
++        )
++    }
++    .context("grant Codex home directory metadata for native CWD resolution")?;
++    anyhow::ensure!(
++        path_mask_allows(home, &[sandbox_group_psid], FILE_READ_ATTRIBUTES, true)?,
++        "Codex home directory metadata remains denied; refusing native CWD fallback"
++    );
++    Ok(())
++}
++
+ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Result<()> {
+     let refresh_only = payload.refresh_only;
+     if !refresh_only {
+@@ -957,6 +977,8 @@
+             &format!("applied {} deny-read ACLs", applied_deny_read_paths.len()),
+         )?;
+     }
++
++    ensure_codex_home_metadata(&payload.codex_home, sandbox_group_psid)?;
+ 
+     // These pure artifacts are intentionally inside a private CODEX_HOME. Ensure
+     // their authorized read grants synchronously before the first workload reads
+@@ -1567,3 +1589,71 @@
+         assert_eq!(deny_sids, vec![workspace_sid, nested_sid]);
+     }
+ }
++
++#[cfg(test)]
++mod home_metadata_tests {
++    use super::*;
++    use crate::LocalSid;
++    use windows_sys::Win32::Security::{ACE_HEADER, GetAce};
++    use windows_sys::Win32::Storage::FileSystem::FILE_LIST_DIRECTORY;
++
++    fn acl_entries(path: &Path) -> Vec<Vec<u8>> {
++        unsafe {
++            let (acl, descriptor) = crate::fetch_dacl_handle(path).unwrap();
++            assert!(!acl.is_null());
++            let entries = (0..(*acl).AceCount as u32)
++                .map(|index| {
++                    let mut entry = std::ptr::null_mut();
++                    assert_ne!(GetAce(acl, index, &mut entry), 0);
++                    let size = (*(entry as *const ACE_HEADER)).AceSize as usize;
++                    std::slice::from_raw_parts(entry.cast::<u8>(), size).to_vec()
++                })
++                .collect();
++            LocalFree(descriptor as HLOCAL);
++            entries
++        }
++    }
++
++    #[test]
++    fn home_metadata_only_grants_attributes_without_listing_or_child_inheritance() {
++        let home = tempfile::tempdir().unwrap();
++        let sid = LocalSid::from_string("S-1-5-21-915763429-1123581321-271828182-4245").unwrap();
++        let children = [
++            home.path().join("private.txt"),
++            home.path().join("marker.json"),
++        ];
++        for child in &children {
++            std::fs::write(child, "synthetic private content").unwrap();
++        }
++        let before: Vec<_> = children.iter().map(|path| acl_entries(path)).collect();
++        ensure_codex_home_metadata(home.path(), sid.as_ptr()).unwrap();
++        assert!(
++            path_mask_allows(home.path(), &[sid.as_ptr()], FILE_READ_ATTRIBUTES, true).unwrap()
++        );
++        assert!(
++            !path_mask_allows(home.path(), &[sid.as_ptr()], FILE_LIST_DIRECTORY, true).unwrap()
++        );
++        for (child, original) in children.iter().zip(before) {
++            assert_eq!(acl_entries(child), original);
++            assert!(!path_mask_allows(child, &[sid.as_ptr()], FILE_GENERIC_READ, false).unwrap());
++        }
++        let entries = acl_entries(home.path());
++        assert!(entries.iter().any(|entry| entry[0] == 0
++            && entry[1] == 0
++            && u32::from_le_bytes(entry[4..8].try_into().unwrap()) == FILE_READ_ATTRIBUTES));
++        ensure_codex_home_metadata(home.path(), sid.as_ptr()).unwrap();
++        assert_eq!(acl_entries(home.path()), entries);
++    }
++
++    #[test]
++    fn home_metadata_preserves_existing_deny_and_fails_closed() {
++        let home = tempfile::tempdir().unwrap();
++        let sid = LocalSid::from_string("S-1-5-21-915763429-1123581321-271828182-4246").unwrap();
++        unsafe {
++            crate::add_deny_read_ace(home.path(), sid.as_ptr()).unwrap();
++        }
++        let before = acl_entries(home.path());
++        assert!(ensure_codex_home_metadata(home.path(), sid.as_ptr()).is_err());
++        assert_eq!(acl_entries(home.path()), before);
++    }
++}

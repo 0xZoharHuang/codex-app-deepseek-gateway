@@ -1,0 +1,12 @@
+{
+  "fixture_record": true,
+  "qualification": "frozen input; no App gate is declared passed",
+  "official_app": "26.1016.8120.0",
+  "official_native": "0.163.0-alpha.11.1",
+  "official_native_sha256": "e757246b4de87359e660647fa9514955a0971ff6a30affdd8c145d1d5ece7b84",
+  "native_source_commit": "680c4ba93ec79c292287fb9e0b627dc7a76e3b5e",
+  "requested_model": "deepseek/deepseek-v4.1-flash-1017",
+  "protocol_dependency_commit": "83056e7cf320461c30a609e911f3bcf0bea41be0",
+  "host_baseline": "Windows 10 Pro 19045",
+  "custom_runtime_note": "Private runtime artifact and loaded-process hashes must be observed separately."
+}

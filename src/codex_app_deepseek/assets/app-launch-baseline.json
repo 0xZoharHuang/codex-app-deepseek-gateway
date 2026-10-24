@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "package_name": "OpenAI.Codex",
+  "package_full_name": "OpenAI.Codex_26.1016.8120.0_x64__2p2nqsd0c76g0",
+  "package_family_name": "OpenAI.Codex_2p2nqsd0c76g0",
+  "version": "26.1016.8120.0",
+  "publisher": "CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B",
+  "app_id": "App",
+  "executable": "app/ChatGPT.exe",
+  "executable_signer_thumbprint": "0A627748F8DBEA79279DB3B4A0F19618B7789E41",
+  "required_signature_kind": "Store",
+  "files": {
+    "app/ChatGPT.exe": "976b90e7e465bd8b4789989e7e145a9509102545b8033500d416595888f94642",
+    "app/resources/app.asar": "760eae730e57438a0693cab4aba5ed8b7eb0ea1c5b7a7dc26dd0e84c2398810f",
+    "app/resources/codex.exe": "e757246b4de87359e660647fa9514955a0971ff6a30affdd8c145d1d5ece7b84",
+    "AppxSignature.p7x": "d45b26c0a1f6745bf21bd70049a7ca966c8e0cea0b9db9eedd2101af6ecfa57a"
+  },
+  "native_version": "0.163.0-alpha.11.1",
+  "frontend_home_environment": "CODEX_ELECTRON_USER_DATA_PATH",
+  "source_audit": {
+    "bootstrap_entry": ".vite/build/bootstrap-CpPAbkl1.js",
+    "bootstrap_sha256": "f6d1e43a4960cc18011d79b62b9ed79e659b51840b697f683679494bff494176",
+    "source_fact": "Explicit CODEX_ELECTRON_USER_DATA_PATH wins before app.setPath(userData) and requestSingleInstanceLock; startup requirements preserve CODEX_HOME when this override is present."
+  },
+  "qualification": "Pinned package/source baseline; launch transport and actual App behavior require separate acceptance.",
+  "native_binaries": [
+    "codex.exe",
+    "codex-command-runner.exe",
+    "codex-windows-sandbox-setup.exe",
+    "codex-windows-managed-deny-probe.exe"
+  ],
+  "app_resources": {
+    "app/resources/codex-code-mode-host.exe": {
+      "sha256": "be5b79cfafbf20ea43ebec9e71ae97310dc489aa28e67c03e8582622d5a6124a",
+      "size": 74955568
+    },
+    "app/resources/rg.exe": {
+      "sha256": "cf838ae09adf90df308993fabb3bd8d772e85e4e351d5d21cc3d23fc25303cd6",
+      "size": 4352304
+    },
+    "app/resources/cua_node/manifest.json": {
+      "sha256": "dfb07c88c67af739c1828c3ad45556eb923afd0e66c048102dfbbcb2bb2fc1fd",
+      "size": 476
+    },
+    "app/resources/cua_node/bin/node.exe": {
+      "sha256": "a7fb5f87ebd73b97bdac249d37cc74fc5f3ce8b0d295a20a9d7ce683bf183c11",
+      "size": 93380912
+    },
+    "app/resources/cua_node/bin/node_repl.exe": {
+      "sha256": "cdcaaf3b3dd439dceb1d043df932afefa096899d1125d8378ea955405f085b08",
+      "size": 34783512
+    },
+    "app/resources/cua_node/bin/node_modules/.package-map.json": {
+      "sha256": "6ca032f90234c9d8d7c807e30e6f05195889381e420f1876ce6386635719e824",
+      "size": 5030
+    },
+    "app/resources/cua_node/bin/node_modules/@oai/sky/package.json": {
+      "sha256": "6c5f3ddc0623bcc90f0e93430a029d66bdcb8df4cdc16070b4d84296c4070981",
+      "size": 2991
+    }
+  },
+  "required_private_sidecars": {
+    "codex-code-mode-host.exe": "app/resources/codex-code-mode-host.exe"
+  },
+  "native_upstream_commit": "680c4ba93ec79c292287fb9e0b627dc7a76e3b5e"
+}
