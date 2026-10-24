@@ -66,6 +66,7 @@ class FakeRunner:
         if "venv" in argv:
             venv = Path(argv[-1]); (venv / "Scripts").mkdir(parents=True)
             (venv / "Scripts/python.exe").write_bytes(b"owned fixture python")
+            (venv / "pyvenv.cfg").write_text("home = " + str(Path(argv[0]).parent) + "\nexecutable = " + str(argv[0]) + "\ninclude-system-site-packages = false\n", encoding="utf-8")
         if "pip" in argv and "install" in argv:
             assert {"--no-index", "--no-deps", "--require-hashes", "--no-cache-dir"} <= set(argv)
             if self.fail_pip: raise lc.LifecycleError("synthetic installation failure")
@@ -163,8 +164,9 @@ def test_activation_does_not_take_over_existing_service(bundle):
 
 class FakeProcess:
     def __init__(self, directory, data):
-        self.created=12345.0; self.image=str(directory / "venv/Scripts/python.exe")
-        self.owner="DESKTOP\\admin"; self.arguments=[self.image,"-I","-m","codex_app_deepseek.cli","serve","--home",str(data)]
+        self.pid=123; self.created=12345.0; self.image=str(directory / "venv/Scripts/python.exe")
+        import psutil
+        self.owner=psutil.Process().username(); self.arguments=[self.image,"-I","-m","codex_app_deepseek.cli","serve","--home",str(data),"--port","42817"]
         self.terminated=False
     def create_time(self): return self.created
     def exe(self): return self.image
@@ -181,7 +183,7 @@ def process_fixture(bundle):
     process=FakeProcess(directory,bundle.data)
     save(bundle.data / "service.json",{"pid":123,"created":process.created,"executable":process.image,"port":42817})
     def factory(pid):
-        return SimpleNamespace(username=lambda:"DESKTOP\\admin") if pid==os.getpid() else process
+        return SimpleNamespace(username=lambda:__import__("psutil").Process().username()) if pid==os.getpid() else process
     return process,factory
 
 
@@ -192,7 +194,7 @@ def test_stop_refuses_wrong_identity_without_terminating_any_process(bundle,mism
     if mismatch=="executable": process.image=str(bundle.root / "another.exe")
     if mismatch=="user": process.owner="DESKTOP\\RecorderPilot"
     if mismatch=="command": process.arguments=[process.image,"unrelated"]
-    if mismatch=="home": process.arguments[-1]=str(bundle.root / "other-home")
+    if mismatch=="home": process.arguments[6]=str(bundle.root / "other-home")
     with pytest.raises(lc.LifecycleError): lc.stop(bundle.install,process_factory=factory,remove_task=False)
     assert not process.terminated and (bundle.data / "service.json").exists()
 

@@ -330,6 +330,63 @@ with record.open('w',encoding='utf-8',newline='') as stream:
     return _entrypoint_proof(directory)
 
 
+
+def _same_runtime_path(left, right) -> bool:
+    """Compare an explicitly absolute runtime path across Win32 spellings."""
+    try:
+        return (isinstance(left, (str, os.PathLike)) and Path(left).is_absolute()
+                and _fs_path(Path(left).resolve()) == _fs_path(Path(right).resolve()))
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _runtime_proof(directory: Path, bootstrap_python: Path) -> dict:
+    """Bind a standard private venv redirector to its selected base image."""
+    base = Path(bootstrap_python)
+    executable = directory / "venv/Scripts/python.exe"
+    config = directory / "venv/pyvenv.cfg"
+    if not base.is_absolute() or base.resolve().is_relative_to(directory.parent.resolve()):
+        raise LifecycleError("Independent Python must remain outside managed releases")
+    from .app_config import _regular_path
+    try:
+        _regular_path(base, "base Python")
+        _regular_path(executable, "private Python")
+        _regular_path(config, "private Python configuration")
+        raw = _fs_path(config).read_bytes()
+        values = {}
+        for line in raw.decode("utf-8-sig").splitlines():
+            if not line.strip():
+                continue
+            key, separator, value = line.partition("=")
+            key = key.strip().casefold()
+            if not separator or key in values:
+                raise ValueError("Invalid venv configuration")
+            values[key] = value.strip()
+        if (not _same_runtime_path(values.get("executable"), base)
+                or not _same_runtime_path(values.get("home"), base.parent)
+                or values.get("include-system-site-packages", "").casefold() != "false"):
+            raise ValueError("Private venv selected another base environment")
+        return {
+            "schema_version": 1,
+            "venv_executable": {"path": "venv/Scripts/python.exe", "sha256": digest(executable)},
+            "venv_config": {"path": "venv/pyvenv.cfg", "sha256": hashlib.sha256(raw).hexdigest()},
+            "base_executable": {"path": str(base), "sha256": digest(base)},
+        }
+    except (OSError, ValueError, RuntimeError):
+        raise LifecycleError("Private venv/base Python provenance cannot be verified") from None
+
+
+def _verified_runtime(directory: Path, receipt: dict) -> dict:
+    proof = receipt.get("runtime")
+    base = receipt.get("bootstrap_python")
+    if not isinstance(proof, dict) or not isinstance(base, str) or not base:
+        raise LifecycleError("Installed Python runtime proof is missing; explicitly reinstall this candidate")
+    expected = _runtime_proof(directory, Path(base))
+    if proof != expected:
+        raise LifecycleError("Installed Python runtime provenance changed; explicitly reinstall the qualified release")
+    return expected
+
+
 def install(manifest_path: Path, manifest_sha256: str, wheelhouse: Path, python_exe: Path,
             install_root: Path, data_home: Path, *, run=_run) -> dict:
     """Install immutable wheel artifacts; never activate, read credentials or configure App."""
@@ -381,6 +438,7 @@ def install(manifest_path: Path, manifest_sha256: str, wheelhouse: Path, python_
         probe = run([str(runtime), "-I", "-c", "import importlib.metadata;print(importlib.metadata.version('codex-app-deepseek-gateway'))"], timeout=30)
         if probe.stdout.strip() != release["version"]:
             raise LifecycleError("Installed gateway version does not match manifest")
+        runtime_proof = _runtime_proof(directory, python)
         entrypoint = _install_isolated_entrypoint(directory, run=run)
         command = venv / "Scripts/codex-app-deepseek.exe"
         # Verify the public installed entrypoint itself, not only distribution metadata.
@@ -399,7 +457,8 @@ def install(manifest_path: Path, manifest_sha256: str, wheelhouse: Path, python_
         receipt = {"schema_version": 1, "project": PROJECT, "release_id": identifier,
                    "manifest_sha256": manifest_sha256.lower(), "data_home": str(data_home),
                    "bootstrap_python": str(python), "bootstrap_wheel": str(bootstrap), "bootstrap_sha256": gateway_sha,
-                   "version": release["version"], "entrypoint": entrypoint, "files": _inventory(directory)}
+                   "version": release["version"], "entrypoint": entrypoint, "runtime": runtime_proof,
+                   "files": _inventory(directory)}
         _write(receipt_path, receipt)
     except Exception:
         # This directory was created by this invocation and was never activated.
@@ -418,6 +477,7 @@ def _verify_installation(directory: Path, receipt: dict) -> None:
     bootstrap = _within(Path(receipt.get("bootstrap_wheel", "")), directory.parent.parent / "bootstrap")
     if not bootstrap.is_file() or digest(bootstrap) != receipt.get("bootstrap_sha256"):
         raise LifecycleError("Pinned recovery bootstrap is missing or changed")
+    _verified_runtime(directory, receipt)
     if receipt.get("entrypoint") != _entrypoint_proof(directory):
         raise LifecycleError("Installed launcher proof is missing or changed; explicitly reinstall the qualified release")
     inventory = receipt.get("files")
@@ -516,6 +576,24 @@ def _powershell(code: str, *, run=_run):
     return run([str(binary), "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], timeout=30)
 
 
+
+_TASK_PRINCIPAL_SID = r"""
+function Resolve-CadsgTaskSid([string]$Value) {
+ if([string]::IsNullOrWhiteSpace($Value)){throw 'Task principal cannot be resolved'}
+ try {
+  if($Value -match '^S-'){
+   return (New-Object Security.Principal.SecurityIdentifier -ArgumentList $Value).Value
+  }
+  return (New-Object Security.Principal.NTAccount -ArgumentList $Value).Translate([Security.Principal.SecurityIdentifier]).Value
+ } catch {throw 'Task principal cannot be resolved'}
+}
+function Test-CadsgTaskOwner($Definition,[string]$Marker,[string]$Sid) {
+ return ($Definition.RegistrationInfo.Description -eq $Marker -and
+         (Resolve-CadsgTaskSid $Definition.Principal.UserId) -eq $Sid -and
+         $Definition.Principal.LogonType -eq 3 -and $Definition.Principal.RunLevel -eq 0)
+}
+"""
+
 def _task(root: Path, directory: Path, data: Path, port: int, operation: str, at_logon: bool = False, *, run=_run) -> dict:
     if sys.platform != "win32":
         raise LifecycleError("User tasks require Windows")
@@ -525,12 +603,12 @@ def _task(root: Path, directory: Path, data: Path, port: int, operation: str, at
                "executable": str(directory / "venv/Scripts/python.exe"), "cwd": str(directory),
                "arguments": subprocess.list2cmdline(["-I", "-m", "codex_app_deepseek.cli", "serve", "--home", str(data), "--port", str(port)])}
     encoded = base64.b64encode(json.dumps(request).encode()).decode()
-    script = r"""$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.Encoding]::UTF8
+    script = _TASK_PRINCIPAL_SID + r"""$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.Encoding]::UTF8
 $r=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__REQUEST__'))|ConvertFrom-Json
 $id=[Security.Principal.WindowsIdentity]::GetCurrent();$sid=$id.User.Value
 $s=New-Object -ComObject Schedule.Service;$s.Connect();$f=$s.GetFolder('\');$old=$null
 try{$old=$f.GetTask($r.name)}catch{}
-if($null -ne $old -and ($old.Definition.RegistrationInfo.Description -ne $r.marker -or $old.Definition.Principal.UserId -ne $sid)){throw 'Task ownership mismatch'}
+if($null -ne $old -and -not (Test-CadsgTaskOwner $old.Definition $r.marker $sid)){throw 'Task ownership mismatch'}
 if($r.operation -eq 'remove'){
  if($null -ne $old){$f.DeleteTask($r.name,0)}
  @{task_name=$r.name;removed=($null -ne $old)}|ConvertTo-Json -Compress;exit 0
@@ -584,6 +662,33 @@ def health(port: int, *, token_provider=None) -> dict:
             "upstream_model_request_performed": False}
 
 
+def _process_identity(process, record: dict, directory: Path, data: Path, owner: str) -> None:
+    runtime = _verified_runtime(directory, _json(directory / "installation.json"))
+    expected = directory / "venv/Scripts/python.exe"
+    if not _same_runtime_path(record.get("executable"), expected):
+        raise LifecycleError("Recorded service executable is not this installed release")
+    port = record.get("port")
+    if type(port) is not int or not 1024 <= port <= 65535 or record.get("host", "127.0.0.1") != "127.0.0.1":
+        raise LifecycleError("Recorded service has an invalid loopback listener")
+    actual_birth = process.create_time()
+    if (process.pid != record["pid"] or type(actual_birth) not in (int, float)
+            or not math.isfinite(actual_birth) or abs(actual_birth - record["created"]) > 0.001):
+        raise LifecycleError("Service PID was reused or its creation time differs")
+    image = process.exe()
+    if not any(_same_runtime_path(image, candidate) for candidate in
+               (expected, runtime["base_executable"]["path"])):
+        raise LifecycleError("Service executable differs from the verified private venv/base runtime")
+    if process.username().casefold() != owner.casefold():
+        raise LifecycleError("Recorded service belongs to another Windows user")
+    argv = process.cmdline()
+    if (not isinstance(argv, (list, tuple)) or len(argv) != 9
+            or not _same_runtime_path(argv[0], expected)
+            or list(argv[1:6]) != ["-I", "-m", "codex_app_deepseek.cli", "serve", "--home"]
+            or not _same_runtime_path(argv[6], data)
+            or list(argv[7:]) != ["--port", str(port)]):
+        raise LifecycleError("Recorded process is not the isolated private gateway command/home/port")
+
+
 def _owned_process(directory: Path, data: Path, *, process_factory=None):
     record_path = data / "service.json"
     if not record_path.exists():
@@ -593,30 +698,22 @@ def _owned_process(directory: Path, data: Path, *, process_factory=None):
     pid, created = record.get("pid"), record.get("created")
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or not isinstance(created, (int, float)) or isinstance(created, bool) or not math.isfinite(created):
         raise LifecycleError("Service process identity record is invalid")
-    expected = directory / "venv/Scripts/python.exe"
-    if Path(record.get("executable", "")).resolve() != expected.resolve():
-        raise LifecycleError("Recorded service executable is not this installed release")
     factory = process_factory or psutil.Process
     try:
         process = factory(pid)
-        if abs(process.create_time() - created) > 0.001 or Path(process.exe()).resolve() != expected.resolve():
-            raise LifecycleError("Service PID was reused or its executable differs")
-        if process.username().casefold() != factory(os.getpid()).username().casefold():
-            raise LifecycleError("Recorded service belongs to another Windows user")
-        argv = process.cmdline()
-        if "serve" not in argv or "codex_app_deepseek.cli" not in argv or "--home" not in argv:
-            raise LifecycleError("Recorded process is not the managed gateway command")
-        index = argv.index("--home")
-        if index + 1 >= len(argv) or Path(argv[index + 1]).resolve() != data:
-            raise LifecycleError("Recorded process uses another data home")
+        _process_identity(process, record, directory, data, factory(os.getpid()).username())
         return process, digest(record_path)
     except psutil.NoSuchProcess:
         return None, digest(record_path)
 
 
-
 def _owned_health(process, data: Path, port: int) -> dict:
     record = _json(data / "service.json")
+    import psutil
+    logical = record.get("executable")
+    if not isinstance(logical, str) or not Path(logical).is_absolute():
+        raise LifecycleError("Owned service has no absolute private interpreter")
+    _process_identity(process, record, Path(logical).parent.parent.parent, data, psutil.Process().username())
     if record.get("port") != port or record.get("host", "127.0.0.1") != "127.0.0.1":
         raise LifecycleError("Owned service uses a different listener than requested")
     connections = process.net_connections(kind="tcp")
