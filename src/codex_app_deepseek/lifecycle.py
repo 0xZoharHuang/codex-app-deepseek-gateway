@@ -340,6 +340,19 @@ def _same_runtime_path(left, right) -> bool:
         return False
 
 
+def _runtime_regular_file(path: Path) -> Path:
+    """Inspect bootstrap runtime files using only the standard library."""
+    import stat
+    selected = _fs_path(Path(path).absolute())
+    for part in (selected, *selected.parents):
+        if part.is_symlink() or (hasattr(part, "is_junction") and part.is_junction()):
+            raise LifecycleError("Runtime provenance must not traverse a link or junction")
+    metadata = selected.stat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise LifecycleError("Runtime provenance must use regular files without hard links")
+    return selected
+
+
 def _runtime_proof(directory: Path, bootstrap_python: Path) -> dict:
     """Bind a standard private venv redirector to its selected base image."""
     base = Path(bootstrap_python)
@@ -347,11 +360,10 @@ def _runtime_proof(directory: Path, bootstrap_python: Path) -> dict:
     config = directory / "venv/pyvenv.cfg"
     if not base.is_absolute() or base.resolve().is_relative_to(directory.parent.resolve()):
         raise LifecycleError("Independent Python must remain outside managed releases")
-    from .app_config import _regular_path
     try:
-        _regular_path(base, "base Python")
-        _regular_path(executable, "private Python")
-        _regular_path(config, "private Python configuration")
+        _runtime_regular_file(base)
+        _runtime_regular_file(executable)
+        _runtime_regular_file(config)
         raw = _fs_path(config).read_bytes()
         values = {}
         for line in raw.decode("utf-8-sig").splitlines():
