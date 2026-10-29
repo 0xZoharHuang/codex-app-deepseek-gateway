@@ -639,6 +639,7 @@ $signature=Get-AuthenticodeSignature -LiteralPath (Join-Path $p.InstallLocation 
             for child in children:
                 self._require_live(parent, "owned App ancestor changed before child inspection")
                 created = None
+                identity = None
                 try:
                     created = child.create_time()
                     candidate = psutil.Process(child.pid)
@@ -647,7 +648,19 @@ $signature=Get-AuthenticodeSignature -LiteralPath (Join-Path $p.InstallLocation 
                     require(ppid == parent["pid"] and created >= parent["created"],
                             "App child does not have the observed direct parent")
                     identity = self.identity(child.pid)
-                except psutil.NoSuchProcess:
+                    require(identity["created"] == created and identity["ppid"] == parent["pid"],
+                            "App child changed during direct edge observation")
+                    require(identity["sid"] == root["sid"] and identity["session"] == root["session"],
+                            "unexpected owner/session in App process tree")
+                    self._require_live(parent, "App parent changed during observation")
+                    self._require_live(identity, "App child changed during observation")
+                except psutil.NoSuchProcess as error:
+                    # Only a still-unadmitted child may disappear. Never turn
+                    # a lost parent or already identified native actor into a
+                    # skipped auxiliary, and recheck birth to reject PID reuse.
+                    if error.pid != child.pid or (identity is not None
+                            and Path(identity["exe"]).name.casefold() == "codex.exe"):
+                        raise
                     if created is not None:
                         try: self._require_live({"pid": child.pid, "created": created}, "App child PID was reused")
                         except psutil.NoSuchProcess: continue
@@ -655,12 +668,6 @@ $signature=Get-AuthenticodeSignature -LiteralPath (Join-Path $p.InstallLocation 
                         try: psutil.Process(child.pid)
                         except psutil.NoSuchProcess: continue
                     raise LaunchError("App child identity could not be established")
-                require(identity["created"] == created and identity["ppid"] == parent["pid"],
-                        "App child changed during direct edge observation")
-                self._require_live(parent, "App parent changed during observation")
-                self._require_live(identity, "App child changed during observation")
-                require(identity["sid"] == root["sid"] and identity["session"] == root["session"],
-                        "unexpected owner/session in App process tree")
                 require(identity["pid"] not in seen, "duplicate or cyclic App descendant")
                 seen[identity["pid"]] = identity["created"]
                 found.append(identity)
@@ -1012,6 +1019,8 @@ def current_backend_observation(run, plan, receipt, backend):
         return result
     except (LaunchError, psutil.Error, OSError, ValueError, KeyError, TypeError, AttributeError) as error:
         result.update(reason=stage, error_type=type(error).__name__)
+        if isinstance(error, psutil.NoSuchProcess) and type(error.pid) is int and error.pid > 0:
+            result["error_pid"] = error.pid
         return result
 
 
