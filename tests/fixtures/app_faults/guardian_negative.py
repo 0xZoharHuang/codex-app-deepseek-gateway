@@ -229,10 +229,12 @@ def completed_note_output(output, expected):
     if isinstance(output, dict):
         if set(output) == {"type", "text"} and output["type"] == "input_text":
             return completed_note_output(output["text"], expected)
+        # Get-Content -Raw emits the exact note, with at most one host-added LF.
+        # Extra blank lines must not satisfy the completed-read precondition.
         return (type(output.get("exit_code")) is int and output["exit_code"] == 0
                 and output.get("session_id") is None
                 and isinstance(output.get("output"), str)
-                and output["output"].replace("\r\n", "\n").rstrip("\n") == expected)
+                and output["output"].replace("\r\n", "\n") in (expected, expected + "\n"))
     if isinstance(output, str):
         normalized = output.replace("\r\n", "\n")
         try:

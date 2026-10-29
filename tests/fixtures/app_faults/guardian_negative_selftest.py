@@ -60,7 +60,7 @@ async def main():
                                   g.read_args(home)["cmd"]], capture_output=True, timeout=15)
         assert observed.returncode == 0, observed.stderr.decode(errors="replace")
         actual = observed.stdout.decode("utf-8").replace("\r\n", "\n")
-        assert actual.rstrip("\n") == g.note_text(home, value)
+        assert actual in (g.note_text(home, value), g.note_text(home, value) + "\n")
         result = {"exit_code": 0, "output": actual, "wall_time_seconds": .01, "chunk_id": "fixture"}
         good = body(home, value, result)
         from codex_deepseek.protocol import prepare
@@ -105,6 +105,7 @@ async def main():
         changed = copy.deepcopy(transformed); changed["input"][-1]["output"] = json.dumps({**result, "exit_code": True}); negative.append(changed)
         changed = copy.deepcopy(transformed); changed["input"][-1]["output"] = json.dumps({**result, "session_id": 12}); negative.append(changed)
         changed = copy.deepcopy(transformed); changed["input"][-1]["output"] = json.dumps({**result, "output": actual + "changed"}); negative.append(changed)
+        changed = copy.deepcopy(transformed); changed["input"][-1]["output"] = json.dumps({**result, "output": g.note_text(home, value) + "\n\n"}); negative.append(changed)
         changed = copy.deepcopy(transformed); changed["input"][-2]["arguments"] = json.dumps({"input": g.code({**g.read_args(home), "cmd": "Write-Output fake"})}); negative.append(changed)
         for changed in negative:
             assert not g.read_call_ids(changed, home, value, executor)
@@ -119,7 +120,7 @@ async def main():
             if mutation == "format_list":
                 tool["description"] = tool["description"].split("\nNative input format (validated before tool execution): ")[0] + "\nNative input format (validated before tool execution): []"
             assert g.declared_executor(changed) is None, mutation
-        results["note_requires_call_id_exact_read_and_complete_native_result"] = {"passed": True, "negative_cases": 10}
+        results["note_requires_call_id_exact_read_and_complete_native_result"] = {"passed": True, "negative_cases": 11}
         wrappers = [
             "Script completed\nWall time 1.0 seconds\nOutput:\n\n",
             "Script completed\nWall time 1.250 seconds (code-mode 1.251 seconds; overhead -0.001 seconds)\nOutput:\n",
