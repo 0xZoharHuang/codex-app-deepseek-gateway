@@ -17,10 +17,14 @@
     {
       "file": "guardian-thread-context-0165.patch",
       "sha256": "6f434a95d3e0dd34c501539c0b8b562ac8bb2efc2973edf42a3d659cf1eaca60"
+    },
+    {
+      "file": "windows-cwd-ancestor-metadata-0165.patch",
+      "sha256": "0f714a74af432ddd15b869dcdca0713aa1b48128c509971ae1ad3fd040dfcd6d"
     }
   ],
-  "prepared_source_sha256": "ac317c8987baaf452400c71c934c1007f829ee2bd342eb4e2a78f453d6f4b636",
-  "prepared_source_files": 9513,
+  "prepared_source_sha256": "506b311e2e8ecf7a2d24f13f036b1a55f9478f777369b96a922f633124f72d33",
+  "prepared_source_files": 9514,
   "cargo_lock_sha256": "7537da7c5e154334b15ef9b59091f5fed3a8e480b77c037e3a8b7f07d1614709",
   "release_environment": {
     "CARGO_BUILD_JOBS": "2",

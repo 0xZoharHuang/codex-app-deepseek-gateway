@@ -1,0 +1,356 @@
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+@@ -5,6 +5,7 @@
+ mod firewall;
+ mod service;
+ pub use service::provision_sandbox_in_process;
++mod cwd_metadata;
+ mod read_acl_mutex;
+ 
+ use crate::DirectoryOpenDisposition;
+@@ -998,6 +999,18 @@
+         )?;
+     }
+ 
++    if let Err(error) = cwd_metadata::ensure_owned_cwd_parent_metadata(
++        payload, namespace, sandbox_group_psid, log,
++    ) {
++        unsafe {
++            LocalFree(sandbox_group_psid as HLOCAL);
++        }
++        return Err(anyhow::Error::new(SetupFailure::new(
++            SetupErrorCode::HelperSandboxLockFailed,
++            format!("materialize owned cwd parent metadata: {error:#}"),
++        )));
++    }
++
+     if let Some(user_profile) = payload.user_profile.as_deref()
+         && user_profile.is_absolute()
+     {
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/cwd_metadata.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning/cwd_metadata.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning/cwd_metadata.rs
+@@ -0,0 +1,321 @@
++//! Materialize only metadata needed to enter an owned-home writable workspace.
++//! The namespace owns the principal; existing native uninstall retains ACLs.
++use super::Payload;
++use crate::DirectoryOpenDisposition;
++use crate::namespace::SandboxNamespace;
++use crate::no_reparse_dir::validate_local_directory_path;
++use crate::open_directory_no_reparse;
++use anyhow::{Context, Result, ensure};
++use codex_utils_absolute_path::AbsolutePathBuf;
++use std::ffi::c_void;
++use std::path::{Path, PathBuf};
++use windows_sys::Win32::Storage::FileSystem::{
++    FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, READ_CONTROL,
++};
++
++fn checked_path(path: &Path) -> Result<PathBuf> {
++    Ok(AbsolutePathBuf::from_absolute_path_checked(path)?.to_path_buf())
++}
++
++fn contains(root: &Path, path: &Path) -> bool {
++    let mut parts = path.components();
++    root.components().all(|component| {
++        parts.next().is_some_and(|part| {
++            component
++                .as_os_str()
++                .as_encoded_bytes()
++                .eq_ignore_ascii_case(part.as_os_str().as_encoded_bytes())
++        })
++    })
++}
++
++pub(super) fn ensure_owned_cwd_parent_metadata(
++    payload: &Payload,
++    namespace: &SandboxNamespace,
++    sandbox_group_psid: *mut c_void,
++    log: &mut dyn std::io::Write,
++) -> Result<usize> {
++    let home = checked_path(&payload.codex_home)?;
++    let cwd = checked_path(&payload.command_cwd)?;
++    if !contains(&home, &cwd) || contains(&cwd, &home) {
++        return Ok(0);
++    }
++    let authorised = payload.write_roots.iter().any(|root| {
++        checked_path(root).is_ok_and(|root| contains(&home, &root) && contains(&root, &cwd))
++    });
++    if !authorised {
++        return Ok(0);
++    }
++    // Nonlocal homes/cwds keep the pre-existing setup behavior. This materializer
++    // is only for local directories inside this native installation's home.
++    if validate_local_directory_path(&home).is_err() {
++        return Ok(0);
++    }
++    validate_local_directory_path(&payload.codex_home)?;
++    validate_local_directory_path(&payload.command_cwd)?;
++
++    // Keep the complete necessary path stable, including ancestors outside home.
++    // These are read-only pins; only parents inside home may receive an ACE.
++    let mut pins = Vec::new();
++    for path in cwd.ancestors().collect::<Vec<_>>().into_iter().rev() {
++        pins.push(
++            open_directory_no_reparse(
++                path,
++                READ_CONTROL | FILE_READ_ATTRIBUTES | FILE_TRAVERSE,
++                FILE_SHARE_READ | FILE_SHARE_WRITE,
++                DirectoryOpenDisposition::OpenExisting,
++            )
++            .with_context(|| format!("pin cwd metadata directory {}", path.display()))?,
++        );
++    }
++    let current = SandboxNamespace::for_user(&home, &payload.real_user)?;
++    ensure!(
++        current.key.id() == namespace.key.id() && current.owner_sid == namespace.owner_sid,
++        "cwd metadata namespace directory identity changed"
++    );
++    namespace.require_owned_state()?;
++
++    let mut changed = 0;
++    for path in cwd
++        .ancestors()
++        .skip(1)
++        .take_while(|path| contains(&home, path))
++    {
++        let added = unsafe {
++            crate::ensure_allow_mask_aces_with_inheritance(
++                path,
++                &[sandbox_group_psid],
++                FILE_READ_ATTRIBUTES,
++                0,
++            )
++        }?;
++        // This is the primitive's ACL-mask readback, not a full token access proof.
++        ensure!(
++            crate::path_mask_allows(path, &[sandbox_group_psid], FILE_READ_ATTRIBUTES, true,)?,
++            "required cwd-parent metadata ACE was not materialized on {}",
++            path.display()
++        );
++        if added {
++            changed += 1;
++            super::log_line(
++                log,
++                &format!(
++                    "granted non-inheriting cwd-parent read-attributes ACE on {}",
++                    path.display()
++                ),
++            )?;
++        }
++    }
++    drop(pins);
++    Ok(changed)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::token::LocalSid;
++    use crate::winutil::to_wide;
++    use windows_sys::Win32::Foundation::{HLOCAL, LocalFree};
++    use windows_sys::Win32::Security::Authorization::{
++        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
++    };
++    use windows_sys::Win32::Security::{
++        ACE_HEADER, DACL_SECURITY_INFORMATION, GetAce, GetLengthSid, GetSecurityDescriptorControl,
++        PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW,
++    };
++
++    fn snapshot(path: &Path) -> (u16, Vec<Vec<u8>>) {
++        unsafe {
++            let (dacl, descriptor) = crate::fetch_dacl_handle(path).unwrap();
++            assert!(!dacl.is_null());
++            let mut control = 0;
++            let mut revision = 0;
++            assert_ne!(
++                GetSecurityDescriptorControl(descriptor, &mut control, &mut revision),
++                0
++            );
++            let mut aces = Vec::new();
++            for index in 0..u32::from((*dacl).AceCount) {
++                let mut ace = std::ptr::null_mut();
++                assert_ne!(GetAce(dacl, index, &mut ace), 0);
++                let header = &*ace.cast::<ACE_HEADER>();
++                aces.push(
++                    std::slice::from_raw_parts(ace.cast::<u8>(), usize::from(header.AceSize))
++                        .to_vec(),
++                );
++            }
++            LocalFree(descriptor as HLOCAL);
++            (control, aces)
++        }
++    }
++
++    fn protect(path: &Path, owner: &str, deny: Option<&str>) {
++        let deny = deny
++            .map(|sid| format!("(D;;0x2;;;{sid})"))
++            .unwrap_or_default();
++        let sddl = format!("D:P{deny}(A;OICI;FA;;;{owner})(A;OICI;FA;;;SY)");
++        unsafe {
++            let mut descriptor = std::ptr::null_mut();
++            assert_ne!(
++                ConvertStringSecurityDescriptorToSecurityDescriptorW(
++                    to_wide(sddl).as_ptr(),
++                    SDDL_REVISION_1,
++                    &mut descriptor,
++                    std::ptr::null_mut(),
++                ),
++                0
++            );
++            assert_ne!(
++                SetFileSecurityW(
++                    to_wide(path).as_ptr(),
++                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
++                    descriptor
++                ),
++                0
++            );
++            LocalFree(descriptor as HLOCAL);
++        }
++    }
++
++    #[test]
++    fn owned_worktree_parent_metadata_is_narrow_and_idempotent() -> Result<()> {
++        let temp = tempfile::tempdir()?;
++        let home = temp.path().join("home");
++        let worktrees = home.join("worktrees");
++        let parent = worktrees.join("fresh");
++        let workspace = parent.join("workspace");
++        let descendant = workspace.join("nested");
++        let sibling = worktrees.join("sibling");
++        std::fs::create_dir_all(&descendant)?;
++        std::fs::create_dir(&sibling)?;
++        let file = descendant.join("canary.txt");
++        std::fs::write(&file, b"cwd-metadata-canary\n")?;
++        let user = crate::runtime_ownership::current_setup_user()?;
++        let namespace = SandboxNamespace::for_user(&home, &user)?;
++        namespace.reserve_owner()?;
++        let group = LocalSid::from_string("S-1-5-21-915763429-1123581321-271828182-4501")?;
++        let cap = LocalSid::from_string("S-1-5-21-915763429-1123581321-271828182-4502")?;
++        let deny = "S-1-5-21-915763429-1123581321-271828182-4503";
++        protect(&home, &namespace.owner_sid, None);
++        protect(&parent, &namespace.owner_sid, Some(deny));
++        for path in [&home, &worktrees] {
++            unsafe {
++                crate::ensure_allow_mask_aces_with_inheritance(
++                    path,
++                    &[group.as_ptr()],
++                    FILE_READ_ATTRIBUTES,
++                    0,
++                )
++            }?;
++        }
++        unsafe { crate::ensure_allow_write_aces(&workspace, &[group.as_ptr(), cap.as_ptr()]) }?;
++        let paths = [
++            &home,
++            &worktrees,
++            &parent,
++            &workspace,
++            &descendant,
++            &sibling,
++            &file,
++        ];
++        let before = paths.iter().map(|path| snapshot(path)).collect::<Vec<_>>();
++        let directories = [
++            &home,
++            &worktrees,
++            &parent,
++            &workspace,
++            &descendant,
++            &sibling,
++        ];
++        let identities = directories
++            .iter()
++            .map(|path| {
++                SandboxNamespace::for_user(path, &user).map(|value| value.key.id().to_string())
++            })
++            .collect::<Result<Vec<_>>>()?;
++        let mut payload: Payload = serde_json::from_value(serde_json::json!({
++            "version": crate::SETUP_VERSION,
++            "offline_username": namespace.key.offline(), "online_username": namespace.key.online(),
++            "codex_home": home, "command_cwd": workspace, "read_roots": [],
++            "write_roots": [sibling], "proxy_ports": [], "real_user": user,
++        }))?;
++        let mut log = Vec::new();
++        assert_eq!(
++            ensure_owned_cwd_parent_metadata(&payload, &namespace, group.as_ptr(), &mut log)?,
++            0
++        );
++        assert_eq!(
++            paths.iter().map(|path| snapshot(path)).collect::<Vec<_>>(),
++            before
++        );
++        payload.command_cwd = PathBuf::from(r"\\server\share\workspace");
++        assert_eq!(
++            ensure_owned_cwd_parent_metadata(&payload, &namespace, group.as_ptr(), &mut log)?,
++            0
++        );
++        assert_eq!(
++            paths.iter().map(|path| snapshot(path)).collect::<Vec<_>>(),
++            before
++        );
++        payload.command_cwd = workspace.clone();
++        payload.write_roots = vec![workspace.clone()];
++        assert_eq!(
++            ensure_owned_cwd_parent_metadata(&payload, &namespace, group.as_ptr(), &mut log)?,
++            1
++        );
++        let after = paths.iter().map(|path| snapshot(path)).collect::<Vec<_>>();
++        for index in [0, 1, 3, 4, 5, 6] {
++            assert_eq!(
++                after[index], before[index],
++                "only the required parent may change"
++            );
++        }
++        assert_eq!(after[2].0, before[2].0);
++        let added = after[2]
++            .1
++            .iter()
++            .filter(|ace| !before[2].1.contains(ace))
++            .collect::<Vec<_>>();
++        assert_eq!(added.len(), 1);
++        let ace = added[0];
++        assert_eq!((ace[0], ace[1]), (0, 0), "one non-inheriting allow ACE");
++        assert_eq!(
++            u32::from_le_bytes(ace[4..8].try_into().unwrap()),
++            FILE_READ_ATTRIBUTES
++        );
++        let sid = unsafe {
++            std::slice::from_raw_parts(
++                group.as_ptr().cast::<u8>(),
++                GetLengthSid(group.as_ptr()) as usize,
++            )
++        };
++        assert_eq!(&ace[8..], sid);
++        assert_eq!(
++            after[2]
++                .1
++                .iter()
++                .filter(|candidate| *candidate != ace)
++                .cloned()
++                .collect::<Vec<_>>(),
++            before[2].1
++        );
++        assert_eq!(
++            ensure_owned_cwd_parent_metadata(&payload, &namespace, group.as_ptr(), &mut log)?,
++            0
++        );
++        assert_eq!(
++            paths.iter().map(|path| snapshot(path)).collect::<Vec<_>>(),
++            after
++        );
++        assert_eq!(std::fs::read(&file)?, b"cwd-metadata-canary\n");
++        assert_eq!(
++            directories
++                .iter()
++                .map(|path| SandboxNamespace::for_user(path, &user)
++                    .map(|value| value.key.id().to_string()))
++                .collect::<Result<Vec<_>>>()?,
++            identities
++        );
++        Ok(())
++    }
++}
