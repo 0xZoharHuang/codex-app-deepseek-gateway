@@ -409,7 +409,16 @@ $signature=Get-AuthenticodeSignature -LiteralPath (Join-Path $p.InstallLocation 
 """.replace("PAYLOAD", payload)
         powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
         command = [str(powershell), "-NoProfile", "-NonInteractive", "-EncodedCommand", base64.b64encode(script.encode("utf-16le")).decode()]
-        output = subprocess.run(command, capture_output=True, timeout=90, creationflags=subprocess.CREATE_NO_WINDOW)
+        try:
+            output = subprocess.run(command, capture_output=True, timeout=300,
+                                    creationflags=subprocess.CREATE_NO_WINDOW)
+        except subprocess.TimeoutExpired:
+            # Do not expose the encoded command or captured subprocess output.
+            raise LaunchError(
+                "Installed App package file/signature verification timed out after 300 seconds; "
+                "verification did not pass. Check Windows storage and certificate services "
+                "before retrying the requested operation."
+            ) from None
         require(output.returncode == 0, "cannot verify installed App package/signature/resources")
         return json.loads(output.stdout.decode("utf-8-sig"))
 

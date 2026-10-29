@@ -893,3 +893,44 @@ def test_browser_selector_observation_retains_ambiguous_switch_aliases(monkeypat
     monkeypatch.setattr(app.psutil,"Process",lambda pid:Process())
     retained = backend.profile_arguments({"pid":999})
     assert retained == [arguments[0]]
+
+
+@pytest.mark.parametrize("outcome", ["success", "timeout"])
+def test_windows_package_verification_preserves_checks_and_reports_bounded_timeout(monkeypatch, outcome):
+    import base64
+    import subprocess
+    from types import SimpleNamespace
+
+    expected = {"files": {"app/ChatGPT.exe": "exe", "app/resources/app.asar": "asar"},
+                "app_resources": {"app/resources/host.exe": {"sha256": "host"}}}
+    calls = []
+    observed = {"package": {"version": "fixture"}, "files": {"fixture": "unchanged"}}
+    monkeypatch.setenv("SystemRoot", "C:/Windows")
+    monkeypatch.setattr(app.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+
+    def run(command, **options):
+        calls.append((command, options))
+        assert options == {"capture_output": True, "timeout": 300, "creationflags": 0x08000000}
+        assert command[1:4] == ["-NoProfile", "-NonInteractive", "-EncodedCommand"]
+        script = base64.b64decode(command[4]).decode("utf-16le")
+        encoded_names = script.split("FromBase64String('", 1)[1].split("')", 1)[0]
+        assert json.loads(base64.b64decode(encoded_names)) == [*expected["files"], *expected["app_resources"]]
+        assert "Get-AppxPackage -Name OpenAI.Codex" in script
+        assert "Get-FileHash -LiteralPath" in script and "-Algorithm SHA256" in script
+        assert "Get-AuthenticodeSignature -LiteralPath (Join-Path $p.InstallLocation 'app/ChatGPT.exe')" in script
+        assert "Get-AuthenticodeSignature -LiteralPath (Join-Path $p.InstallLocation 'AppxSignature.p7x')" in script
+        if outcome == "timeout":
+            raise subprocess.TimeoutExpired("private-command-never-disclose", 300,
+                                            output=b"private-output-never-disclose", stderr=b"private-stderr-never-disclose")
+        return SimpleNamespace(returncode=0, stdout=json.dumps(observed).encode("utf-8"))
+
+    monkeypatch.setattr(app.subprocess, "run", run)
+    backend = object.__new__(app.WindowsBackend)
+    if outcome == "success":
+        assert backend.package(expected) == observed
+    else:
+        with pytest.raises(app.LaunchError, match="package file/signature verification timed out after 300 seconds") as caught:
+            backend.package(expected)
+        assert "private-" not in str(caught.value)
+        assert caught.value.__suppress_context__ is True
+    assert len(calls) == 1  # No implicit retry, fallback, or cached acceptance.
