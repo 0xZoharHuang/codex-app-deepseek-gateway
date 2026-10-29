@@ -36,9 +36,13 @@ code or sandbox setup. Bind the returned prepared manifest and SHA:
     & $cdag app-bind --native-manifest '<prepared manifest>' --native-manifest-sha256 '<prepared SHA>'
 
 Binding records the explicit selection for the active gateway release and current
-user. It does not launch the App. Quit this user's Codex App first; no other user is
-logged out. Native C/D names or developer paths are never inferred. Preserve this
-native directory as an external release input.
+user. It does not launch the App. Binding and configuration reject an App using
+this gateway's dedicated native home, Electron or browser profile; close only
+that owned instance before changing it. A disjoint stock or separate-profile App
+may continue working. Unknown identity/profile observations fail closed for
+inspection, with no process takeover or automatic termination. Native C/D names
+or developer paths are never inferred. Preserve this native directory as an
+external release input.
 
 After a gateway upgrade, explicitly bind the selected compatible native release
 again. An unknown App update, signature, commit, binary or manifest fails closed.

@@ -66,7 +66,7 @@ def test_bind_is_explicit_verified_and_never_starts_app(fixture):
 
 def test_bind_refuses_current_app_before_writing_binding(fixture):
     f = fixture; f.backend.existing = [{"pid": 99}]
-    with pytest.raises(delivery.DeliveryError, match="Quit"):
+    with pytest.raises(delivery.DeliveryError, match="identity"):
         bind(f)
     assert not delivery.binding_path(f.installation).exists()
 
@@ -362,3 +362,89 @@ def test_configure_refuses_foreign_home_before_policy_catalog_or_config_writes(f
     assert not (f.installation.data / "config-backups").exists()
     assert (f.paths["home"] / "config.toml").read_bytes() == before
     assert not f.backend.spawned
+
+@pytest.mark.parametrize("operation",["bind","configure"])
+@pytest.mark.parametrize("foreign",["default","separate"])
+def test_installed_binding_and_configuration_allow_verified_foreign_profiles_under_locks(fixture,monkeypatch,operation,foreign):
+    from test_isolated_app import _foreign_app
+    f=fixture
+    if operation=="configure":bind(f)
+    other=str(f.paths["home"].parent/"separate-foreign-home")
+    state=_foreign_app(f.backend,**({} if foreign=="default" else {
+        "home":other,"frontend":str(Path(other)/"electron"),"browser":str(Path(other)/"browser")}))
+    initial=copy.deepcopy(state);locks=set();observed=[]
+    @contextmanager
+    def operation_lock(root):
+        assert root==f.installation.root
+        locks.add("installation")
+        try:yield
+        finally:locks.remove("installation")
+    @contextmanager
+    def launch_lock(sid):
+        assert sid==f.backend.current()["sid"]
+        locks.add("launch")
+        try:yield
+        finally:locks.remove("launch")
+    read=f.backend.selected_environment
+    def check(row):
+        assert locks=={"installation","launch"}
+        observed.append(row["pid"])
+        return read(row)
+    monkeypatch.setattr(delivery.lc,"_operation_lease",operation_lock)
+    f.backend.launch_lock=launch_lock;f.backend.selected_environment=check
+    result=(bind(f) if operation=="bind" else delivery.configure(
+        f.installation.root,f.catalog,app.sha(f.catalog),backend=f.backend))
+    assert result["status"]==("runtime_bound_not_launched" if operation=="bind" else "private_app_configured_not_launched")
+    assert observed==[999] and state==initial and not f.backend.spawned
+    binding=delivery.read_binding(f.installation,f.backend)
+    assert binding["native_manifest"]==str(f.manifest.resolve())
+    if operation=="configure":
+        assert binding["catalog"]["sha256"]==app.sha(f.catalog)
+        assert Path(result["checkpoint"]).is_file()
+
+
+@pytest.mark.parametrize("operation",["bind","configure"])
+@pytest.mark.parametrize("fault",["same-home","same-frontend","same-browser","ambiguous","reused","unknown"])
+def test_binding_and_configuration_reject_real_or_uncertain_profile_conflicts_before_writes(fixture,operation,fault):
+    from test_isolated_app import _foreign_app
+    f=fixture
+    if operation=="configure":bind(f)
+    state=_foreign_app(f.backend)
+    if fault=="same-home":state["environment"]["CODEX_HOME"]=str(f.paths["home"]).swapcase()
+    elif fault=="same-frontend":state["environment"]["CODEX_ELECTRON_USER_DATA_PATH"]=str(f.paths["frontend"])
+    elif fault=="same-browser":state["arguments"]=["--user-data-dir="+str(f.paths["frontend"])]
+    elif fault=="ambiguous":state["arguments"]=["--user-data-dir"]
+    elif fault=="reused":state["identity"]["created"]+=1
+    else:
+        def denied(row):raise app.psutil.AccessDenied(row["pid"])
+        f.backend.selected_environment=denied
+    original=(f.paths["home"]/"config.toml").read_bytes()
+    before={p.relative_to(f.installation.data).as_posix():p.read_bytes()
+            for p in f.installation.data.rglob("*") if p.is_file()}
+    with pytest.raises(delivery.DeliveryError):
+        if operation=="bind":bind(f)
+        else:delivery.configure(f.installation.root,f.catalog,app.sha(f.catalog),backend=f.backend)
+    after={p.relative_to(f.installation.data).as_posix():p.read_bytes()
+           for p in f.installation.data.rglob("*") if p.is_file()}
+    assert after==before and (f.paths["home"]/"config.toml").read_bytes()==original
+    assert not f.backend.spawned
+
+
+def test_configuration_with_foreign_App_keeps_three_way_rollback_and_later_user_edits(fixture):
+    from test_isolated_app import _foreign_app
+    from codex_app_deepseek.app_config import restore
+    import tomlkit
+    f=fixture;path=f.paths["home"]/"config.toml"
+    original='# Original user setting\nmodel_provider = "codex_app_deepseek"\n\n[user]\nkeep = "original"\n'
+    path.write_text(original)
+    state=_foreign_app(f.backend);before=copy.deepcopy(state)
+    result=configure(f)
+    value=tomlkit.parse(path.read_text());value["user"]["later"]="external edit"
+    path.write_text(tomlkit.dumps(value))
+    restore(Path(result["checkpoint"]))
+    restored=tomlkit.parse(path.read_text())
+    assert restored["model_provider"]=="codex_app_deepseek"
+    assert restored["user"]=={"keep":"original","later":"external edit"}
+    assert "model_catalog_json" not in restored and "model_providers" not in restored
+    assert path.read_text().count("# Original user setting")==1
+    assert state==before and not f.backend.spawned

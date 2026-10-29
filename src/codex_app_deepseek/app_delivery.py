@@ -153,8 +153,12 @@ def bind(root, manifest, digest, *, backend=None):
     manifest = Path(manifest).resolve(strict=True)
     lc._home(manifest.parent)  # Refuse protected App/CDS locations.
     with lc._operation_lease(installation.root), backend.launch_lock(owner["sid"]):
-        if backend.existing_apps(owner):
-            raise DeliveryError("Quit this user's App explicitly before changing its runtime binding")
+        paths = app.defaults()
+        app.validate_state_paths(paths)
+        try:
+            app.require_disjoint_apps(backend, owner, paths)
+        except app.LaunchError as error:
+            raise DeliveryError(str(error)) from error
         app.verify_package(backend.package(expected), expected)
         app.verify_bundle(manifest, digest, expected)
         value = {"schema_version": 1, "project": lc.PROJECT,
@@ -186,13 +190,15 @@ def configure(root, catalog, catalog_sha256, *, port=42817, backend=None):
     baseline, _ = assets()
     expected = app.baseline(baseline)
     with lc._operation_lease(installation.root), backend.launch_lock(owner["sid"]):
-        if backend.existing_apps(owner):
-            raise DeliveryError("Quit this user's App before applying its configuration")
+        paths = app.defaults()
+        app.validate_state_paths(paths)
+        try:
+            app.require_disjoint_apps(backend, owner, paths)
+        except app.LaunchError as error:
+            raise DeliveryError(str(error)) from error
         value = read_binding(installation, backend, verify_catalog=False)
         app.verify_package(backend.package(expected), expected)
         app.verify_bundle(value["native_manifest"], value["native_manifest_sha256"], expected)
-        paths = app.defaults()
-        app.validate_state_paths(paths)
         with backend.home_guard(paths["home"], owner["sid"], create=True) as home_identity:
             executable = installation.directory / "venv/Scripts/python.exe"
             if not executable.is_file():
