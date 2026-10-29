@@ -4877,7 +4877,7 @@ diff --git a/codex-rs/windows-sandbox-rs/src/setup.rs b/codex-rs/windows-sandbox
 diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
 --- a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
 +++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
-@@ -20,7 +20,6 @@
+@@ -20,10 +20,10 @@
  use crate::ensure_allow_write_aces;
  use crate::extract_setup_failure;
  use crate::hide_newly_created_users;
@@ -4885,7 +4885,11 @@ diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs b/codex-rs/wi
  use crate::local_user_flags;
  use crate::log_note;
  use crate::log_writer;
-@@ -561,11 +560,10 @@
++use crate::namespace::SandboxNamespace;
+ use crate::open_directory_no_reparse;
+ use crate::path_mask_allows;
+ use crate::path_write_aces_need_refresh;
+@@ -561,11 +561,10 @@
              payload.runtime == SetupRuntime::Legacy && !crate::registered_core_requested(),
              "registered Core requires service-owned provisioning"
          );
@@ -4901,7 +4905,7 @@ diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs b/codex-rs/wi
          Some(guard)
      } else {
          None
-@@ -574,6 +572,14 @@
+@@ -574,6 +573,14 @@
  }
  
  fn run_payload(payload: &Payload) -> Result<()> {
@@ -4916,34 +4920,66 @@ diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs b/codex-rs/wi
      let sbx_dir = sandbox_dir(&payload.codex_home);
      std::fs::create_dir_all(&sbx_dir).map_err(|err| {
          anyhow::Error::new(SetupFailure::new(
-@@ -624,6 +630,14 @@
+@@ -587,7 +594,11 @@
+             format!("open log in {} failed: {err}", sbx_dir.display()),
+         ))
+     })?;
+-    let result = run_setup(payload, &mut log, &sbx_dir);
++    // Admission checked all pre-existing identity metadata before native setup
++    // invalidates and exclusively retains its marker. Keep that same namespace
++    // through this helper call tree; reopening the marker here would conflict
++    // with the native ProvisionOnly handle, not strengthen ownership checks.
++    let result = run_setup(payload, &mut log, &sbx_dir, &namespace);
+     if let Err(err) = &result {
+         let _ = log_line(&mut log, &format!("setup error: {err:?}"));
+         log_note(&format!("setup error: {err:?}"), Some(sbx_dir.as_path()));
+@@ -624,7 +635,12 @@
      result
  }
  
-+fn namespace_for_payload(payload: &Payload) -> Result<crate::namespace::SandboxNamespace> {
-+    let namespace =
-+        crate::namespace::SandboxNamespace::for_user(&payload.codex_home, &payload.real_user)?;
-+    namespace.validate_names(&payload.offline_username, &payload.online_username)?;
-+    namespace.require_owned_state()?;
-+    Ok(namespace)
-+}
-+
- fn run_setup(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Result<()> {
+-fn run_setup(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Result<()> {
++fn run_setup(
++    payload: &Payload,
++    log: &mut dyn Write,
++    sbx_dir: &Path,
++    namespace: &SandboxNamespace,
++) -> Result<()> {
      let writes_setup_marker = !payload.refresh_only && payload.mode != SetupMode::ReadAclsOnly;
      let marker = if writes_setup_marker {
-@@ -650,13 +664,21 @@
+         Some(prepare_setup_marker(
+@@ -636,11 +652,11 @@
+         None
+     };
+     match payload.mode {
+-        SetupMode::ReadAclsOnly => run_read_acl_only(payload, log),
++        SetupMode::ReadAclsOnly => run_read_acl_only(payload, log, namespace),
+         SetupMode::InteractiveProvision | SetupMode::ProvisionOnly => {
+-            run_provision_only(payload, log, sbx_dir)
+-        }
+-        SetupMode::Full => run_setup_full(payload, log, sbx_dir),
++            run_provision_only(payload, log, sbx_dir, namespace)
++        }
++        SetupMode::Full => run_setup_full(payload, log, sbx_dir, namespace),
+     }?;
+     if let Some(marker) = marker {
+         commit_setup_marker(
+@@ -650,13 +666,24 @@
              &payload.online_username,
              &payload.proxy_ports,
              payload.allow_local_binding,
-+            &namespace_for_payload(payload)?,
++            namespace,
          )?;
      }
      Ok(())
  }
  
- fn run_read_acl_only(payload: &Payload, log: &mut dyn Write) -> Result<()> {
+-fn run_read_acl_only(payload: &Payload, log: &mut dyn Write) -> Result<()> {
 -    let _read_acl_guard = match acquire_read_acl_mutex()? {
-+    let namespace = namespace_for_payload(payload)?;
++fn run_read_acl_only(
++    payload: &Payload,
++    log: &mut dyn Write,
++    namespace: &SandboxNamespace,
++) -> Result<()> {
 +    let group_sid =
 +        string_from_sid_bytes(&resolve_sid(&namespace.key.group())?).map_err(anyhow::Error::msg)?;
 +    let _read_acl_guard = match acquire_read_acl_mutex(
@@ -4954,102 +4990,121 @@ diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs b/codex-rs/wi
          Some(guard) => guard,
          None => {
              log_line(log, "read ACL helper already running; skipping")?;
-@@ -664,7 +686,7 @@
+@@ -664,7 +691,7 @@
          }
      };
      log_line(log, "read-acl-only mode: applying read ACLs")?;
 -    let sandbox_group_sid = resolve_sandbox_users_group_sid()?;
-+    let sandbox_group_sid = resolve_sandbox_users_group_sid(&namespace_for_payload(payload)?)?;
++    let sandbox_group_sid = resolve_sandbox_users_group_sid(namespace)?;
      let sandbox_group_psid = sid_bytes_to_psid(&sandbox_group_sid)?;
      let mut refresh_errors: Vec<String> = Vec::new();
      if !payload.read_roots.is_empty() {
-@@ -740,6 +762,7 @@
+@@ -718,7 +745,12 @@
+     Ok(())
+ }
+ 
+-fn provision_sandbox(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Result<()> {
++fn provision_sandbox(
++    payload: &Payload,
++    log: &mut dyn Write,
++    sbx_dir: &Path,
++    namespace: &SandboxNamespace,
++) -> Result<()> {
+     let _setup_lock = acquire_sandbox_setup_lock(INFINITE)?;
+     let mut repairing_disabled_accounts = false;
+     for username in [&payload.offline_username, &payload.online_username] {
+@@ -740,6 +772,7 @@
          new_user_flags,
          log,
          payload.mode,
-+        &namespace_for_payload(payload)?,
++        namespace,
      );
      if let Err(err) = provision_result {
          if extract_setup_failure(&err).is_some() {
-@@ -766,7 +789,8 @@
+@@ -765,8 +798,9 @@
+         ))
      })?;
      let offline_sid_str = string_from_sid_bytes(&offline_sid).map_err(anyhow::Error::msg)?;
-     configure_offline_sandbox_network(payload, &offline_sid_str, log)?;
+-    configure_offline_sandbox_network(payload, &offline_sid_str, log)?;
 -    let wfp_result = install_wfp_filters(
++    configure_offline_sandbox_network(payload, &offline_sid_str, log, namespace)?;
 +    let wfp_result = crate::wfp_setup::install_wfp_filters_for_namespace(
-+        &namespace_for_payload(payload)?.key,
++        &namespace.key,
          &payload.codex_home,
          &payload.offline_username,
          payload.otel.as_ref(),
-@@ -793,7 +817,8 @@
+@@ -792,8 +826,10 @@
+     payload: &Payload,
      offline_sid_str: &str,
      log: &mut dyn Write,
++    namespace: &SandboxNamespace,
  ) -> Result<()> {
 -    let proxy_allowlist_result = firewall::ensure_offline_proxy_allowlist(
 +    let proxy_allowlist_result = firewall::ensure_offline_proxy_allowlist_for_namespace(
-+        &namespace_for_payload(payload)?.key,
++        &namespace.key,
          offline_sid_str,
          &payload.proxy_ports,
          payload.allow_local_binding,
-@@ -808,7 +833,11 @@
+@@ -808,7 +844,8 @@
              format!("ensure offline proxy allowlist failed: {err}"),
          )));
      }
 -    let firewall_result = firewall::ensure_offline_network_blocks(offline_sid_str, log);
-+    let firewall_result = firewall::ensure_offline_network_blocks_for_namespace(
-+        &namespace_for_payload(payload)?.key,
-+        offline_sid_str,
-+        log,
-+    );
++    let firewall_result =
++        firewall::ensure_offline_network_blocks_for_namespace(&namespace.key, offline_sid_str, log);
      if let Err(err) = firewall_result {
          if extract_setup_failure(&err).is_some() {
              return Err(err);
-@@ -896,12 +925,13 @@
- fn run_provision_only(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Result<()> {
-     provision_sandbox(payload, log, sbx_dir)?;
+@@ -893,10 +930,15 @@
+     })
+ }
  
+-fn run_provision_only(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Result<()> {
+-    provision_sandbox(payload, log, sbx_dir)?;
+-
 -    let sandbox_group_sid = resolve_sandbox_users_group_sid().map_err(|err| {
--        anyhow::Error::new(SetupFailure::new(
--            SetupErrorCode::HelperSidResolveFailed,
--            format!("resolve sandbox users group SID failed: {err}"),
--        ))
--    })?;
-+    let sandbox_group_sid = resolve_sandbox_users_group_sid(&namespace_for_payload(payload)?)
-+        .map_err(|err| {
-+            anyhow::Error::new(SetupFailure::new(
-+                SetupErrorCode::HelperSidResolveFailed,
-+                format!("resolve sandbox users group SID failed: {err}"),
-+            ))
-+        })?;
- 
-     lock_sandbox_bin_dir(payload, &sandbox_group_sid)?;
-     lock_persistent_sandbox_dirs(payload, &sandbox_group_sid)?;
-@@ -915,12 +945,13 @@
-         provision_sandbox(payload, log, sbx_dir)?;
-     }
- 
--    let sandbox_group_sid = resolve_sandbox_users_group_sid().map_err(|err| {
--        anyhow::Error::new(SetupFailure::new(
--            SetupErrorCode::HelperSidResolveFailed,
--            format!("resolve sandbox users group SID failed: {err}"),
--        ))
--    })?;
-+    let sandbox_group_sid = resolve_sandbox_users_group_sid(&namespace_for_payload(payload)?)
-+        .map_err(|err| {
-+            anyhow::Error::new(SetupFailure::new(
-+                SetupErrorCode::HelperSidResolveFailed,
-+                format!("resolve sandbox users group SID failed: {err}"),
-+            ))
-+        })?;
-     let sandbox_group_psid = sid_bytes_to_psid(&sandbox_group_sid).map_err(|err| {
++fn run_provision_only(
++    payload: &Payload,
++    log: &mut dyn Write,
++    sbx_dir: &Path,
++    namespace: &SandboxNamespace,
++) -> Result<()> {
++    provision_sandbox(payload, log, sbx_dir, namespace)?;
++
++    let sandbox_group_sid = resolve_sandbox_users_group_sid(namespace).map_err(|err| {
          anyhow::Error::new(SetupFailure::new(
              SetupErrorCode::HelperSidResolveFailed,
-@@ -998,7 +1029,7 @@
+             format!("resolve sandbox users group SID failed: {err}"),
+@@ -909,13 +951,18 @@
+     Ok(())
+ }
+ 
+-fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Result<()> {
++fn run_setup_full(
++    payload: &Payload,
++    log: &mut dyn Write,
++    sbx_dir: &Path,
++    namespace: &SandboxNamespace,
++) -> Result<()> {
+     let refresh_only = payload.refresh_only;
+     if !refresh_only {
+-        provision_sandbox(payload, log, sbx_dir)?;
+-    }
+-
+-    let sandbox_group_sid = resolve_sandbox_users_group_sid().map_err(|err| {
++        provision_sandbox(payload, log, sbx_dir, namespace)?;
++    }
++
++    let sandbox_group_sid = resolve_sandbox_users_group_sid(namespace).map_err(|err| {
+         anyhow::Error::new(SetupFailure::new(
+             SetupErrorCode::HelperSidResolveFailed,
+             format!("resolve sandbox users group SID failed: {err}"),
+@@ -998,7 +1045,7 @@
      if payload.read_roots.is_empty() {
          log_line(log, "no read roots to grant; skipping read ACL helper")?;
      } else {
 -        match read_acl_mutex_exists() {
-+        match read_acl_mutex_exists(&namespace_for_payload(payload)?.key.read_acl_mutex()) {
++        match read_acl_mutex_exists(&namespace.key.read_acl_mutex()) {
              Ok(true) => {
                  log_line(log, "read ACL helper already running; skipping spawn")?;
              }
@@ -5370,7 +5425,7 @@ diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/sandbox_users.rs
  }
  
  pub(super) fn provision_sandbox_users(
-@@ -70,9 +70,13 @@
+@@ -70,9 +70,14 @@
      new_user_flags: u32,
      log: &mut dyn Write,
      mode: SetupMode,
@@ -5378,15 +5433,16 @@ diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/sandbox_users.rs
  ) -> Result<()> {
 -    if let Err(err) = ensure_sandbox_users_group() {
 -        let message = format!("failed to create local group {SANDBOX_USERS_GROUP}: {err}");
++    // The sole caller borrows the namespace admitted in run_payload before
++    // native setup retained its exclusive marker. Do not reopen that marker.
 +    namespace.validate_names(offline_username, online_username)?;
-+    namespace.require_owned_state()?;
 +    let group_name = namespace.key.group();
 +    if let Err(err) = crate::winutil::ensure_named_sandbox_users_group(&group_name) {
 +        let message = format!("failed to create local group {group_name}: {err}");
          super::log_line(log, &message)?;
          return Err(anyhow::Error::new(SetupFailure::new(
              SetupErrorCode::HelperUsersGroupCreateFailed,
-@@ -85,8 +89,20 @@
+@@ -85,8 +90,20 @@
      )?;
      let offline_password = random_password();
      let online_password = random_password();
@@ -5409,7 +5465,7 @@ diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/sandbox_users.rs
      write_secrets(
          codex_home,
          offline_username,
-@@ -94,6 +110,7 @@
+@@ -94,6 +111,7 @@
          online_username,
          &online_password,
          mode,
@@ -5417,7 +5473,7 @@ diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/sandbox_users.rs
      )?;
      Ok(())
  }
-@@ -102,10 +119,11 @@
+@@ -102,10 +120,11 @@
      username: &str,
      password: &str,
      new_user_flags: u32,
@@ -5430,7 +5486,7 @@ diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/sandbox_users.rs
      Ok(())
  }
  
-@@ -294,6 +312,7 @@
+@@ -294,6 +313,7 @@
  
  #[derive(Serialize)]
  struct SandboxUsersFile {
@@ -5438,7 +5494,7 @@ diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/sandbox_users.rs
      version: u32,
      offline: SandboxUserRecord,
      online: SandboxUserRecord,
-@@ -301,6 +320,7 @@
+@@ -301,6 +321,7 @@
  
  #[derive(Serialize)]
  struct SetupMarker {
@@ -5446,7 +5502,7 @@ diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/sandbox_users.rs
      version: u32,
      offline_username: String,
      online_username: String,
-@@ -318,6 +338,7 @@
+@@ -318,6 +339,7 @@
      online_user: &str,
      online_pwd: &str,
      mode: SetupMode,
@@ -5454,7 +5510,7 @@ diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/sandbox_users.rs
  ) -> Result<()> {
      let secrets_dir = sandbox_secrets_dir(codex_home);
      std::fs::create_dir_all(&secrets_dir).map_err(|err| {
-@@ -342,6 +363,7 @@
+@@ -342,6 +364,7 @@
          ))
      })?;
      let users = SandboxUsersFile {
@@ -5462,7 +5518,7 @@ diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/sandbox_users.rs
          version: SETUP_VERSION,
          offline: SandboxUserRecord {
              username: offline_user.to_string(),
-@@ -483,8 +505,11 @@
+@@ -483,8 +506,11 @@
      online_user: &str,
      proxy_ports: &[u16],
      allow_local_binding: bool,
@@ -5474,6 +5530,92 @@ diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/sandbox_users.rs
          version: SETUP_VERSION,
          offline_username: offline_user.to_string(),
          online_username: online_user.to_string(),
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/sandbox_users_tests.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning/sandbox_users_tests.rs
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning/sandbox_users_tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning/sandbox_users_tests.rs
+@@ -80,3 +80,82 @@
+     assert_eq!(local_user_flags(&name)?, None);
+     Ok(())
+ }
++
++fn admitted_marker_fixture() -> Result<(
++    tempfile::TempDir,
++    crate::namespace::SandboxNamespace,
++    String,
++)> {
++    let home = tempfile::tempdir()?;
++    std::fs::create_dir(crate::sandbox_dir(home.path()))?;
++    let user = crate::runtime_ownership::current_setup_user()?;
++    let namespace = crate::namespace::SandboxNamespace::for_user(home.path(), &user)?;
++    namespace.reserve_owner()?;
++    namespace.require_owned_state()?;
++    Ok((home, namespace, user))
++}
++
++#[test]
++fn provision_marker_retains_native_exclusive_handle_until_commit() -> Result<()> {
++    let (home, namespace, user) = admitted_marker_fixture()?;
++    let marker = super::prepare_setup_marker(home.path(), &user, super::SetupMode::ProvisionOnly)?;
++    assert!(matches!(&marker, super::PreparedSetupMarker::Retained(_)));
++    // Ordinary readers retain full validation: the native marker is still
++    // exclusive, and no sharing-violation bypass is installed in namespace.rs.
++    let error = namespace.require_owned_state().unwrap_err();
++    assert_eq!(
++        error
++            .downcast_ref::<std::io::Error>()
++            .unwrap()
++            .raw_os_error(),
++        Some(32)
++    );
++    super::commit_setup_marker(
++        marker,
++        home.path(),
++        &namespace.key.offline(),
++        &namespace.key.online(),
++        &[53216],
++        false,
++        &namespace,
++    )?;
++    namespace.require_owned_state()?;
++    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(
++        crate::setup::setup_marker_path(home.path()),
++    )?)?;
++    assert_eq!(value["version"], crate::SETUP_VERSION);
++    assert_eq!(value["namespace"], namespace.key.id());
++    assert_eq!(value["proxy_ports"], serde_json::json!([53216]));
++    Ok(())
++}
++
++#[test]
++fn owned_empty_native_marker_remains_recoverable_after_interrupted_setup() -> Result<()> {
++    let (home, namespace, user) = admitted_marker_fixture()?;
++    let marker = super::prepare_setup_marker(home.path(), &user, super::SetupMode::ProvisionOnly)?;
++    drop(marker);
++    assert!(std::fs::read(crate::setup::setup_marker_path(home.path()))?.is_empty());
++    // The existing owner reservation, not a relaxed parser, authorizes retry.
++    let recovered = crate::namespace::SandboxNamespace::for_user(home.path(), &user)?;
++    recovered.require_owned_state()?;
++    assert_eq!(recovered.key.id(), namespace.key.id());
++    Ok(())
++}
++
++#[test]
++fn retained_native_marker_commit_rejects_foreign_account_names() -> Result<()> {
++    let (home, namespace, user) = admitted_marker_fixture()?;
++    let marker = super::prepare_setup_marker(home.path(), &user, super::SetupMode::ProvisionOnly)?;
++    let result = super::commit_setup_marker(
++        marker,
++        home.path(),
++        "foreign-account",
++        &namespace.key.online(),
++        &[],
++        false,
++        &namespace,
++    );
++    assert!(result.is_err());
++    assert!(std::fs::read(crate::setup::setup_marker_path(home.path()))?.is_empty());
++    Ok(())
++}
 diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/service.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning/service.rs
 --- a/codex-rs/windows-sandbox-rs/src/setup_provisioning/service.rs
 +++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning/service.rs

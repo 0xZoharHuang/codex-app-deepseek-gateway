@@ -6,10 +6,29 @@ The integration code is distributed under the Apache License, Version 2.0.
 It depends on pure protocol modules from codex-deepseek-runtime at
 cb788738864e97a16cde82f3c584164162ab6f7c (published 0.6.7, Apache-2.0).
 
-The native patches modify OpenAI Codex source at
-680c4ba93ec79c292287fb9e0b627dc7a76e3b5e (Apache-2.0).
+The current native patches modify OpenAI Codex source at
+720fec862a608ae1e5878d1eecb04fb93192e93c (Apache-2.0).
+Historical N/J producer records refer separately to Codex commit
+680c4ba93ec79c292287fb9e0b627dc7a76e3b5e; they are not the current O165 build.
 Upstream LICENSE and NOTICE are retained in licenses/.
 Modified source identities and patch provenance are recorded in native/.
+
+Native producer attribution clarification
+-----------------------------------------
+The retained licenses/codex-NOTICE is the exact NOTICE from the immutable O165
+producer source identified by fingerprint
+370c680b6dbaa093cd36afab2db2c2f821b0c54b3bdecef76e1f951e8ac02289.
+Its statement that both ACL coordination modules were reused "without source
+changes" was draft wording. The final acl_lock.rs derives from CDS 0.6.7 and
+adds a read-only pinned-parent accessor and a root metadata-handle
+classification assertion. Its hash is
+149b498cba58b6b6984e96b1719e9dfd232aacabe5b968c9b01474233194bedb.
+The private_acl_lock.rs module remains byte-identical to the CDS producer,
+with hash b83c9c39f03115b98279e35eeb1c5cd422bc4632e087a44e83b2391c5f3d9581.
+The additions do not replace ACE policy, introduce a new lock protocol, or
+implement an agent, tool, approval or thread scheduler. Exact modified-file
+identities and patches accompany the native distribution. This clarification
+does not alter the retained producer source or its original build identity.
 
 The proprietary desktop App package is obtained separately from its official
 publisher; it is not included in this source repository or Python package.

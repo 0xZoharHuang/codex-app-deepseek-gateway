@@ -1,5 +1,5 @@
 from __future__ import annotations
-import copy, json, os, subprocess, sys
+import copy, hashlib, json, os, subprocess, sys
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
@@ -448,3 +448,192 @@ def test_configuration_with_foreign_App_keeps_three_way_rollback_and_later_user_
     assert "model_catalog_json" not in restored and "model_providers" not in restored
     assert path.read_text().count("# Original user setting")==1
     assert state==before and not f.backend.spawned
+
+
+@pytest.fixture
+def prior_cohort(fixture, monkeypatch):
+    """Retained installation verification is a lifecycle boundary, never executed here."""
+    f = fixture
+    configure(f)
+    original = delivery.read_binding(f.installation, f.backend)
+    old_id = "b" * 20
+    prior = f.installation.root / "releases" / old_id
+    baseline = prior / "venv/Lib/site-packages/codex_app_deepseek/assets/app-launch-baseline.json"
+    baseline.parent.mkdir(parents=True)
+    baseline.write_text(json.dumps({"version": "26.1016.8120.0", "native_version": "0.163.0-alpha.11.1"}))
+    old_hash = app.sha(baseline)
+    monkeypatch.setattr(delivery, "PRIOR_APP_BASELINES", {old_hash: ("26.1016.8120.0", "0.163.0-alpha.11.1")})
+    receipt = prior / "installation.json"
+    receipt.write_text(json.dumps({"schema_version": 1, "project": delivery.lc.PROJECT,
+        "release_id": old_id, "data_home": str(f.installation.data)}))
+    verified = []
+    def verify(path, value):
+        assert path == prior and value == json.loads(receipt.read_text())
+        verified.append(path)
+    monkeypatch.setattr(delivery.lc, "_verify_installation", verify)
+    old = {**original, "gateway_release_id": old_id, "app_baseline_sha256": old_hash}
+    path = delivery.binding_path(f.installation)
+    app.save(path, old)
+    return SimpleNamespace(f=f, old=old, raw=path.read_bytes(), receipt=receipt,
+                           baseline=baseline, verified=verified)
+
+
+def test_explicit_cohort_upgrade_keeps_recoverable_binding_but_requires_new_catalog(prior_cohort):
+    old = prior_cohort; f = old.f
+    config = (f.paths["home"] / "config.toml").read_bytes()
+    with pytest.raises(delivery.DeliveryError, match="bind again"):
+        delivery.read_binding(f.installation, f.backend, previous_release=True)
+    with pytest.raises(delivery.DeliveryError, match="bind again"):
+        delivery.configure(f.installation.root, f.catalog, app.sha(f.catalog), backend=f.backend)
+    result = bind(f)
+    assert result["catalog_reconfiguration_required"] is True
+    assert old.verified == [old.receipt.parent]
+    current = delivery.read_binding(f.installation, f.backend)
+    assert current["app_baseline_sha256"] == app.BASELINE_SHA256 and current["catalog"] is None
+    assert current["gateway_release_id"] == f.installation.receipt["release_id"]
+    backup = Path(result["prior_cohort_backup"])
+    assert (backup / "binding.before.json").read_bytes() == old.raw
+    assert (backup / "prior-installation.json").read_bytes() == old.receipt.read_bytes()
+    assert (backup / "prior-app-baseline.json").read_bytes() == old.baseline.read_bytes()
+    record = json.loads((backup / "migration.json").read_bytes())
+    assert record["before_sha256"] == hashlib.sha256(old.raw).hexdigest()
+    assert record["planned_binding_sha256"] == app.sha(delivery.binding_path(f.installation))
+    assert (f.paths["home"] / "config.toml").read_bytes() == config and not f.backend.spawned
+    # Explicit configure is the only operation that installs a new cohort catalog.
+    delivery.configure(f.installation.root, f.catalog, app.sha(f.catalog), backend=f.backend)
+    assert delivery.read_binding(f.installation, f.backend)["catalog"] is not None
+
+
+@pytest.mark.parametrize("fault", ["unknown-baseline", "baseline-container", "foreign-owner", "bad-schema",
+    "bad-release", "escaped-catalog", "foreign-data", "missing-receipt", "changed-baseline", "unverified-install"])
+def test_cohort_upgrade_rejects_unknown_or_unowned_provenance_before_writes(prior_cohort, monkeypatch, fault):
+    old = prior_cohort; f = old.f; path = delivery.binding_path(f.installation)
+    value = dict(old.old)
+    if fault == "unknown-baseline": value["app_baseline_sha256"] = "f" * 64
+    elif fault == "baseline-container": value["app_baseline_sha256"] = []
+    elif fault == "foreign-owner": value["owner_sid"] = "S-1-5-21-2-9999"
+    elif fault == "bad-schema": value["schema_version"] = True
+    elif fault == "bad-release": value["gateway_release_id"] = "../another"
+    elif fault == "escaped-catalog": value["catalog"] = {"path": str(f.catalog), "sha256": app.sha(f.catalog)}
+    elif fault == "foreign-data":
+        receipt = json.loads(old.receipt.read_bytes()); receipt["data_home"] = str(f.installation.data.parent / "foreign")
+        old.receipt.write_text(json.dumps(receipt))
+    elif fault == "missing-receipt": old.receipt.unlink()
+    elif fault == "changed-baseline": old.baseline.write_text("{}")
+    else:
+        def fail(*args): raise delivery.lc.LifecycleError("Installation contains modified files")
+        monkeypatch.setattr(delivery.lc, "_verify_installation", fail)
+    app.save(path, value)
+    before = {p.relative_to(f.installation.data).as_posix(): p.read_bytes()
+              for p in f.installation.data.rglob("*") if p.is_file()}
+    config = (f.paths["home"] / "config.toml").read_bytes()
+    with pytest.raises((delivery.DeliveryError, delivery.lc.LifecycleError, ValueError, OSError)):
+        bind(f)
+    after = {p.relative_to(f.installation.data).as_posix(): p.read_bytes()
+             for p in f.installation.data.rglob("*") if p.is_file()}
+    assert after == before and (f.paths["home"] / "config.toml").read_bytes() == config
+    assert not f.backend.spawned
+
+
+@pytest.mark.parametrize("fault", ["duplicate-key", "hardlink", "directory"])
+def test_binding_snapshot_rejects_ambiguous_or_aliased_files(fixture, fault):
+    f = fixture; bind(f); path = delivery.binding_path(f.installation)
+    if fault == "duplicate-key":
+        path.write_bytes(path.read_bytes().replace(b'{', b'{"owner_sid":"foreign",', 1))
+    elif fault == "hardlink": os.link(path, path.with_name("binding-alias.json"))
+    else: path.unlink(); path.mkdir()
+    with pytest.raises(delivery.DeliveryError):
+        delivery.read_binding(f.installation, f.backend)
+    assert not f.backend.spawned
+
+
+def test_cohort_binding_cas_preserves_an_external_selection_during_backup(prior_cohort, monkeypatch):
+    old = prior_cohort; f = old.f; path = delivery.binding_path(f.installation)
+    save = delivery._backup_prior_binding; external = old.raw + b" "
+    def backup(*args):
+        result = save(*args)
+        path.write_bytes(external)
+        return result
+    monkeypatch.setattr(delivery, "_backup_prior_binding", backup)
+    with pytest.raises(delivery.DeliveryError, match="later selection preserved"):
+        bind(f)
+    assert path.read_bytes() == external and not f.backend.spawned
+
+
+def test_cohort_backup_refuses_preexisting_inconsistent_bytes(prior_cohort):
+    old = prior_cohort; f = old.f
+    planned = {**old.old, "gateway_release_id": f.installation.receipt["release_id"],
+               "app_baseline_sha256": app.BASELINE_SHA256, "native_manifest": str(f.manifest.resolve()),
+               "native_manifest_sha256": app.sha(f.manifest), "catalog": None}
+    planned_hash = hashlib.sha256((json.dumps(planned, indent=2) + "\n").encode()).hexdigest()
+    before_hash = hashlib.sha256(old.raw).hexdigest()
+    transition = hashlib.sha256((before_hash + ":" + planned_hash).encode("ascii")).hexdigest()
+    backup = f.installation.data / "app-binding-backups" / transition
+    backup.mkdir(parents=True)
+    (backup / "binding.before.json").write_bytes(b"unrelated earlier file")
+    with pytest.raises(delivery.DeliveryError, match="backup changed"):
+        bind(f)
+    assert delivery.binding_path(f.installation).read_bytes() == old.raw and not f.backend.spawned
+
+
+def test_binding_backup_rollback_hash_precondition_preserves_later_selection(prior_cohort):
+    from codex_app_deepseek.app_config import ConfigurationConflict
+    old = prior_cohort; f = old.f; result = bind(f)
+    backup = Path(result["prior_cohort_backup"])
+    record = json.loads((backup / "migration.json").read_bytes())
+    path = delivery.binding_path(f.installation)
+    upgraded = path.read_bytes()
+    # The recorded recovery rule can restore exactly the known upgrade bytes.
+    delivery._atomic_write(path, old.raw, expected_sha256=record["planned_binding_sha256"])
+    assert path.read_bytes() == old.raw
+    delivery._atomic_write(path, upgraded)
+    external = upgraded + b" "
+    path.write_bytes(external)
+    with pytest.raises(ConfigurationConflict):
+        delivery._atomic_write(path, old.raw, expected_sha256=record["planned_binding_sha256"])
+    assert path.read_bytes() == external
+
+
+@pytest.mark.skipif(os.name != "nt", reason="actual Windows directory junction")
+def test_cohort_upgrade_rejects_prior_installation_junction_before_resolving(prior_cohort):
+    old = prior_cohort; f = old.f; prior = old.receipt.parent
+    target = prior.parent / "retained" / prior.name
+    target.parent.mkdir(); prior.rename(target)
+    result = subprocess.run([r"C:\Windows\System32\cmd.exe", "/d", "/c", "mklink", "/J", str(prior), str(target)],
+                            capture_output=True, text=True, errors="replace")
+    assert result.returncode == 0, result.stderr
+    try:
+        with pytest.raises(ValueError, match="junction"):
+            bind(f)
+        assert delivery.binding_path(f.installation).read_bytes() == old.raw
+        assert not (f.installation.data / "app-binding-backups").exists()
+    finally:
+        os.rmdir(prior)  # Remove only the junction; retained fixture bytes remain.
+
+
+def test_cohort_backup_survives_rollback_then_upgrade_to_another_gateway_release(prior_cohort, monkeypatch):
+    old = prior_cohort; f = old.f
+    first = bind(f)
+    backup = Path(first["prior_cohort_backup"])
+    initial = {p.name: p.read_bytes() for p in backup.iterdir()}
+    app.save(delivery.binding_path(f.installation), old.old)
+    f.installation = delivery.Installation(f.installation.root, f.installation.directory,
+                                          f.installation.data, {"release_id": "c" * 20})
+    monkeypatch.setattr(delivery, "installed", lambda root: f.installation)
+    second = bind(f)
+    second_backup = Path(second["prior_cohort_backup"])
+    assert second_backup != backup and second_backup.parent == backup.parent
+    assert {p.name: p.read_bytes() for p in backup.iterdir()} == initial
+    assert (second_backup / "binding.before.json").read_bytes() == old.raw
+    assert delivery.read_binding(f.installation, f.backend)["gateway_release_id"] == "c" * 20
+
+
+def test_cohort_retained_receipt_change_during_verification_cannot_be_backed_up(prior_cohort, monkeypatch):
+    old = prior_cohort; f = old.f
+    def concurrent_receipt_edit(*args):
+        old.receipt.write_bytes(old.receipt.read_bytes() + b" ")
+    monkeypatch.setattr(delivery.lc, "_verify_installation", concurrent_receipt_edit)
+    with pytest.raises(delivery.DeliveryError, match="provenance changed"):
+        bind(f)
+    assert delivery.binding_path(f.installation).read_bytes() == old.raw
+    assert not (f.installation.data / "app-binding-backups").exists()

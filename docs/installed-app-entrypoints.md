@@ -48,6 +48,29 @@ After a gateway upgrade, explicitly bind the selected compatible native release
 again. An unknown App update, signature, commit, binary or manifest fails closed.
 There is no automatic update, download, provider fallback or process takeover.
 
+The explicit `app-bind` upgrade also accepts the previously shipped
+26.1016.8120.0 / 0.163.0-alpha.11.1 cohort when its exact known baseline and
+original managed installation are still present and verified for this data home.
+Normal check/configure/launch operations continue to reject that old binding
+under the new release. The upgrade preserves the old binding, installation
+receipt and baseline under `app-binding-backups/<transition-sha256>` before
+publishing the new selection. It clears the previous model catalog: run
+`app-configure` with the new version-matched catalog before starting the App.
+The command returns `prior_cohort_backup` and
+`catalog_reconfiguration_required` for this transition. It does not delete a
+binding, select a replacement runtime automatically, or modify native sessions.
+
+For an explicit downgrade, retain that backup together with the old installation
+and native directory. The transition directory is keyed by SHA256 of the original and planned binding
+hashes, so a later upgrade after rollback retains its own recovery record.
+Its `migration.json` records both the original binding
+SHA and the exact planned replacement SHA. Restore `binding.before.json` only
+while the current binding still matches `planned_binding_sha256`, using an atomic
+compare-and-swap write; then use the retained release's normal rollback and
+configuration checkpoint workflow. If the binding has changed since the upgrade,
+stop and preserve the later explicit selection. Never copy an old binding over
+an unknown current file or remove it to bypass compatibility validation.
+
 ## Configure installed authentication
 
 Supply the version-matched model catalog and its trusted release SHA:

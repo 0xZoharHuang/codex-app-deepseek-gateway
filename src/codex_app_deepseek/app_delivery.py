@@ -12,11 +12,18 @@ import sys
 import tomllib
 from . import isolated_app as app
 from . import lifecycle as lc
-from .app_config import apply, prepare, _atomic_write, _private
+from .app_config import apply, prepare, _atomic_write, _private, _regular_path
+from .atomic_io import target_state
 from . import gateway_policy as gp
 
 LAUNCHER_SHA256 = "9a9269f2439aacca2c5b859a82497a1f8ad41a3b1fd111638e5c8701e8025507"
 AUTH_ARGS = ("-I", "-m", "codex_app_deepseek.cli", "auth-token")
+# Only this previously shipped, retained cohort is eligible for an explicit
+# upgrade. Normal reads still require the current baseline exactly.
+PRIOR_APP_BASELINES = {
+    "a67ef1480c1a526f56b4cd84e8a2e87c8fa26b3868aa4baf5a3fbf8586c53325":
+        ("26.1016.8120.0", "0.163.0-alpha.11.1"),
+}
 BINDING_KEYS = {"schema_version", "project", "gateway_release_id", "owner_sid",
                 "native_manifest", "native_manifest_sha256", "app_baseline_sha256", "catalog"}
 
@@ -88,18 +95,36 @@ def binding_path(installation):
     return installation.data / "app-binding.json"
 
 
-def read_binding(installation, backend, *, previous_release=False, verify_catalog=True):
+def _binding_snapshot(installation):
     path = binding_path(installation)
     if not path.is_file():
         raise DeliveryError("No private App runtime binding; use app-bind first")
-    value = app.load_json(path)
+    try:
+        _regular_path(path, "App binding")
+    except ValueError:
+        raise DeliveryError("App binding must be a regular owned file") from None
+    if path.stat().st_nlink != 1:
+        raise DeliveryError("App binding must have exactly one filesystem link")
+    state = target_state(path)
+    raw = path.read_bytes()
+    if state is None or hashlib.sha256(raw).hexdigest() != state[1] or target_state(path) != state:
+        raise DeliveryError("App binding changed during inspection")
+    try:
+        value = json.loads(raw.decode("utf-8-sig"), object_pairs_hook=gp._unique_config_object)
+    except (ValueError, UnicodeError):
+        raise DeliveryError("App binding must contain readable JSON") from None
+    return value, raw, state
+
+
+def _validate_binding(value, installation, backend, *, previous_release, verify_catalog, baselines):
     if (not isinstance(value, dict) or set(value) != BINDING_KEYS
             or type(value.get("schema_version")) is not int or value["schema_version"] != 1
             or value.get("project") != lc.PROJECT
             or not isinstance(value.get("gateway_release_id"), str)
             or not re.fullmatch("[0-9a-f]{20}", value["gateway_release_id"])
             or (not previous_release and value["gateway_release_id"] != installation.receipt["release_id"])
-            or value.get("app_baseline_sha256") != app.BASELINE_SHA256):
+            or not isinstance(value.get("app_baseline_sha256"), str)
+            or value["app_baseline_sha256"] not in baselines):
         raise DeliveryError("App binding does not match this installed release; explicitly bind again")
     if value.get("owner_sid") != backend.current()["sid"]:
         raise DeliveryError("App binding belongs to another Windows user")
@@ -122,6 +147,88 @@ def read_binding(installation, backend, *, previous_release=False, verify_catalo
         if verify_catalog and app.sha(path) != catalog["sha256"]:
             raise DeliveryError("Bound model catalog changed; explicit configuration is required")
     return value
+
+
+
+def read_binding(installation, backend, *, previous_release=False, verify_catalog=True):
+    value, _, _ = _binding_snapshot(installation)
+    return _validate_binding(value, installation, backend, previous_release=previous_release,
+                             verify_catalog=verify_catalog, baselines={app.BASELINE_SHA256})
+
+
+def _prior_binding_for_explicit_rebind(installation, backend):
+    value, raw, state = _binding_snapshot(installation)
+    _validate_binding(value, installation, backend, previous_release=True, verify_catalog=False,
+                      baselines={app.BASELINE_SHA256, *PRIOR_APP_BASELINES})
+    if value["app_baseline_sha256"] == app.BASELINE_SHA256:
+        return value, raw, state, None
+    # Only explicit bind can cross a known App cohort, after the new package and
+    # bundle passed validation. Inspection, start and configure remain strict.
+    prior = installation.root / "releases" / value["gateway_release_id"]
+    # Inspect the caller-visible path before resolve can hide an ancestor link.
+    receipt_path = _regular_path(prior / "installation.json", "Prior installation receipt")
+    prior = lc._within(prior, installation.root / "releases")
+    receipt_state = target_state(receipt_path)
+    receipt_raw = receipt_path.read_bytes()
+    if receipt_state is None or hashlib.sha256(receipt_raw).hexdigest() != receipt_state[1]:
+        raise DeliveryError("Prior installation receipt changed during inspection")
+    receipt = json.loads(receipt_raw.decode("utf-8-sig"), object_pairs_hook=gp._unique_config_object)
+    if (not isinstance(receipt, dict) or receipt.get("project") != lc.PROJECT
+            or receipt.get("release_id") != value["gateway_release_id"]
+            or not isinstance(receipt.get("data_home"), str)
+            or not Path(receipt["data_home"]).is_absolute()
+            or canonical_path(receipt["data_home"]) != canonical_path(installation.data)):
+        raise DeliveryError("Prior App binding does not identify a retained owned installation")
+    lc._verify_installation(prior, receipt)
+    asset = _regular_path(prior / "venv/Lib/site-packages/codex_app_deepseek/assets/app-launch-baseline.json",
+                          "Prior App baseline")
+    if app.sha(asset) != value["app_baseline_sha256"]:
+        raise DeliveryError("Prior App baseline bytes differ from the known binding")
+    baseline = app.load_json(asset)
+    if not isinstance(baseline, dict):
+        raise DeliveryError("Prior App baseline identity differs")
+    expected = PRIOR_APP_BASELINES[value["app_baseline_sha256"]]
+    if (baseline.get("version"), baseline.get("native_version")) != expected:
+        raise DeliveryError("Prior App baseline identity differs")
+    baseline_raw = asset.read_bytes()
+    if (target_state(receipt_path) != receipt_state
+            or hashlib.sha256(baseline_raw).hexdigest() != value["app_baseline_sha256"]):
+        raise DeliveryError("Prior installation provenance changed during inspection")
+    retained = {"installation": receipt_raw, "baseline": baseline_raw}
+    return value, raw, state, retained
+
+
+def _backup_prior_binding(installation, raw, retained, applied_sha256):
+    digest = hashlib.sha256(raw).hexdigest()
+    transition = hashlib.sha256((digest + ":" + applied_sha256).encode("ascii")).hexdigest()
+    directory = installation.data / "app-binding-backups" / transition
+    _regular_path(directory / "binding.before.json", "Prior binding backup")
+    directory.mkdir(parents=True, exist_ok=True)
+    _private(directory, directory=True)
+    files = {"binding.before.json": raw, "prior-installation.json": retained["installation"],
+             "prior-app-baseline.json": retained["baseline"]}
+    for name, content in files.items():
+        path = _regular_path(directory / name, "Prior binding backup")
+        if path.exists():
+            if path.stat().st_nlink != 1 or path.read_bytes() != content:
+                raise DeliveryError("Prior binding backup changed")
+        else:
+            with path.open("xb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            _private(path)
+    record = _regular_path(directory / "migration.json", "Prior binding backup record")
+    value = {"schema_version": 1, "before_sha256": digest, "planned_binding_sha256": applied_sha256,
+             "before_file": "binding.before.json", "prior_installation_file": "prior-installation.json",
+             "prior_App_baseline_file": "prior-app-baseline.json",
+             "rollback_rule": "Restore only if current binding still matches planned_binding_sha256; preserve any later explicit binding selection."}
+    if record.exists():
+        if app.load_json(record) != value:
+            raise DeliveryError("Prior binding migration record changed")
+    else:
+        app.save(record, value)
+    return str(directory)
 
 
 def native_request(binding, *, accessibility=False, observation_seconds=60):
@@ -166,15 +273,28 @@ def bind(root, manifest, digest, *, backend=None):
                  "native_manifest": str(manifest), "native_manifest_sha256": digest,
                  "app_baseline_sha256": app.BASELINE_SHA256, "catalog": None}
         path = binding_path(installation)
+        before_state = None
+        retained = None
+        backup = None
         if path.exists():
-            previous = read_binding(installation, backend, previous_release=True, verify_catalog=False)
-            if previous["native_manifest"] == str(manifest) and previous["native_manifest_sha256"] == digest:
+            previous, raw, before_state, retained = _prior_binding_for_explicit_rebind(installation, backend)
+            if (previous["app_baseline_sha256"] == app.BASELINE_SHA256
+                    and previous["native_manifest"] == str(manifest) and previous["native_manifest_sha256"] == digest):
                 old_catalog = previous["catalog"]
                 if old_catalog is not None and Path(old_catalog["path"]).is_file() and app.sha(old_catalog["path"]) == old_catalog["sha256"]:
                     value["catalog"] = old_catalog
-        app.save(path, value)
-    return {"status": "runtime_bound_not_launched", "binding": str(path),
-            "native_manifest_sha256": digest, "gateway_release_id": installation.receipt["release_id"]}
+        payload = (json.dumps(value, indent=2) + "\n").encode()
+        if retained is not None:
+            backup = _backup_prior_binding(installation, raw, retained, hashlib.sha256(payload).hexdigest())
+        if target_state(path) != before_state:
+            raise DeliveryError("App binding changed before publication; later selection preserved")
+        _atomic_write(path, payload, expected_sha256=before_state[1] if before_state else None)
+    result = {"status": "runtime_bound_not_launched", "binding": str(path),
+              "native_manifest_sha256": digest, "gateway_release_id": installation.receipt["release_id"]}
+    if backup is not None:
+        result["prior_cohort_backup"] = backup
+        result["catalog_reconfiguration_required"] = True
+    return result
 
 
 def configure(root, catalog, catalog_sha256, *, port=42817, backend=None):
