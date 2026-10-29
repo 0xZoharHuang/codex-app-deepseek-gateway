@@ -15,9 +15,9 @@ Modified source identities and patch provenance are recorded in native/.
 
 Native producer attribution clarification
 -----------------------------------------
-The retained licenses/codex-NOTICE is the exact NOTICE from the immutable O165
-producer source identified by fingerprint
-370c680b6dbaa093cd36afab2db2c2f821b0c54b3bdecef76e1f951e8ac02289.
+The retained licenses/codex-NOTICE preserves the exact NOTICE bytes from the
+native producer source. The current producer source fingerprint is recorded
+in the distribution provenance.
 Its statement that both ACL coordination modules were reused "without source
 changes" was draft wording. The final acl_lock.rs derives from CDS 0.6.7 and
 adds a read-only pinned-parent accessor and a root metadata-handle
