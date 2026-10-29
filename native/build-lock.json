@@ -8,14 +8,14 @@
   "patches": [
     {
       "file": "windows-home-namespace-0165.patch",
-      "sha256": "6e1181120c199fbbf841c07ab197abd8453be00449d6e80b2b455b59a66c8a93"
+      "sha256": "4a29f9e923e4cb9e56f57f98091f8ad3240f17e0c8f3b90273e9b7c7103aaafc"
     },
     {
       "file": "mcp-keyring-isolation-0165.patch",
-      "sha256": "2b98b46dec58a0b37c4880a991b7efdc81e5c1ce564f49fa369145e80711c769"
+      "sha256": "0cfe1ae48ab50ef8d930298c42cd7ee6d2de4277750cceacca7e5d2c2d0c8efc"
     }
   ],
-  "prepared_source_sha256": "bbd0dc8ccc46d03134f887503b48c008731f622acc05e208bba4c110ec704178",
+  "prepared_source_sha256": "370c680b6dbaa093cd36afab2db2c2f821b0c54b3bdecef76e1f951e8ac02289",
   "prepared_source_files": 9513,
   "cargo_lock_sha256": "7537da7c5e154334b15ef9b59091f5fed3a8e480b77c037e3a8b7f07d1614709",
   "release_environment": {

@@ -1,3 +1,4 @@
+diff --git a/codex-rs/rmcp-client/src/oauth.rs b/codex-rs/rmcp-client/src/oauth.rs
 --- a/codex-rs/rmcp-client/src/oauth.rs
 +++ b/codex-rs/rmcp-client/src/oauth.rs
 @@ -97,7 +97,19 @@
@@ -66,9 +67,11 @@
              AuthKeyringBackendKind::Direct,
              &tokens.server_name,
              &tokens.url,
+diff --git a/codex-rs/rmcp-client/src/oauth/tests/keyring_isolation_tests.rs b/codex-rs/rmcp-client/src/oauth/tests/keyring_isolation_tests.rs
+new file mode 100644
 --- /dev/null
 +++ b/codex-rs/rmcp-client/src/oauth/tests/keyring_isolation_tests.rs
-@@ -0,0 +1,463 @@
+@@ -0,0 +1,481 @@
 +//! In-memory fixture keys include both service and account; no OS vault is accessed.
 +use super::*;
 +use codex_keyring_store::CredentialStoreError;
@@ -406,10 +409,28 @@
 +fn cdag_keyring_isolation_preserves_published_profile_identity() -> Result<()> {
 +    let env = TempCodexHome::new();
 +    let canonical = env.path().canonicalize()?;
-+    let digest = format!(
-+        "{:x}",
-+        Sha256::digest(canonical.to_string_lossy().as_bytes())
-+    );
++    let canonical_text = canonical.to_string_lossy();
++    // The published service hashes native AbsolutePathBuf::canonicalize, which
++    // uses dunce's normal Windows representation. Keep this expected value
++    // independent of keyring_service_name and check the stdlib prefix explicitly.
++    #[cfg(windows)]
++    let identity_path = {
++        let plain = canonical_text
++            .strip_prefix(r"\\?\")
++            .expect("the stdlib canonical local fixture has a verbatim prefix");
++        let bytes = plain.as_bytes();
++        assert!(
++            bytes.len() >= 3
++                && bytes[0].is_ascii_alphabetic()
++                && bytes[1] == b':'
++                && bytes[2] == b'\\',
++            "expected a canonical local-drive fixture path"
++        );
++        plain
++    };
++    #[cfg(not(windows))]
++    let identity_path = canonical_text.as_ref();
++    let digest = format!("{:x}", Sha256::digest(identity_path.as_bytes()));
 +    std::assert_eq!(
 +        keyring_service_name()?,
 +        format!("Codex App DeepSeek MCP Credentials|{}", &digest[..32])

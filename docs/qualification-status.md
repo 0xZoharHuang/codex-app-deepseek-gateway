@@ -451,3 +451,25 @@ service's retained-handle DACL primitive is being compared against stock native
 behavior. No new lock phase engine, ACE policy, agent loop or approval mechanism
 is introduced. Stable publication remains blocked until the actual native and App
 gates pass.
+
+
+## 2026-10-29: native root-only adapter verified
+
+A Windows-owned-directory differential verified the selected OS API composition
+against stock MAXIMUM_ALLOWED plus SetSecurityInfo in 14 actual cases. Full root
+ACL/control, child/grandchild ACL state and errors matched, including foreign
+ownership and a protected target with an unreadable parent. Windows computes the
+descriptor; this adapter does not implement ACE inheritance policy.
+
+The compiled Rust MCP selection passed all 30 cases. After correcting one fixture
+that had removed child read access during setup, the complete Sandbox selection
+passed all 41 entries under a normal Limited token (39 meaningful scenarios and
+two explicitly excluded child harnesses). The existing stock ACL assertions,
+Rust-to-stock differential, same-path concurrency, real cooperating child wait,
+read-only no-op and required-write denial all executed. The MCP executable and
+production source were byte-identical across that fixture-only correction.
+The prior failures and an observer's PID-reuse misclassification remain preserved.
+
+These results qualify the native adapter components. The four production binaries
+and the current App GUI, real model workflows and final deployment still require
+their separate gates; no stable App runtime declaration is made here.

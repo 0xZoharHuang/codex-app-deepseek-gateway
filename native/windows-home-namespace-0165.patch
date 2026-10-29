@@ -1540,7 +1540,15 @@ diff --git a/codex-rs/windows-sandbox-rs/src/acl.rs b/codex-rs/windows-sandbox-r
  use windows_sys::Win32::Security::Authorization::SetSecurityInfo;
  use windows_sys::Win32::Security::Authorization::TRUSTEE_IS_SID;
  use windows_sys::Win32::Security::Authorization::TRUSTEE_IS_UNKNOWN;
-@@ -109,6 +108,13 @@
+@@ -64,7 +63,6 @@
+ use windows_sys::Win32::Storage::FileSystem::VOLUME_NAME_NONE;
+ use windows_sys::Win32::Storage::FileSystem::WRITE_DAC;
+ use windows_sys::Win32::Storage::FileSystem::WRITE_OWNER;
+-use windows_sys::Win32::System::SystemServices::MAXIMUM_ALLOWED;
+ const SE_KERNEL_OBJECT: u32 = 6;
+ const OBJECT_INHERIT_ACE_FLAG: u8 = 0x01;
+ const INHERIT_ONLY_ACE: u8 = 0x08;
+@@ -109,6 +107,13 @@
          .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
          .open(path)
          .with_context(|| format!("open ACL target {}", path.display()))?;
@@ -1554,6 +1562,32 @@ diff --git a/codex-rs/windows-sandbox-rs/src/acl.rs b/codex-rs/windows-sandbox-r
      let mut p_sd: *mut c_void = std::ptr::null_mut();
      let mut p_dacl: *mut ACL = std::ptr::null_mut();
      let code = GetSecurityInfo(
+@@ -546,8 +551,9 @@
+     access_mode: ACCESS_MODE,
+     inheritance: u32,
+ ) -> Result<bool> {
+-    // Only directories need MAXIMUM_ALLOWED to suppress child ACL propagation.
+-    // On active EXE/DLL files, it can request access that causes sharing violations.
++    // Read first so an existing-ACE no-op does not require WRITE_DAC.
++    // The root-only Windows descriptor backend below suppresses child updates
++    // without a MAXIMUM_ALLOWED handle conflicting with cooperating pins.
+     let directory = if inheritance == 0
+         && path
+             .metadata()
+@@ -556,11 +562,11 @@
+     {
+         Some(
+             OpenOptions::new()
+-                .access_mode(MAXIMUM_ALLOWED)
++                .access_mode(READ_CONTROL)
+                 .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                 .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                 .open(path)
+-                .context("open ACL target for root-only update (MAXIMUM_ALLOWED)")?,
++                .context("open ACL target for root-only read (READ_CONTROL)")?,
+         )
+     } else {
+         None
 @@ -572,7 +578,7 @@
          access_mode
      };
@@ -1563,7 +1597,7 @@ diff --git a/codex-rs/windows-sandbox-rs/src/acl.rs b/codex-rs/windows-sandbox-r
          Some(directory) => {
              let mut security_descriptor: *mut c_void = std::ptr::null_mut();
              let mut acl: *mut ACL = std::ptr::null_mut();
-@@ -599,41 +605,45 @@
+@@ -599,45 +605,75 @@
          }
          None => fetch_dacl_handle(path)?,
      };
@@ -1644,27 +1678,23 @@ diff --git a/codex-rs/windows-sandbox-rs/src/acl.rs b/codex-rs/windows-sandbox-r
      let mut p_new_dacl: *mut ACL = std::ptr::null_mut();
      // Collect errors before releasing either allocation so every update path
      // shares the same cleanup, including failure to open the write handle.
-@@ -641,15 +651,7 @@
-         if entries.is_empty() {
-             return Ok(false);
-         }
--        let code2 = SetEntriesInAclW(
--            entries.len() as u32,
--            entries.as_ptr(),
--            p_dacl,
--            &mut p_new_dacl,
--        );
--        if code2 != ERROR_SUCCESS {
--            return Err(anyhow!("SetEntriesInAclW failed: {code2}"));
--        }
+     let result = (|| -> Result<bool> {
++        if entries.is_empty() {
++            return Ok(false);
++        }
 +        // Retain the native write handle and join CDS's exact cooperating object domain.
-         // For files and inheriting directory grants, request ACL-write access only
-         // when an update is needed. Use the same long-path support as the read handle.
-         let handle = match directory {
-@@ -662,6 +664,28 @@
-                 .open(path)
-                 .context("open ACL target for update (READ_CONTROL | WRITE_DAC)")?,
-         };
++        // For files and inheriting directory grants, request ACL-write access only
++        // when an update is needed. Use the same long-path support as the read handle.
++        let root_only_directory = directory.is_some();
++        let handle = match directory {
++            Some(directory) => crate::acl_lock::write_handle(&directory)?,
++            None => OpenOptions::new()
++                .access_mode(READ_CONTROL | WRITE_DAC)
++                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
++                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
++                .open(path)
++                .context("open ACL target for update (READ_CONTROL | WRITE_DAC)")?,
++        };
 +        let _scope =
 +            crate::acl_lock::acquire(handle.as_raw_handle() as _, crate::acl_lock::deadline())?;
 +        if !p_sd.is_null() {
@@ -1675,22 +1705,261 @@ diff --git a/codex-rs/windows-sandbox-rs/src/acl.rs b/codex-rs/windows-sandbox-r
 +        p_dacl = fresh_acl;
 +        p_sd = fresh_sd;
 +        entries = entries_for(p_dacl);
-+        if entries.is_empty() {
-+            return Ok(false);
-+        }
-+        let code2 = SetEntriesInAclW(
-+            entries.len() as u32,
-+            entries.as_ptr(),
-+            p_dacl,
-+            &mut p_new_dacl,
+         if entries.is_empty() {
+             return Ok(false);
+         }
+@@ -650,29 +686,21 @@
+         if code2 != ERROR_SUCCESS {
+             return Err(anyhow!("SetEntriesInAclW failed: {code2}"));
+         }
+-        // For files and inheriting directory grants, request ACL-write access only
+-        // when an update is needed. Use the same long-path support as the read handle.
+-        let handle = match directory {
+-            // MAXIMUM_ALLOWED suppresses propagation of existing inheritable ACEs too.
+-            Some(directory) => directory,
+-            None => OpenOptions::new()
+-                .access_mode(READ_CONTROL | WRITE_DAC)
+-                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+-                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+-                .open(path)
+-                .context("open ACL target for update (READ_CONTROL | WRITE_DAC)")?,
+-        };
+-        let code3 = SetSecurityInfo(
+-            handle.as_raw_handle() as _,
+-            1,
+-            DACL_SECURITY_INFORMATION,
+-            std::ptr::null_mut(),
+-            std::ptr::null_mut(),
+-            p_new_dacl,
+-            std::ptr::null_mut(),
+-        );
+-        if code3 != ERROR_SUCCESS {
+-            return Err(anyhow!("SetSecurityInfo failed: {code3}"));
++        if root_only_directory {
++            write_root_only_dacl(&handle, p_new_dacl, p_sd, &_scope)?;
++        } else {
++            let code3 = SetSecurityInfo(
++                handle.as_raw_handle() as _,
++                1,
++                DACL_SECURITY_INFORMATION,
++                std::ptr::null_mut(),
++                std::ptr::null_mut(),
++                p_new_dacl,
++                std::ptr::null_mut(),
++            );
++            if code3 != ERROR_SUCCESS {
++                return Err(anyhow!("SetSecurityInfo failed: {code3}"));
++            }
+         }
+         Ok(true)
+     })();
+@@ -683,6 +711,205 @@
+         LocalFree(p_sd as HLOCAL);
+     }
+     result
++}
++
++/// Preserve native root-only SetSecurityInfo semantics without its
++/// MAXIMUM_ALLOWED handle conflicting with cooperating no-delete pins.
++///
++/// Windows computes parent inheritance; this code does not rebuild ACEs. The
++/// final object write uses the same NtSetSecurityObject primitive as official
++/// 720fec windows-sandbox-service/registered_runtime/metadata.rs::write_acl.
++/// The fixed Windows Low-token differential covers root ACL/control, descendants,
++/// foreign ownership and a protected root whose parent cannot be read.
++unsafe fn write_root_only_dacl(
++    target: &std::fs::File,
++    dacl: *mut ACL,
++    original_descriptor: *mut c_void,
++    scope: &crate::acl_lock::AclScope,
++) -> Result<()> {
++    use windows::Win32::Foundation::BOOL;
++    use windows_sys::Win32::Foundation::RtlNtStatusToDosError;
++    use windows_sys::Win32::Security as security;
++    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
++
++    #[link(name = "ntdll")]
++    unsafe extern "system" {
++        fn NtSetSecurityObject(
++            handle: HANDLE,
++            information: u32,
++            descriptor: *const security::SECURITY_DESCRIPTOR,
++        ) -> i32;
++    }
++
++    let mut root_descriptor: *mut c_void = std::ptr::null_mut();
++    let mut parent_descriptor: *mut c_void = std::ptr::null_mut();
++    let mut computed: security::PSECURITY_DESCRIPTOR = std::ptr::null_mut();
++    let mut token = std::ptr::null_mut();
++    let result = (|| -> Result<()> {
++        let mut control = 0;
++        let mut revision = 0;
++        BOOL(security::GetSecurityDescriptorControl(
++            original_descriptor,
++            &mut control,
++            &mut revision,
++        ))
++        .ok()
++        .context("read root-only DACL control")?;
++        let mut owner = std::ptr::null_mut();
++        let mut group = std::ptr::null_mut();
++        let info = security::OWNER_SECURITY_INFORMATION
++            | security::GROUP_SECURITY_INFORMATION
++            | security::DACL_SECURITY_INFORMATION;
++        let status = GetSecurityInfo(
++            target.as_raw_handle() as _,
++            1,
++            info,
++            &mut owner,
++            &mut group,
++            std::ptr::null_mut(),
++            std::ptr::null_mut(),
++            &mut root_descriptor,
 +        );
-+        if code2 != ERROR_SUCCESS {
-+            return Err(anyhow!("SetEntriesInAclW failed: {code2}"));
++        if status != ERROR_SUCCESS {
++            return Err(std::io::Error::from_raw_os_error(status as i32))
++                .context("read root-only owner and group");
 +        }
-         let code3 = SetSecurityInfo(
-             handle.as_raw_handle() as _,
-             1,
-@@ -788,6 +812,29 @@
++        // A protected root does not consume its parent security descriptor.
++        // Do not add a parent READ_CONTROL requirement to this native path.
++        if control & security::SE_DACL_PROTECTED == 0
++            && let Some(parent) = scope.parent_handle(target)?
++        {
++            let status = GetSecurityInfo(
++                parent.as_raw_handle() as _,
++                1,
++                info,
++                std::ptr::null_mut(),
++                std::ptr::null_mut(),
++                std::ptr::null_mut(),
++                std::ptr::null_mut(),
++                &mut parent_descriptor,
++            );
++            if status != ERROR_SUCCESS {
++                return Err(std::io::Error::from_raw_os_error(status as i32))
++                    .context("read pinned root-only parent descriptor");
++            }
++        }
++
++        let mut creator: security::SECURITY_DESCRIPTOR = std::mem::zeroed();
++        let creator_ptr = (&mut creator as *mut security::SECURITY_DESCRIPTOR).cast();
++        BOOL(security::InitializeSecurityDescriptor(creator_ptr, 1))
++            .ok()
++            .context("initialize root-only creator descriptor")?;
++        BOOL(security::SetSecurityDescriptorDacl(
++            creator_ptr,
++            1,
++            dacl,
++            i32::from(control & security::SE_DACL_DEFAULTED != 0),
++        ))
++        .ok()
++        .context("set root-only creator DACL")?;
++        let preserved = security::SE_DACL_PROTECTED
++            | security::SE_DACL_AUTO_INHERITED
++            | security::SE_DACL_AUTO_INHERIT_REQ;
++        BOOL(security::SetSecurityDescriptorControl(
++            creator_ptr,
++            preserved,
++            control & preserved,
++        ))
++        .ok()
++        .context("preserve root-only creator control")?;
++        BOOL(security::SetSecurityDescriptorOwner(creator_ptr, owner, 0))
++            .ok()
++            .context("preserve root-only creator owner")?;
++        BOOL(security::SetSecurityDescriptorGroup(creator_ptr, group, 0))
++            .ok()
++            .context("preserve root-only creator group")?;
++        BOOL(OpenProcessToken(
++            GetCurrentProcess(),
++            security::TOKEN_QUERY,
++            &mut token,
++        ))
++        .ok()
++        .context("open root-only descriptor computation token")?;
++        let mapping = security::GENERIC_MAPPING {
++            GenericRead: FILE_GENERIC_READ,
++            GenericWrite: FILE_GENERIC_WRITE,
++            GenericExecute: FILE_GENERIC_EXECUTE,
++            GenericAll: windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS,
++        };
++        // Only descriptor computation: owner/group are not being assigned.
++        // Avoid an extra owner-validity/privilege requirement for foreign-owned
++        // objects. The authorized WRITE_DAC handle and final NT DACL write still
++        // enforce actual filesystem permissions; no token privilege is changed.
++        let flags = security::SEF_DACL_AUTO_INHERIT
++            | security::SEF_AVOID_PRIVILEGE_CHECK
++            | security::SEF_AVOID_OWNER_CHECK;
++        BOOL(security::CreatePrivateObjectSecurityEx(
++            parent_descriptor,
++            creator_ptr,
++            &mut computed,
++            std::ptr::null(),
++            1,
++            flags,
++            token,
++            &mapping,
++        ))
++        .ok()
++        .context("compute native root-only inherited descriptor")?;
++        let mut computed_control = 0;
++        BOOL(security::GetSecurityDescriptorControl(
++            computed,
++            &mut computed_control,
++            &mut revision,
++        ))
++        .ok()
++        .context("read computed root-only control")?;
++        let request = if computed_control & security::SE_DACL_AUTO_INHERITED != 0 {
++            security::SE_DACL_AUTO_INHERIT_REQ
++        } else {
++            0
++        };
++        BOOL(security::SetSecurityDescriptorControl(
++            computed,
++            security::SE_DACL_AUTO_INHERIT_REQ,
++            request,
++        ))
++        .ok()
++        .context("apply computed root-only inheritance request")?;
++        let status = NtSetSecurityObject(
++            target.as_raw_handle() as _,
++            security::DACL_SECURITY_INFORMATION,
++            computed.cast(),
++        );
++        if status < 0 {
++            return Err(std::io::Error::from_raw_os_error(
++                RtlNtStatusToDosError(status) as i32,
++            ))
++            .context("write native root-only DACL");
++        }
++        Ok(())
++    })();
++    // Each allocator has one matching release. Keep original SID pointers alive
++    // through CreatePrivateObjectSecurityEx and the object write.
++    let cleanup = if computed.is_null() {
++        Ok(())
++    } else {
++        BOOL(security::DestroyPrivateObjectSecurity(&computed))
++            .ok()
++            .context("release computed root-only descriptor")
++    };
++    if !root_descriptor.is_null() {
++        LocalFree(root_descriptor as HLOCAL);
++    }
++    if !parent_descriptor.is_null() {
++        LocalFree(parent_descriptor as HLOCAL);
++    }
++    if !token.is_null() {
++        CloseHandle(token);
++    }
++    result?;
++    cleanup?;
++    Ok(())
+ }
+ 
+ /// Ensure all provided SIDs have an allow ACE with the requested mask on the path.
+@@ -788,6 +1015,29 @@
          }
          return Ok(false);
      }
@@ -1720,7 +1989,7 @@ diff --git a/codex-rs/windows-sandbox-rs/src/acl.rs b/codex-rs/windows-sandbox-r
      let mut added = false;
      // Always ensure write is present: if an allow ACE exists without write, add one with write+RX.
      let trustee = TRUSTEE_W {
-@@ -805,8 +852,8 @@
+@@ -805,8 +1055,8 @@
      let mut p_new_dacl: *mut ACL = std::ptr::null_mut();
      let code2 = SetEntriesInAclW(1, &explicit, p_dacl, &mut p_new_dacl);
      if code2 == ERROR_SUCCESS {
@@ -1731,7 +2000,7 @@ diff --git a/codex-rs/windows-sandbox-rs/src/acl.rs b/codex-rs/windows-sandbox-r
              1,
              DACL_SECURITY_INFORMATION,
              std::ptr::null_mut(),
-@@ -917,6 +964,8 @@
+@@ -917,6 +1167,8 @@
      if matches!(kind, DenyAceKind::Read) {
          ensure_handle_is_not_filesystem_root(&handle, path)?;
      }
@@ -1740,7 +2009,7 @@ diff --git a/codex-rs/windows-sandbox-rs/src/acl.rs b/codex-rs/windows-sandbox-r
      let mut p_sd: *mut c_void = std::ptr::null_mut();
      let mut p_dacl: *mut ACL = std::ptr::null_mut();
      let code = GetSecurityInfo(
-@@ -1049,6 +1098,19 @@
+@@ -1049,6 +1301,19 @@
          }
          return Ok(());
      }
@@ -1760,7 +2029,7 @@ diff --git a/codex-rs/windows-sandbox-rs/src/acl.rs b/codex-rs/windows-sandbox-r
      let trustee = TRUSTEE_W {
          pMultipleTrustee: std::ptr::null_mut(),
          MultipleTrusteeOperation: 0,
-@@ -1072,8 +1134,9 @@
+@@ -1072,8 +1337,9 @@
          if (*p_new_dacl).AceCount == (*p_dacl).AceCount {
              return Ok(());
          }
@@ -1776,7 +2045,7 @@ diff --git a/codex-rs/windows-sandbox-rs/src/acl_lock.rs b/codex-rs/windows-sand
 new file mode 100644
 --- /dev/null
 +++ b/codex-rs/windows-sandbox-rs/src/acl_lock.rs
-@@ -0,0 +1,575 @@
+@@ -0,0 +1,607 @@
 +//! File-object coordination for cooperating native DACL writers.
 +//! The target is exclusive; inherited ancestors are shared through the nearest
 +//! protected boundary. Thus sibling updates proceed while parent propagation
@@ -1788,7 +2057,7 @@ new file mode 100644
 +use std::fs::{File, OpenOptions};
 +use std::os::windows::ffi::OsStringExt;
 +use std::os::windows::fs::OpenOptionsExt;
-+use std::os::windows::io::{AsRawHandle, OwnedHandle};
++use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, OwnedHandle};
 +use std::path::{Path, PathBuf};
 +use std::time::{Duration, Instant};
 +use windows_sys::Win32::Foundation::{ERROR_HANDLE_EOF, HANDLE, INVALID_HANDLE_VALUE, LocalFree};
@@ -2070,6 +2339,25 @@ new file mode 100644
 +    directory: PrivateLockDirectory,
 +    _plan: Plan,
 +}
++impl AclScope {
++    /// Borrow the actual parent's already-retained pin. Root-only writes use
++    /// this only when the fresh root is unprotected, whose native plan already
++    /// includes its parent. No caller-supplied alias or additional open is used.
++    pub(crate) fn parent_handle(&self, target: &File) -> Result<Option<BorrowedHandle<'_>>> {
++        let path = physical_path(target.as_raw_handle() as _)?;
++        let Some(parent) = path.parent() else {
++            // A filesystem root legitimately has no parent descriptor.
++            return Ok(None);
++        };
++        for pin in self._plan.pins.values() {
++            if physical_path(pin.handle.as_raw_handle() as _)? == parent {
++                return Ok(Some(pin.handle.as_handle()));
++            }
++        }
++        bail!("root-only parent is not retained by the native ACL scope")
++    }
++}
++
 +impl Drop for AclScope {
 +    fn drop(&mut self) {
 +        // Unlock/close before attempting exclusive DELETE open. Waiting users
@@ -2201,6 +2489,19 @@ new file mode 100644
 +        std::fs::create_dir(&a)?;
 +        std::fs::create_dir(&b)?;
 +        let (_file, scope) = acquire_path(&a, deadline())?;
++        // Classify an actual root handle read-only; never mutate a volume ACL
++        // or acquire an additional root domain just to cover this boundary.
++        let physical = physical_path(_file.as_raw_handle() as _)?;
++        let root = physical
++            .ancestors()
++            .last()
++            .context("fixture filesystem root")?;
++        let root_handle = OpenOptions::new()
++            .access_mode(fs::FILE_READ_ATTRIBUTES)
++            .share_mode(fs::FILE_SHARE_READ | fs::FILE_SHARE_WRITE | fs::FILE_SHARE_DELETE)
++            .custom_flags(fs::FILE_FLAG_BACKUP_SEMANTICS)
++            .open(root)?;
++        assert!(scope.parent_handle(&root_handle)?.is_none());
 +        let (_other, other_scope) =
 +            acquire_path(&b, Some(Instant::now() + Duration::from_millis(100)))?;
 +        drop(other_scope);
@@ -2351,6 +2652,494 @@ new file mode 100644
 +        assert_eq!(std::fs::read(original)?, b"original");
 +        Ok(())
 +    }
++}
+diff --git a/codex-rs/windows-sandbox-rs/src/acl_tests.rs b/codex-rs/windows-sandbox-rs/src/acl_tests.rs
+--- a/codex-rs/windows-sandbox-rs/src/acl_tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/acl_tests.rs
+@@ -195,3 +195,484 @@
+     });
+     assert_eq!(acl_snapshot(&child), before);
+ }
++
++#[test]
++fn concurrent_root_only_grants_preserve_both_sids_and_child_dacl() -> anyhow::Result<()> {
++    use std::sync::{Arc, Barrier};
++
++    let root = tempfile::tempdir()?;
++    let child = root.path().join("child");
++    std::fs::create_dir(&child)?;
++    let before = acl_snapshot(&child);
++    let barrier = Arc::new(Barrier::new(3));
++    let mut workers = Vec::new();
++    let names = [
++        "S-1-5-21-915763429-1123581321-271828182-4401",
++        "S-1-5-21-915763429-1123581321-271828182-4402",
++    ];
++    for name in names {
++        let path = root.path().to_owned();
++        let barrier = Arc::clone(&barrier);
++        workers.push(std::thread::spawn(move || -> anyhow::Result<bool> {
++            let sid = LocalSid::from_string(name)?;
++            barrier.wait();
++            unsafe {
++                ensure_allow_mask_aces_with_inheritance(
++                    &path,
++                    &[sid.as_ptr()],
++                    FILE_READ_ATTRIBUTES,
++                    0,
++                )
++            }
++        }));
++    }
++    barrier.wait();
++    for worker in workers {
++        anyhow::ensure!(
++            worker.join().expect("grant worker")?,
++            "each distinct grant must be added"
++        );
++    }
++    assert_eq!(acl_snapshot(&child), before);
++    let (dacl, descriptor) = unsafe { fetch_dacl_handle(root.path())? };
++    let mut missing = Vec::new();
++    for name in names {
++        let sid = LocalSid::from_string(name)?;
++        if !unsafe { super::dacl_mask_allows(dacl, &[sid.as_ptr()], FILE_READ_ATTRIBUTES, true) } {
++            missing.push(name);
++        }
++    }
++    unsafe { LocalFree(descriptor as HLOCAL) };
++    anyhow::ensure!(
++        missing.is_empty(),
++        "concurrent grants lost entries: {missing:?}"
++    );
++    Ok(())
++}
++
++#[test]
++fn root_only_cooperating_domain_child() -> anyhow::Result<()> {
++    let Some(target) = std::env::var_os("CAG_ACL_UNIT_ROOT_ONLY_TARGET") else {
++        // Subprocess harness entry only; the parent exercises the actual hold.
++        return Ok(());
++    };
++    let ready = std::env::var_os("CAG_ACL_UNIT_ROOT_ONLY_READY")
++        .ok_or_else(|| anyhow::anyhow!("missing ready fixture"))?;
++    let release = std::env::var_os("CAG_ACL_UNIT_ROOT_ONLY_RELEASE")
++        .ok_or_else(|| anyhow::anyhow!("missing release fixture"))?;
++    let (_target, scope) =
++        crate::acl_lock::acquire_path(Path::new(&target), crate::acl_lock::deadline())?;
++    std::fs::write(ready, b"strict object domain held")?;
++    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
++    while !Path::new(&release).exists() && std::time::Instant::now() < deadline {
++        std::thread::sleep(std::time::Duration::from_millis(5));
++    }
++    anyhow::ensure!(
++        Path::new(&release).exists(),
++        "parent never released owned lock fixture"
++    );
++    drop(scope);
++    Ok(())
++}
++
++#[test]
++fn root_only_waits_for_cooperating_process_before_writing() -> anyhow::Result<()> {
++    use std::process::{Command, Stdio};
++    use std::sync::mpsc;
++    use std::time::{Duration, Instant};
++
++    let fixture = tempfile::tempdir()?;
++    let target = fixture.path().join("target");
++    let ready = fixture.path().join("ready");
++    let release = fixture.path().join("release");
++    std::fs::create_dir(&target)?;
++    let child_dir = target.join("child");
++    std::fs::create_dir(&child_dir)?;
++    let root_before = acl_snapshot(&target);
++    let child_before = acl_snapshot(&child_dir);
++    let mut child = Command::new(std::env::current_exe()?)
++        .args([
++            "--exact",
++            "acl::tests::root_only_cooperating_domain_child",
++            "--test-threads=1",
++        ])
++        .env("CAG_ACL_UNIT_ROOT_ONLY_TARGET", &target)
++        .env("CAG_ACL_UNIT_ROOT_ONLY_READY", &ready)
++        .env("CAG_ACL_UNIT_ROOT_ONLY_RELEASE", &release)
++        .stdin(Stdio::null())
++        .stdout(Stdio::null())
++        .stderr(Stdio::null())
++        .spawn()?;
++    let wait_until = Instant::now() + Duration::from_secs(3);
++    while !ready.exists() && Instant::now() < wait_until && child.try_wait()?.is_none() {
++        std::thread::sleep(Duration::from_millis(5));
++    }
++    if !ready.exists() {
++        std::fs::write(&release, b"release after failed admission")?;
++        let status = child.wait()?;
++        anyhow::bail!("cooperating child did not acquire its domain: {status}");
++    }
++    let worker_target = target.clone();
++    let (started_tx, started_rx) = mpsc::channel();
++    let (done_tx, done_rx) = mpsc::channel();
++    let worker = std::thread::spawn(move || {
++        let result = (|| -> anyhow::Result<bool> {
++            let sid = LocalSid::from_string("S-1-5-21-915763429-1123581321-271828182-4403")?;
++            started_tx.send(())?;
++            unsafe {
++                ensure_allow_mask_aces_with_inheritance(
++                    &worker_target,
++                    &[sid.as_ptr()],
++                    FILE_READ_ATTRIBUTES,
++                    0,
++                )
++            }
++        })();
++        let _ = done_tx.send(result);
++    });
++    let while_held = (|| -> anyhow::Result<()> {
++        started_rx.recv_timeout(Duration::from_secs(2))?;
++        anyhow::ensure!(
++            matches!(
++                done_rx.recv_timeout(Duration::from_millis(200)),
++                Err(mpsc::RecvTimeoutError::Timeout)
++            ),
++            "root-only update must wait, not fail sharing or pass the held domain"
++        );
++        anyhow::ensure!(
++            acl_snapshot(&target) == root_before,
++            "root changed before domain admission"
++        );
++        Ok(())
++    })();
++    // Always release/wait the exact owned child and join the worker before
++    // surfacing a failed assertion; no process-name kill or detached helper.
++    std::fs::write(&release, b"release strict domain")?;
++    let child_status = child.wait()?;
++    worker.join().expect("root-only worker");
++    while_held?;
++    anyhow::ensure!(
++        child_status.success(),
++        "cooperating child failed: {child_status}"
++    );
++    anyhow::ensure!(
++        done_rx.recv_timeout(Duration::from_secs(2))??,
++        "grant was not added"
++    );
++    assert_eq!(acl_snapshot(&child_dir), child_before);
++    Ok(())
++}
++
++// Restoring through an already-authorized handle works even after the owned
++// fixture explicitly denies its current owner WRITE_DAC. No privilege change.
++struct ReadonlyDaclFixtureRestore {
++    handle: std::fs::File,
++    descriptor: *mut c_void,
++    dacl: *mut windows_sys::Win32::Security::ACL,
++    control: u16,
++    restored: bool,
++}
++
++impl ReadonlyDaclFixtureRestore {
++    fn capture(path: &Path) -> anyhow::Result<Self> {
++        let handle = OpenOptions::new()
++            .access_mode(READ_CONTROL | windows_sys::Win32::Storage::FileSystem::WRITE_DAC)
++            .share_mode(
++                windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
++                    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE
++                    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE,
++            )
++            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
++            .open(path)?;
++        let (dacl, descriptor) = unsafe { fetch_dacl_handle(path)? };
++        let mut control = 0;
++        let mut revision = 0;
++        if unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) } == 0 {
++            unsafe { LocalFree(descriptor as HLOCAL) };
++            return Err(std::io::Error::last_os_error().into());
++        }
++        Ok(Self {
++            handle,
++            descriptor,
++            dacl,
++            control,
++            restored: false,
++        })
++    }
++
++    fn restore(&mut self) -> anyhow::Result<()> {
++        use std::os::windows::io::AsRawHandle;
++        use windows_sys::Win32::Security::Authorization::SetSecurityInfo;
++        use windows_sys::Win32::Security::{
++            PROTECTED_DACL_SECURITY_INFORMATION, UNPROTECTED_DACL_SECURITY_INFORMATION,
++        };
++        let protection = if self.control & SE_DACL_PROTECTED != 0 {
++            PROTECTED_DACL_SECURITY_INFORMATION
++        } else {
++            UNPROTECTED_DACL_SECURITY_INFORMATION
++        };
++        let status = unsafe {
++            SetSecurityInfo(
++                self.handle.as_raw_handle() as _,
++                1,
++                DACL_SECURITY_INFORMATION | protection,
++                std::ptr::null_mut(),
++                std::ptr::null_mut(),
++                self.dacl,
++                std::ptr::null_mut(),
++            )
++        };
++        anyhow::ensure!(status == 0, "restore owned readonly fixture DACL: {status}");
++        self.restored = true;
++        Ok(())
++    }
++}
++
++impl Drop for ReadonlyDaclFixtureRestore {
++    fn drop(&mut self) {
++        if !self.restored {
++            if let Err(error) = self.restore() {
++                eprintln!("owned readonly fixture restoration failed: {error:#}");
++            }
++        }
++        unsafe { LocalFree(self.descriptor as HLOCAL) };
++    }
++}
++
++#[test]
++fn readonly_root_only_noop_succeeds_but_missing_ace_fails_without_changes() -> anyhow::Result<()> {
++    use std::os::windows::io::AsRawHandle;
++    use windows_sys::Win32::Security::Authorization::{
++        ConvertStringSecurityDescriptorToSecurityDescriptorW, SetSecurityInfo,
++    };
++    use windows_sys::Win32::Security::{
++        GetSecurityDescriptorDacl, PROTECTED_DACL_SECURITY_INFORMATION,
++    };
++
++    let fixture = tempfile::tempdir()?;
++    let child = fixture.path().join("child");
++    std::fs::create_dir(&child)?;
++    let mut restore = ReadonlyDaclFixtureRestore::capture(fixture.path())?;
++    let user = crate::runtime_ownership::current_setup_user()?;
++    let user_sid = crate::winutil::string_from_sid_bytes(&crate::winutil::resolve_sid(&user)?)
++        .map_err(anyhow::Error::msg)?;
++    let existing = LocalSid::from_string("S-1-5-21-915763429-1123581321-271828182-4404")?;
++    let missing = LocalSid::from_string("S-1-5-21-915763429-1123581321-271828182-4405")?;
++    // OWNER_RIGHTS suppresses the implicit owner's WRITE_DAC grant. Explicit
++    // READ_CONTROL plus the caller's other rights remain available.
++    let sddl = format!(
++        "D:P(D;;WD;;;OW)(A;;RC;;;OW)(A;OICI;FA;;;{user_sid})(A;;0x80;;;S-1-5-21-915763429-1123581321-271828182-4404)"
++    );
++    let mut descriptor = std::ptr::null_mut();
++    anyhow::ensure!(
++        unsafe {
++            ConvertStringSecurityDescriptorToSecurityDescriptorW(
++                to_wide(sddl).as_ptr(),
++                SDDL_REVISION_1,
++                &mut descriptor,
++                std::ptr::null_mut(),
++            )
++        } != 0,
++        "build owned readonly fixture DACL"
++    );
++    let result = (|| -> anyhow::Result<()> {
++        let mut present = 0;
++        let mut defaulted = 0;
++        let mut dacl = std::ptr::null_mut();
++        anyhow::ensure!(
++            unsafe {
++                GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted)
++            } != 0
++                && present != 0,
++            "read readonly fixture DACL"
++        );
++        let status = unsafe {
++            SetSecurityInfo(
++                restore.handle.as_raw_handle() as _,
++                1,
++                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
++                std::ptr::null_mut(),
++                std::ptr::null_mut(),
++                dacl,
++                std::ptr::null_mut(),
++            )
++        };
++        anyhow::ensure!(status == 0, "apply owned readonly fixture DACL: {status}");
++        // Keep this a real readonly parent despite the inheritable user ACE:
++        // OWNER_RIGHTS deny-WRITE_DAC applies to the root, not its children.
++        let denied = OpenOptions::new()
++            .access_mode(windows_sys::Win32::Storage::FileSystem::WRITE_DAC)
++            .share_mode(
++                windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
++                    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE
++                    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE,
++            )
++            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
++            .open(fixture.path())
++            .expect_err("fresh root WRITE_DAC must still be denied");
++        anyhow::ensure!(
++            denied.raw_os_error() == Some(5),
++            "readonly fixture must deny WRITE_DAC with error5"
++        );
++        // Establish positive child READ_CONTROL/READ_ATTRIBUTES before using
++        // its unchanged ACL/control snapshot as an operation assertion.
++        let child_read = OpenOptions::new()
++            .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES)
++            .share_mode(
++                windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
++                    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE
++                    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE,
++            )
++            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
++            .open(&child)?;
++        drop(child_read);
++        let root_before = acl_snapshot(fixture.path());
++        let child_before = acl_snapshot(&child);
++        anyhow::ensure!(
++            !unsafe {
++                ensure_allow_mask_aces_with_inheritance(
++                    fixture.path(),
++                    &[existing.as_ptr()],
++                    FILE_READ_ATTRIBUTES,
++                    0,
++                )
++            }?,
++            "existing readonly grant must be a successful no-op"
++        );
++        let failure = unsafe {
++            ensure_allow_mask_aces_with_inheritance(
++                fixture.path(),
++                &[missing.as_ptr()],
++                FILE_READ_ATTRIBUTES,
++                0,
++            )
++        }
++        .expect_err("missing grant must require denied WRITE_DAC");
++        anyhow::ensure!(
++            failure.chain().any(|cause| cause
++                .downcast_ref::<std::io::Error>()
++                .is_some_and(|error| error.raw_os_error() == Some(5))),
++            "missing grant must retain access denied"
++        );
++        anyhow::ensure!(
++            acl_snapshot(fixture.path()) == root_before,
++            "readonly parent DACL/control changed"
++        );
++        anyhow::ensure!(
++            acl_snapshot(&child) == child_before,
++            "readonly child DACL/control changed"
++        );
++        Ok(())
++    })();
++    unsafe { LocalFree(descriptor as HLOCAL) };
++    let cleanup = restore.restore();
++    result?;
++    cleanup?;
++    Ok(())
++}
++
++#[test]
++fn root_only_backend_matches_stock_maximum_acl_and_control() -> anyhow::Result<()> {
++    use std::os::windows::io::AsRawHandle;
++    use windows_sys::Win32::System::SystemServices::MAXIMUM_ALLOWED;
++
++    let fixture = tempfile::tempdir()?;
++    let stock = fixture.path().join("stock");
++    let adapted = fixture.path().join("adapted");
++    let marker = LocalSid::from_string("S-1-5-21-915763429-1123581321-271828182-4410")?;
++    let added = LocalSid::from_string("S-1-5-21-915763429-1123581321-271828182-4411")?;
++    let mut child_before = Vec::new();
++    for path in [&stock, &adapted] {
++        std::fs::create_dir(path)?;
++        let child = path.join("child");
++        std::fs::create_dir(&child)?;
++        let (_, descriptor) = unsafe { fetch_dacl_handle(&child)? };
++        let seeded = unsafe {
++            ensure_allow_mask_aces_with_inheritance(
++                path,
++                &[marker.as_ptr()],
++                FILE_READ_ATTRIBUTES,
++                super::CONTAINER_INHERIT_ACE | super::OBJECT_INHERIT_ACE,
++            )
++        };
++        let restored = unsafe {
++            SetFileSecurityW(
++                to_wide(&child).as_ptr(),
++                DACL_SECURITY_INFORMATION,
++                descriptor,
++            )
++        };
++        unsafe { LocalFree(descriptor as HLOCAL) };
++        anyhow::ensure!(seeded?, "fresh inheritable marker must be added");
++        anyhow::ensure!(
++            restored != 0,
++            "restore existing non-inheriting child fixture"
++        );
++        child_before.push(acl_snapshot(&child));
++    }
++    assert_eq!(acl_snapshot(&stock), acl_snapshot(&adapted));
++
++    let maximum = OpenOptions::new()
++        .access_mode(MAXIMUM_ALLOWED)
++        .share_mode(
++            windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
++                | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE
++                | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE,
++        )
++        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
++        .open(&stock)?;
++    let (dacl, descriptor) = unsafe { fetch_dacl_handle(&stock)? };
++    let explicit = super::EXPLICIT_ACCESS_W {
++        grfAccessPermissions: FILE_READ_ATTRIBUTES,
++        grfAccessMode: super::GRANT_ACCESS,
++        grfInheritance: 0,
++        Trustee: super::TRUSTEE_W {
++            pMultipleTrustee: std::ptr::null_mut(),
++            MultipleTrusteeOperation: 0,
++            TrusteeForm: super::TRUSTEE_IS_SID,
++            TrusteeType: super::TRUSTEE_IS_UNKNOWN,
++            ptstrName: added.as_ptr().cast(),
++        },
++    };
++    let mut new_dacl = std::ptr::null_mut();
++    let baseline = (|| -> anyhow::Result<()> {
++        let status = unsafe { super::SetEntriesInAclW(1, &explicit, dacl, &mut new_dacl) };
++        anyhow::ensure!(status == 0, "stock SetEntriesInAclW failed: {status}");
++        let status = unsafe {
++            super::SetSecurityInfo(
++                maximum.as_raw_handle() as _,
++                1,
++                DACL_SECURITY_INFORMATION,
++                std::ptr::null_mut(),
++                std::ptr::null_mut(),
++                new_dacl,
++                std::ptr::null_mut(),
++            )
++        };
++        anyhow::ensure!(
++            status == 0,
++            "stock MAXIMUM_ALLOWED SetSecurityInfo failed: {status}"
++        );
++        Ok(())
++    })();
++    if !new_dacl.is_null() {
++        unsafe { LocalFree(new_dacl as HLOCAL) };
++    }
++    unsafe { LocalFree(descriptor as HLOCAL) };
++    baseline?;
++    anyhow::ensure!(
++        unsafe {
++            ensure_allow_mask_aces_with_inheritance(
++                &adapted,
++                &[added.as_ptr()],
++                FILE_READ_ATTRIBUTES,
++                0,
++            )
++        }?,
++        "adapted root-only grant must be added"
++    );
++    assert_eq!(acl_snapshot(&stock), acl_snapshot(&adapted));
++    assert_eq!(acl_snapshot(&stock.join("child")), child_before[0]);
++    assert_eq!(acl_snapshot(&adapted.join("child")), child_before[1]);
++    Ok(())
 +}
 diff --git a/codex-rs/windows-sandbox-rs/src/bin/command_runner/win.rs b/codex-rs/windows-sandbox-rs/src/bin/command_runner/win.rs
 --- a/codex-rs/windows-sandbox-rs/src/bin/command_runner/win.rs
@@ -2515,6 +3304,200 @@ diff --git a/codex-rs/windows-sandbox-rs/src/identity.rs b/codex-rs/windows-sand
              if let Ok(Some(flags)) = read_local_user_flags(username) {
                  anyhow::ensure!(
                      flags & UF_PASSWORD_EXPIRED == 0,
+diff --git a/codex-rs/windows-sandbox-rs/src/identity_integration_tests.rs b/codex-rs/windows-sandbox-rs/src/identity_integration_tests.rs
+--- a/codex-rs/windows-sandbox-rs/src/identity_integration_tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/identity_integration_tests.rs
+@@ -1,7 +1,8 @@
+ //! Exercises account preparation with real marker files and DPAPI credentials.
+-//! Setup and account lookup callbacks isolate machine state. This does not exercise
+-//! the public wrapper, native account queries, payload serialization, singleflight,
+-//! or helper launches.
++//! Setup and account-status callbacks prevent real provisioning. Temporary namespace
++//! reservations perform only read-only local account/group identity checks; all writes
++//! remain in fixture directories. This does not exercise helper launches, payload
++//! serialization, native singleflight, or the public wrapper.
+ 
+ use super::SandboxAccountCredentialMismatch;
+ use super::account_logon_error;
+@@ -12,8 +13,6 @@
+ use crate::WindowsSandboxProvisioningSettings;
+ use crate::WindowsSandboxProxySettingsMode;
+ use crate::resolved_permissions::ResolvedWindowsSandboxPermissions;
+-use crate::setup::OFFLINE_USERNAME;
+-use crate::setup::ONLINE_USERNAME;
+ use crate::setup::SETUP_VERSION;
+ use crate::setup::SandboxSetupRequest;
+ use crate::setup::SandboxUserRecord;
+@@ -35,6 +34,30 @@
+ use windows_sys::Win32::NetworkManagement::NetManagement::UF_NORMAL_ACCOUNT;
+ use windows_sys::Win32::NetworkManagement::NetManagement::UF_PASSWORD_EXPIRED;
+ 
++// Test-only metadata materialization. The reservation performs read-only SAM checks;
++// callbacks below replace provisioning and account mutation. It never creates users,
++// groups, firewall objects, helpers, or service registrations.
++fn fixture_namespace(home: &std::path::Path) -> Result<crate::namespace::SandboxNamespace> {
++    let namespace = crate::namespace::SandboxNamespace::current(home)?;
++    namespace.reserve_owner()?;
++    Ok(namespace)
++}
++
++fn write_fixture_metadata<T: serde::Serialize>(
++    path: &std::path::Path,
++    namespace: &crate::namespace::SandboxNamespace,
++    value: &T,
++) -> Result<()> {
++    let mut value = serde_json::to_value(value)?;
++    value
++        .as_object_mut()
++        .expect("native sandbox metadata is an object")
++        .insert("namespace".into(), namespace.key.id().into());
++    fs::create_dir_all(path.parent().expect("metadata parent"))?;
++    fs::write(path, serde_json::to_vec(&value)?)?;
++    Ok(())
++}
++
+ #[test]
+ fn only_native_bad_or_expired_passwords_trigger_credential_repair() -> Result<()> {
+     for code in [
+@@ -69,18 +92,19 @@
+     let permissions = ResolvedWindowsSandboxPermissions::try_from_permission_profile(
+         &PermissionProfile::read_only(),
+     )?;
+-    for (expired_username, repair_succeeds) in [
++    for (expired_account, repair_succeeds) in [
+         (None, true),
+-        (Some(OFFLINE_USERNAME), true),
+-        (Some(ONLINE_USERNAME), true),
+-        (Some(OFFLINE_USERNAME), false),
+-        (Some(ONLINE_USERNAME), false),
++        (Some(SandboxRuntimeAccount::Offline), true),
++        (Some(SandboxRuntimeAccount::Online), true),
++        (Some(SandboxRuntimeAccount::Offline), false),
++        (Some(SandboxRuntimeAccount::Online), false),
+     ] {
+         let home = tempfile::tempdir()?;
++        let namespace = fixture_namespace(home.path())?;
+         let marker = SetupMarker {
+             version: SETUP_VERSION,
+-            offline_username: OFFLINE_USERNAME.into(),
+-            online_username: ONLINE_USERNAME.into(),
++            offline_username: namespace.key.offline(),
++            online_username: namespace.key.online(),
+             created_at: None,
+             proxy_ports: vec![],
+             allow_local_binding: false,
+@@ -88,21 +112,20 @@
+         let mut users = SandboxUsersFile {
+             version: SETUP_VERSION,
+             offline: SandboxUserRecord {
+-                username: OFFLINE_USERNAME.into(),
++                username: namespace.key.offline(),
+                 password: BASE64.encode(crate::dpapi::protect(b"old-test-password")?),
+             },
+             online: SandboxUserRecord {
+-                username: ONLINE_USERNAME.into(),
++                username: namespace.key.online(),
+                 password: BASE64.encode(crate::dpapi::protect(b"old-test-password")?),
+             },
+         };
+-        for (path, bytes) in [
+-            (setup_marker_path(home.path()), serde_json::to_vec(&marker)?),
+-            (sandbox_users_path(home.path()), serde_json::to_vec(&users)?),
+-        ] {
+-            fs::create_dir_all(path.parent().unwrap())?;
+-            fs::write(path, bytes)?;
+-        }
++        write_fixture_metadata(&setup_marker_path(home.path()), &namespace, &marker)?;
++        write_fixture_metadata(&sandbox_users_path(home.path()), &namespace, &users)?;
++        let expired_username = expired_account.map(|account| match account {
++            SandboxRuntimeAccount::Offline => namespace.key.offline(),
++            SandboxRuntimeAccount::Online => namespace.key.online(),
++        });
+         let setups = Cell::new(/*value*/ 0);
+         let env = HashMap::new();
+         let result = require_sandbox_account_with_setup(
+@@ -121,12 +144,13 @@
+                 users.offline.password =
+                     BASE64.encode(crate::dpapi::protect(b"new-test-password")?);
+                 users.online.password = users.offline.password.clone();
+-                fs::write(sandbox_users_path(home.path()), serde_json::to_vec(&users)?)?;
++                write_fixture_metadata(&sandbox_users_path(home.path()), &namespace, &users)?;
+                 Ok(())
+             },
+             |username| {
+                 Ok(Some(
+-                    if expired_username == Some(username) && (setups.get() == 0 || !repair_succeeds)
++                    if expired_username.as_deref() == Some(username)
++                        && (setups.get() == 0 || !repair_succeeds)
+                     {
+                         UF_NORMAL_ACCOUNT | UF_PASSWORD_EXPIRED
+                     } else {
+@@ -144,7 +168,7 @@
+                 Err("Windows sandbox account password is still expired after setup".into())
+             } else {
+                 Ok((
+-                    OFFLINE_USERNAME.into(),
++                    namespace.key.offline(),
+                     if expired_username.is_some() {
+                         "new-test-password"
+                     } else {
+@@ -178,10 +202,11 @@
+     ] {
+         let full_setups = Cell::new(/*value*/ 0);
+         let home = tempfile::tempdir()?;
++        let namespace = fixture_namespace(home.path())?;
+         let marker = SetupMarker {
+             version: SETUP_VERSION,
+-            offline_username: "offline".into(),
+-            online_username: "online".into(),
++            offline_username: namespace.key.offline(),
++            online_username: namespace.key.online(),
+             created_at: None,
+             proxy_ports: vec![3128],
+             allow_local_binding: stored_binding,
+@@ -198,14 +223,8 @@
+                 ..user
+             },
+         };
+-        let marker_bytes = serde_json::to_vec(&marker)?;
+-        for (path, bytes) in [
+-            (setup_marker_path(home.path()), marker_bytes.clone()),
+-            (sandbox_users_path(home.path()), serde_json::to_vec(&users)?),
+-        ] {
+-            fs::create_dir_all(path.parent().unwrap())?;
+-            fs::write(path, bytes)?;
+-        }
++        write_fixture_metadata(&setup_marker_path(home.path()), &namespace, &marker)?;
++        write_fixture_metadata(&sandbox_users_path(home.path()), &namespace, &users)?;
+         let env = HashMap::from([
+             ("CODEX_WINDOWS_SANDBOX_PROXY_PORTS".into(), ports.into()),
+             (
+@@ -237,11 +256,12 @@
+                     let mut reconciled = marker.clone();
+                     reconciled.proxy_ports = desired.proxy_ports.clone();
+                     reconciled.allow_local_binding = desired.allow_local_binding;
+-                    fs::write(
+-                        setup_marker_path(home.path()),
+-                        serde_json::to_vec(&reconciled)?,
++                    write_fixture_metadata(
++                        &setup_marker_path(home.path()),
++                        &namespace,
++                        &reconciled,
+                     )?;
+-                    fs::write(sandbox_users_path(home.path()), serde_json::to_vec(&users)?)?;
++                    write_fixture_metadata(&sandbox_users_path(home.path()), &namespace, &users)?;
+                     account_flags.set(enabled);
+                     Ok(())
+                 },
+@@ -252,7 +272,7 @@
+             let (creds, _) = prepare()?;
+             assert_eq!(
+                 (creds.username, creds.password),
+-                ("offline".into(), "test-password".into())
++                (namespace.key.offline(), "test-password".into())
+             );
+         }
+         // The second command reuses reconciled settings, including when filtering removed the proxy.
 diff --git a/codex-rs/windows-sandbox-rs/src/lib.rs b/codex-rs/windows-sandbox-rs/src/lib.rs
 --- a/codex-rs/windows-sandbox-rs/src/lib.rs
 +++ b/codex-rs/windows-sandbox-rs/src/lib.rs
@@ -4965,197 +5948,3 @@ diff --git a/codex-rs/windows-sandbox-rs/src/winutil.rs b/codex-rs/windows-sandb
  }
  
  pub fn resolve_sid(name: &str) -> Result<Vec<u8>> {
-diff --git a/codex-rs/windows-sandbox-rs/src/identity_integration_tests.rs b/codex-rs/windows-sandbox-rs/src/identity_integration_tests.rs
---- a/codex-rs/windows-sandbox-rs/src/identity_integration_tests.rs
-+++ b/codex-rs/windows-sandbox-rs/src/identity_integration_tests.rs
-@@ -1,7 +1,8 @@
- //! Exercises account preparation with real marker files and DPAPI credentials.
--//! Setup and account lookup callbacks isolate machine state. This does not exercise
--//! the public wrapper, native account queries, payload serialization, singleflight,
--//! or helper launches.
-+//! Setup and account-status callbacks prevent real provisioning. Temporary namespace
-+//! reservations perform only read-only local account/group identity checks; all writes
-+//! remain in fixture directories. This does not exercise helper launches, payload
-+//! serialization, native singleflight, or the public wrapper.
- 
- use super::SandboxAccountCredentialMismatch;
- use super::account_logon_error;
-@@ -12,8 +13,6 @@
- use crate::WindowsSandboxProvisioningSettings;
- use crate::WindowsSandboxProxySettingsMode;
- use crate::resolved_permissions::ResolvedWindowsSandboxPermissions;
--use crate::setup::OFFLINE_USERNAME;
--use crate::setup::ONLINE_USERNAME;
- use crate::setup::SETUP_VERSION;
- use crate::setup::SandboxSetupRequest;
- use crate::setup::SandboxUserRecord;
-@@ -35,6 +34,30 @@
- use windows_sys::Win32::NetworkManagement::NetManagement::UF_NORMAL_ACCOUNT;
- use windows_sys::Win32::NetworkManagement::NetManagement::UF_PASSWORD_EXPIRED;
- 
-+// Test-only metadata materialization. The reservation performs read-only SAM checks;
-+// callbacks below replace provisioning and account mutation. It never creates users,
-+// groups, firewall objects, helpers, or service registrations.
-+fn fixture_namespace(home: &std::path::Path) -> Result<crate::namespace::SandboxNamespace> {
-+    let namespace = crate::namespace::SandboxNamespace::current(home)?;
-+    namespace.reserve_owner()?;
-+    Ok(namespace)
-+}
-+
-+fn write_fixture_metadata<T: serde::Serialize>(
-+    path: &std::path::Path,
-+    namespace: &crate::namespace::SandboxNamespace,
-+    value: &T,
-+) -> Result<()> {
-+    let mut value = serde_json::to_value(value)?;
-+    value
-+        .as_object_mut()
-+        .expect("native sandbox metadata is an object")
-+        .insert("namespace".into(), namespace.key.id().into());
-+    fs::create_dir_all(path.parent().expect("metadata parent"))?;
-+    fs::write(path, serde_json::to_vec(&value)?)?;
-+    Ok(())
-+}
-+
- #[test]
- fn only_native_bad_or_expired_passwords_trigger_credential_repair() -> Result<()> {
-     for code in [
-@@ -69,18 +92,19 @@
-     let permissions = ResolvedWindowsSandboxPermissions::try_from_permission_profile(
-         &PermissionProfile::read_only(),
-     )?;
--    for (expired_username, repair_succeeds) in [
-+    for (expired_account, repair_succeeds) in [
-         (None, true),
--        (Some(OFFLINE_USERNAME), true),
--        (Some(ONLINE_USERNAME), true),
--        (Some(OFFLINE_USERNAME), false),
--        (Some(ONLINE_USERNAME), false),
-+        (Some(SandboxRuntimeAccount::Offline), true),
-+        (Some(SandboxRuntimeAccount::Online), true),
-+        (Some(SandboxRuntimeAccount::Offline), false),
-+        (Some(SandboxRuntimeAccount::Online), false),
-     ] {
-         let home = tempfile::tempdir()?;
-+        let namespace = fixture_namespace(home.path())?;
-         let marker = SetupMarker {
-             version: SETUP_VERSION,
--            offline_username: OFFLINE_USERNAME.into(),
--            online_username: ONLINE_USERNAME.into(),
-+            offline_username: namespace.key.offline(),
-+            online_username: namespace.key.online(),
-             created_at: None,
-             proxy_ports: vec![],
-             allow_local_binding: false,
-@@ -88,21 +112,20 @@
-         let mut users = SandboxUsersFile {
-             version: SETUP_VERSION,
-             offline: SandboxUserRecord {
--                username: OFFLINE_USERNAME.into(),
-+                username: namespace.key.offline(),
-                 password: BASE64.encode(crate::dpapi::protect(b"old-test-password")?),
-             },
-             online: SandboxUserRecord {
--                username: ONLINE_USERNAME.into(),
-+                username: namespace.key.online(),
-                 password: BASE64.encode(crate::dpapi::protect(b"old-test-password")?),
-             },
-         };
--        for (path, bytes) in [
--            (setup_marker_path(home.path()), serde_json::to_vec(&marker)?),
--            (sandbox_users_path(home.path()), serde_json::to_vec(&users)?),
--        ] {
--            fs::create_dir_all(path.parent().unwrap())?;
--            fs::write(path, bytes)?;
--        }
-+        write_fixture_metadata(&setup_marker_path(home.path()), &namespace, &marker)?;
-+        write_fixture_metadata(&sandbox_users_path(home.path()), &namespace, &users)?;
-+        let expired_username = expired_account.map(|account| match account {
-+            SandboxRuntimeAccount::Offline => namespace.key.offline(),
-+            SandboxRuntimeAccount::Online => namespace.key.online(),
-+        });
-         let setups = Cell::new(/*value*/ 0);
-         let env = HashMap::new();
-         let result = require_sandbox_account_with_setup(
-@@ -121,12 +144,13 @@
-                 users.offline.password =
-                     BASE64.encode(crate::dpapi::protect(b"new-test-password")?);
-                 users.online.password = users.offline.password.clone();
--                fs::write(sandbox_users_path(home.path()), serde_json::to_vec(&users)?)?;
-+                write_fixture_metadata(&sandbox_users_path(home.path()), &namespace, &users)?;
-                 Ok(())
-             },
-             |username| {
-                 Ok(Some(
--                    if expired_username == Some(username) && (setups.get() == 0 || !repair_succeeds)
-+                    if expired_username.as_deref() == Some(username)
-+                        && (setups.get() == 0 || !repair_succeeds)
-                     {
-                         UF_NORMAL_ACCOUNT | UF_PASSWORD_EXPIRED
-                     } else {
-@@ -144,7 +168,7 @@
-                 Err("Windows sandbox account password is still expired after setup".into())
-             } else {
-                 Ok((
--                    OFFLINE_USERNAME.into(),
-+                    namespace.key.offline(),
-                     if expired_username.is_some() {
-                         "new-test-password"
-                     } else {
-@@ -178,10 +202,11 @@
-     ] {
-         let full_setups = Cell::new(/*value*/ 0);
-         let home = tempfile::tempdir()?;
-+        let namespace = fixture_namespace(home.path())?;
-         let marker = SetupMarker {
-             version: SETUP_VERSION,
--            offline_username: "offline".into(),
--            online_username: "online".into(),
-+            offline_username: namespace.key.offline(),
-+            online_username: namespace.key.online(),
-             created_at: None,
-             proxy_ports: vec![3128],
-             allow_local_binding: stored_binding,
-@@ -198,14 +223,8 @@
-                 ..user
-             },
-         };
--        let marker_bytes = serde_json::to_vec(&marker)?;
--        for (path, bytes) in [
--            (setup_marker_path(home.path()), marker_bytes.clone()),
--            (sandbox_users_path(home.path()), serde_json::to_vec(&users)?),
--        ] {
--            fs::create_dir_all(path.parent().unwrap())?;
--            fs::write(path, bytes)?;
--        }
-+        write_fixture_metadata(&setup_marker_path(home.path()), &namespace, &marker)?;
-+        write_fixture_metadata(&sandbox_users_path(home.path()), &namespace, &users)?;
-         let env = HashMap::from([
-             ("CODEX_WINDOWS_SANDBOX_PROXY_PORTS".into(), ports.into()),
-             (
-@@ -237,11 +256,12 @@
-                     let mut reconciled = marker.clone();
-                     reconciled.proxy_ports = desired.proxy_ports.clone();
-                     reconciled.allow_local_binding = desired.allow_local_binding;
--                    fs::write(
--                        setup_marker_path(home.path()),
--                        serde_json::to_vec(&reconciled)?,
-+                    write_fixture_metadata(
-+                        &setup_marker_path(home.path()),
-+                        &namespace,
-+                        &reconciled,
-                     )?;
--                    fs::write(sandbox_users_path(home.path()), serde_json::to_vec(&users)?)?;
-+                    write_fixture_metadata(&sandbox_users_path(home.path()), &namespace, &users)?;
-                     account_flags.set(enabled);
-                     Ok(())
-                 },
-@@ -252,7 +272,7 @@
-             let (creds, _) = prepare()?;
-             assert_eq!(
-                 (creds.username, creds.password),
--                ("offline".into(), "test-password".into())
-+                (namespace.key.offline(), "test-password".into())
-             );
-         }
-         // The second command reuses reconciled settings, including when filtering removed the proxy.
