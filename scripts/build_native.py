@@ -182,6 +182,109 @@ def build_environment(work: Path, toolchain: Path, cache_dir: Path | None = None
                         "RUSTC": str(toolchain / "rustc.exe"), "RUSTDOC": str(toolchain / "rustdoc.exe")})
     return environment
 
+def build_record_path(path: Path, *, existing: bool = False) -> Path:
+    """Do not follow redirected build metadata or mutate hardlinked records."""
+    for part in (path, *path.parents):
+        try:
+            info = extended(part).lstat()
+        except FileNotFoundError:
+            continue
+        require(not part.is_symlink()
+                and not (hasattr(part, "is_junction") and part.is_junction())
+                and not (getattr(info, "st_file_attributes", 0) & 0x400),
+                "build metadata path must not be redirected")
+    selected = extended(path)
+    if selected.exists():
+        require(selected.is_file() and selected.stat().st_nlink == 1,
+                "build metadata record must be a single regular file")
+    else:
+        require(not existing, "required build metadata record is missing")
+    return selected
+
+
+def transition_owned_build(work: Path, lock: dict, plan: dict, expected_old: str) -> dict:
+    """Advance one owned, already prepared tree without rewriting source timestamps."""
+    marker = build_record_path(work / "build-owner.json", existing=True)
+    original_marker = marker.lstat()
+    require(isinstance(expected_old, str) and len(expected_old) == 64
+            and all(c in "0123456789abcdef" for c in expected_old),
+            "transition requires the exact previous build-lock SHA256")
+    # Hold an OS lock on the owner record itself. Other readers cannot consume a
+    # partly written record; an interrupted transition fails closed with its backup.
+    with marker.open("r+b", buffering=0) as handle:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            opened = os.fstat(handle.fileno())
+            require((opened.st_dev, opened.st_ino, opened.st_nlink)
+                    == (original_marker.st_dev, original_marker.st_ino, 1),
+                    "build owner identity changed before transition")
+            raw = handle.read()
+            owner = json.loads(raw)
+            require(owner == {"schema_version": 1, "build_lock_sha256": expected_old},
+                    "build owner changed; no input transition performed")
+            require(expected_old != plan["build_lock_sha256"], "build inputs are already selected")
+            require(not Path(plan["output"]).exists() or not any(Path(plan["output"]).iterdir()),
+                    "new build output must be empty")
+            records = {"build-owner.json": raw,
+                       "build-report.json": build_record_path(work / "build-report.json", existing=True).read_bytes(),
+                       "source-manifest.json": build_record_path(work / "source-manifest.json", existing=True).read_bytes()}
+            previous = json.loads(records["build-report.json"])
+            require(previous.get("status") in {"passed", "failed"}
+                    and previous.get("build_lock_sha256") == expected_old,
+                    "previous build is not terminal under the expected lock")
+            require(previous.get("profile") == plan["profile"]
+                    and Path(previous["source"]).resolve() == Path(plan["source"]).resolve()
+                    and Path(previous["cache_dir"]).resolve() == Path(plan["cache_dir"]).resolve(),
+                    "input transition must retain the source path, Cargo cache and profile")
+            state = source_state(Path(plan["source"]))
+            require(state["sha256"] == lock["prepared_source_sha256"]
+                    and state["count"] == lock["prepared_source_files"],
+                    "prepared source does not match the new build lock")
+            require(sha(Path(plan["source"]) / "codex-rs/Cargo.lock") == lock["cargo_lock_sha256"],
+                    "prepared Cargo.lock does not match the new build lock")
+            saved = {name: hashlib.sha256(content).hexdigest() for name, content in records.items()}
+            snapshot = hashlib.sha256(json.dumps(saved, sort_keys=True).encode()).hexdigest()
+            directory = work / "previous-builds" / snapshot
+            # Check every ancestor before mkdir and every target before opening it.
+            build_record_path(directory / "build-owner.json")
+            backup = extended(directory)
+            backup.mkdir(parents=True, exist_ok=True)
+            for name, content in records.items():
+                target = build_record_path(directory / name)
+                if target.exists():
+                    require(target.read_bytes() == content, "previous build backup differs")
+                else:
+                    with target.open("xb") as output:
+                        require(output.write(content) == len(content), "previous build backup write was incomplete")
+                        output.flush(); os.fsync(output.fileno())
+            new = (json.dumps({"schema_version": 1, "build_lock_sha256": plan["build_lock_sha256"]},
+                              indent=2) + chr(10)).encode("utf8")
+            require((marker.lstat().st_dev, marker.lstat().st_ino, marker.lstat().st_nlink)
+                    == (opened.st_dev, opened.st_ino, 1), "build owner path changed before publication")
+            handle.seek(0)
+            require(handle.write(new) == len(new), "build owner write was incomplete")
+            handle.truncate(); handle.flush(); os.fsync(handle.fileno())
+            handle.seek(0)
+            require(handle.read() == new, "build owner readback differs")
+            require((marker.lstat().st_dev, marker.lstat().st_ino, marker.lstat().st_nlink)
+                    == (opened.st_dev, opened.st_ino, 1), "build owner path changed after publication")
+            return {"old_lock_sha256": expected_old, "new_lock_sha256": plan["build_lock_sha256"],
+                    "preserved_records": saved, "backup_directory": str(backup),
+                    "prepared_source_sha256": state["sha256"], "source_rewritten": False,
+                    "source_timestamps_rewritten": False}
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--archive", type=Path, required=True, help="Fixed upstream source tar.gz")
@@ -189,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--toolchain-bin", type=Path, required=True, help="Installed Rust 1.99.1 bin directory")
     parser.add_argument("--output", type=Path, help="Empty candidate output directory; defaults to WORK/candidate")
     parser.add_argument("--cache-dir", type=Path, help="Explicit existing owned Cargo/target cache root; defaults to WORK")
+    parser.add_argument("--transition-from-lock", help="Explicit CAS of a terminal owned build to this lock, only when its existing prepared source matches exactly; select a new empty --output")
     parser.add_argument("--build-lock", type=Path, default=REPO / "native/build-lock.json", help="Explicit pinned source/target lock; defaults to the current CLI candidate")
     parser.add_argument("--dry-run", action="store_true", help="Verify inputs/tool versions and print the plan without writing")
     args = parser.parse_args(argv)
@@ -232,16 +336,25 @@ def main(argv: list[str] | None = None) -> int:
     marker = work / "build-owner.json"
     if work.exists() and any(work.iterdir()):
         require(marker.is_file(), "non-empty work directory has no build ownership record")
-        require(json.loads(marker.read_text())["build_lock_sha256"] == plan["build_lock_sha256"],
-                "work directory belongs to a different input set")
+        previous_lock = json.loads(marker.read_text())["build_lock_sha256"]
+        require(previous_lock == plan["build_lock_sha256"] or args.transition_from_lock == previous_lock,
+                "work directory belongs to a different input set; an explicit verified transition is required")
+        require(args.transition_from_lock is None or previous_lock != plan["build_lock_sha256"],
+                "build inputs are already selected; inspect the existing run before retrying")
     require(not output.exists() or not any(output.iterdir()), "output directory must be empty; existing candidates are preserved")
+    if args.transition_from_lock is not None:
+        require(marker.is_file(), "input transition requires an existing owned build")
+        plan["transition_from_lock"] = args.transition_from_lock
     if args.dry_run:
         print(json.dumps(plan, indent=2))
         return 0
     work.mkdir(parents=True, exist_ok=True)
     if not marker.exists():
         atomic(marker, {"schema_version": 1, "build_lock_sha256": plan["build_lock_sha256"]})
+    transition = transition_owned_build(work, lock, plan, args.transition_from_lock) if args.transition_from_lock else None
     report = {**plan, "status": "preparing_source", "started_at": time.time(), "phases": []}
+    if transition is not None:
+        report["owner_transition"] = transition
     report_path = work / "build-report.json"
     atomic(report_path, report)
     try:

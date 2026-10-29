@@ -262,3 +262,164 @@ def test_dry_run_records_explicit_cache_without_mutating_work(tmp_path,monkeypat
     assert plan["runtime_executed"] is False and plan["app_qualified"] is False
     assert not work.exists()
     assert list(cache.iterdir()) == []
+
+
+def owner_transition_fixture(tmp_path):
+    work = tmp_path / "work"; source = work / "source"; cache = tmp_path / "cache"
+    (source / "codex-rs").mkdir(parents=True); cache.mkdir()
+    (source / "codex-rs/Cargo.lock").write_bytes(b"fixed-lock")
+    (source / "lib.rs").write_bytes(b"new-implementation")
+    state = build.source_state(source)
+    old, new = "a" * 64, "b" * 64
+    build.atomic(work / "build-owner.json", {"schema_version": 1, "build_lock_sha256": old})
+    build.atomic(work / "build-report.json", {"status": "passed", "build_lock_sha256": old,
+                 "source": str(source), "cache_dir": str(cache), "profile": build.PROFILE})
+    build.atomic(work / "source-manifest.json", {"historical": "immutable prior record"})
+    lock = {"prepared_source_sha256": state["sha256"], "prepared_source_files": state["count"],
+            "cargo_lock_sha256": build.sha(source / "codex-rs/Cargo.lock")}
+    plan = {"build_lock_sha256": new, "source": str(source), "cache_dir": str(cache),
+            "profile": build.PROFILE, "output": str(work / "new-candidate")}
+    return work, source, old, new, lock, plan
+
+
+def test_owned_build_transition_preserves_source_times_and_previous_records(tmp_path):
+    work, source, old, new, lock, plan = owner_transition_fixture(tmp_path)
+    records = {name: (work / name).read_bytes() for name in
+               ("build-owner.json", "build-report.json", "source-manifest.json")}
+    before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in source.rglob("*") if p.is_file()}
+    result = build.transition_owned_build(work, lock, plan, old)
+    assert result["source_rewritten"] is False and result["source_timestamps_rewritten"] is False
+    assert json.loads((work / "build-owner.json").read_bytes())["build_lock_sha256"] == new
+    assert before == {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in before}
+    for name, content in records.items():
+        assert (Path(result["backup_directory"]) / name).read_bytes() == content
+    assert not Path(plan["output"]).exists()
+
+
+@pytest.mark.parametrize("problem", ["stale-owner", "wrong-source", "active-build", "nonempty-output"])
+def test_owned_build_transition_rejects_unproven_inputs_without_owner_change(tmp_path, problem):
+    work, source, old, new, lock, plan = owner_transition_fixture(tmp_path)
+    if problem == "stale-owner":
+        old = "c" * 64
+    elif problem == "wrong-source":
+        (source / "lib.rs").write_bytes(b"unexpected")
+    elif problem == "active-build":
+        report = json.loads((work / "build-report.json").read_bytes()); report["status"] = "building"
+        build.atomic(work / "build-report.json", report)
+    else:
+        target = Path(plan["output"]); target.mkdir(); (target / "retain").write_bytes(b"existing")
+    before = (work / "build-owner.json").read_bytes()
+    with pytest.raises(ValueError):
+        build.transition_owned_build(work, lock, plan, old)
+    assert (work / "build-owner.json").read_bytes() == before
+    assert not (work / "previous-builds").exists()
+
+
+def test_owned_build_transition_A_B_A_never_rewinds_a_real_edit_timestamp(tmp_path):
+    work, source, old, new, lock, plan = owner_transition_fixture(tmp_path)
+    build.transition_owned_build(work, lock, plan, old)
+    build.atomic(work / "build-report.json", {"status": "passed", "build_lock_sha256": new,
+                 "source": str(source), "cache_dir": plan["cache_dir"], "profile": build.PROFILE})
+    build.atomic(work / "source-manifest.json", build.source_state(source))
+    (source / "lib.rs").write_bytes(b"prior-implementation-restored-as-a-new-edit")
+    before = (source / "lib.rs").stat().st_mtime_ns
+    state = build.source_state(source); lock = {**lock, "prepared_source_sha256": state["sha256"]}
+    plan = {**plan, "build_lock_sha256": old, "output": str(work / "another-candidate")}
+    build.transition_owned_build(work, lock, plan, new)
+    assert (source / "lib.rs").stat().st_mtime_ns == before
+    assert (source / "lib.rs").read_bytes() == b"prior-implementation-restored-as-a-new-edit"
+
+
+def test_owned_build_transition_A_B_A_C_preserves_distinct_record_snapshots(tmp_path):
+    work, source, old, new, lock, plan = owner_transition_fixture(tmp_path)
+    snapshots = []
+    current = old
+    for index, destination in enumerate((new, old, "c" * 64)):
+        build.atomic(work / "build-report.json", {"status": "passed", "build_lock_sha256": current,
+                     "source": str(source), "cache_dir": plan["cache_dir"], "profile": build.PROFILE,
+                     "run_index": index})
+        build.atomic(work / "source-manifest.json", {**build.source_state(source), "run_index": index})
+        plan = {**plan, "build_lock_sha256": destination, "output": str(work / ("output-" + str(index)))}
+        result = build.transition_owned_build(work, lock, plan, current)
+        snapshots.append(Path(result["backup_directory"]))
+        current = destination
+    assert len(set(snapshots)) == 3
+    assert [json.loads((p / "build-report.json").read_bytes())["run_index"] for p in snapshots] == [0, 1, 2]
+
+
+@pytest.mark.parametrize("redirect", ["backup-junction", "owner-hardlink"])
+def test_owned_build_transition_refuses_redirected_or_linked_metadata(tmp_path, redirect):
+    import os
+    import subprocess
+    work, source, old, new, lock, plan = owner_transition_fixture(tmp_path)
+    outside = tmp_path / "outside"; outside.mkdir()
+    original = (work / "build-owner.json").read_bytes()
+    if redirect == "owner-hardlink":
+        alias = outside / "owner.json"; os.link(work / "build-owner.json", alias)
+    elif os.name == "nt":
+        subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(work / "previous-builds"), str(outside)],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    else:
+        (work / "previous-builds").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError):
+        build.transition_owned_build(work, lock, plan, old)
+    assert (work / "build-owner.json").read_bytes() == original
+    if redirect == "owner-hardlink":
+        assert alias.read_bytes() == original
+    else:
+        assert list(outside.iterdir()) == []
+
+
+def test_owned_build_transition_owner_lock_contention_preserves_all_records(tmp_path):
+    import os
+    import subprocess
+    import sys
+    work, source, old, new, lock, plan = owner_transition_fixture(tmp_path)
+    names = ("build-owner.json", "build-report.json", "source-manifest.json")
+    before = {name: (work / name).read_bytes() for name in names}
+    # This is a distinct process, so the assertion proves the native OS lock
+    # blocks a competing owner transition rather than only a Python object lock.
+    child = (
+        "import importlib.util,json,pathlib,sys;"
+        "s=importlib.util.spec_from_file_location('build',sys.argv[1]);"
+        "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);"
+        "m.transition_owned_build(pathlib.Path(sys.argv[2]),json.loads(sys.argv[3]),"
+        "json.loads(sys.argv[4]),sys.argv[5])"
+    )
+    with (work / "build-owner.json").open("r+b", buffering=0) as handle:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            outcome = subprocess.run(
+                [sys.executable, "-I", "-B", "-c", child, str(build.__file__),
+                 str(work), json.dumps(lock), json.dumps(plan), old],
+                capture_output=True, text=True, timeout=15)
+            assert outcome.returncode != 0
+            assert "locking" in outcome.stderr or "would block" in outcome.stderr or "PermissionError" in outcome.stderr
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    assert before == {name: (work / name).read_bytes() for name in names}
+    assert not (work / "previous-builds").exists()
+
+
+@pytest.mark.parametrize("record", ["build-report.json", "source-manifest.json"])
+def test_owned_build_transition_refuses_hardlinked_preserved_records(tmp_path, record):
+    import os
+    work, source, old, new, lock, plan = owner_transition_fixture(tmp_path)
+    alias = tmp_path / ("outside-" + record)
+    os.link(work / record, alias)
+    names = ("build-owner.json", "build-report.json", "source-manifest.json")
+    before = {name: (work / name).read_bytes() for name in names}
+    with pytest.raises(ValueError, match="single regular file"):
+        build.transition_owned_build(work, lock, plan, old)
+    assert before == {name: (work / name).read_bytes() for name in names}
+    assert alias.read_bytes() == before[record]
+    assert not (work / "previous-builds").exists()

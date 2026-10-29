@@ -471,3 +471,9 @@ Preparation alone does not bind, configure, start or qualify the App.
 The initial private archive and targeted packaging regressions are development
 qualification. Final clean-source assembly, installed-version binding and the
 remaining actual App gates still precede stable publication.
+
+## Incremental rebuild of an owned source tree
+
+Fresh extraction changes every source timestamp and can force Cargo to rebuild unchanged workspace crates. For a new reviewed input lock, retain the existing build source at the same absolute path and prepare its exact new locked bytes. Use --transition-from-lock PREVIOUS_LOCK_SHA256 together with a new, empty --output directory. The builder requires the prior run to be terminal and keeps the same source path, Cargo cache and release profile. It verifies the complete new source fingerprint and Cargo.lock, saves the old owner/report/source manifest byte-for-byte, then changes only the build-owner record under an OS file lock.
+
+This does not rewrite source or backdate timestamps. Actual edits keep their normal fresh timestamps so Cargo invalidates changed inputs; unchanged files retain their existing timestamps. Without this explicit option, the existing cross-input work-directory guard still rejects the transition. Inspect an interrupted or already selected run instead of replaying the transition option.
