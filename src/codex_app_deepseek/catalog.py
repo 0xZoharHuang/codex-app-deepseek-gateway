@@ -8,15 +8,15 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Mapping, Sequence
 
-NATIVE_VERSION = "0.163.0-alpha.11.1"
-NATIVE_COMMIT = "680c4ba93ec79c292287fb9e0b627dc7a76e3b5e"
+NATIVE_VERSION = "0.165.0-alpha.1.2"
+NATIVE_COMMIT = "720fec862a608ae1e5878d1eecb04fb93192e93c"
 PINNED_MODEL = "deepseek/deepseek-v4.1-flash-1017"
 TEMPLATE_MODEL = "gpt-6.1-sol"
 CONTEXT_WINDOW = 1_048_576
 AUTO_COMPACT_TOKEN_LIMIT = 650_000
-# Native Guardian V2 async_scorer/sampler.rs:40,237 at NATIVE_COMMIT.
+# Native Guardian V2 async_scorer/sampler.rs MODEL at NATIVE_COMMIT.
 NATIVE_AUXILIARY_ALIASES = ("gpt-5.6-luna",)
-# Official App 26.1016.8120.0 ASAR src-CSKkIr_z.js codex-app-model-routing
+# Official App 26.1023.6621.0 ASAR src-D0VLwrLy.js codex-app-model-routing
 # defaults: metadata/ambient helpers use gpt-6-luna; local automation and
 # visualization defaults use gpt-6.1-sol. Normal helper forks do not implement
 # startThread's provider-model fallback. These exact aliases all infer with

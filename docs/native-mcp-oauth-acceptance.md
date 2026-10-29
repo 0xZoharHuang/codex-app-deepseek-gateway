@@ -1,5 +1,12 @@
 # Native MCP OAuth and App extension qualification
 
+Current target: App 26.1023.6621.0 / native 0.165.0-alpha.1.2.
+The record below belongs to the prior 0.163 cohort. Its observed results are
+retained, but are not a 0.165 qualification. The current two-patch recipe and
+its remaining gates are in [native-build.md](native-build.md) and
+[qualification-status.md](qualification-status.md).
+
+
 This runbook applies to the signed Windows App 26.1016.8120.0 and H native runtime,
 pinned to upstream commit `680c4ba93ec79c292287fb9e0b627dc7a76e3b5e`.
 The gateway translates model traffic. MCP discovery, OAuth, credential storage,

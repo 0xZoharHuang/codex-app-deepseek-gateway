@@ -1,5 +1,12 @@
 # App runtime acceptance matrix
 
+Current target is signed App **26.1023.6621.0** / native **0.165.0-alpha.1.2**
+(`720fec862a608ae1e5878d1eecb04fb93192e93c`), with the O165 two-patch single
+producer. New-cohort qualification is in progress. The existing gate definitions
+remain applicable; prior 0.163 observations below are historical and do not
+automatically qualify this App update. See [qualification-status.md](qualification-status.md).
+
+
 This is an execution ledger, not a support or release declaration. A local mock,
 CLI RPC, selected model name, successful HTTP response, or final answer cannot
 establish App runtime parity. Each passing row needs a concrete receipt and an

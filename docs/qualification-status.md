@@ -1,6 +1,37 @@
 # Current qualification ledger
 
-Updated 2026-10-29. **Not a stable release.** The current actual combination is
+## Current App update: O165 qualification in progress
+
+The installed signed App has advanced to **26.1023.6621.0**. Its bundled native is
+**0.165.0-alpha.1.2**, upstream
+`720fec862a608ae1e5878d1eecb04fb93192e93c`. The signed App executable differs from
+the official release executable only in Authenticode fields; the source mapping
+is byte-checked outside those fields. This proves the source baseline, not a
+reproducible local build or App mechanism acceptance.
+
+The current O165 recipe in `native/build-lock.json` uses two necessary isolation
+patches and builds all four native components from one source. It does not port
+the old capacity/compaction extensions. Native 0.165's additional App RPC methods,
+feature catalogue, agent loop, permissions and context lifecycle remain upstream.
+The new candidate still requires compilation, native mechanism checks, actual App
+loading and the applicable real GUI/task/fault gates. Source parsing is not a
+runtime pass.
+
+The r5 gateway was installed and independently passed **1,329 unique software
+cases**, with no failures, errors, skips or deselections, using the published
+CDS 0.6.7 pure protocol input. Its normal App version guard rejected the changed
+App before any launch. That software result is separate from a final O165/r5
+App qualification. Any newly changed gateway source also requires its own final
+installed qualification.
+
+The following entries describe prior fixed cohorts. Their receipts remain
+unaltered and their scope must be carried only where relevant implementation and
+effective configuration are independently shown unchanged.
+
+## Historical 0.163 N/J and r4 results
+
+
+Updated 2026-10-29. **Not a stable release.** The historical actual combination was
 the signed Windows App, N CLI plus three original J siblings, and installed r4.
 The N CLI SHA-256 is
 `1dbf68a29a37c92816ea9eaac22b12d2dfbf9fa42017b26b9b050fc18a6da8f4`.
@@ -397,3 +428,26 @@ provider identities remain unknown.
 
 Model quality, model-inherent modalities and cloud/account rights remain separate
 from local runtime mechanisms. The complete original acceptance scope is retained.
+
+
+## 2026-10-29: fixed 0.165 software qualification and native port repair
+The current Python source suite passed 1,422 unique cases under normal Limited
+admin session 3, with setup/call/teardown and JUnit identities independently
+matched. This is software qualification; a new installed distribution and actual
+App acceptance remain separate gates. A prior elevated run retained six failures:
+five real DACL negative fixtures needed the intended Limited token, and one source
+metadata lookup was shadowed by archived stale ignored egg-info. The same assertions
+passed in the complete Limited run; none were skipped.
+
+The 0.165 sandbox and MCP libtest programs compiled successfully against the exact
+source map. Actual Limited tests then retained MCP 29/30 and sandbox 35/36 results
+(the latter includes one child harness). One MCP test expected the wrong Windows
+canonical path representation; published production service identity is unchanged.
+The sandbox failure is a real port defect: the stock root-only MAXIMUM_ALLOWED
+directory handle conflicts with the mature coordinator's no-delete-sharing pin.
+The current production build was deliberately cancelled before repair; it is not
+a qualified App runtime. A thin port of the matching upstream Windows sandbox
+service's retained-handle DACL primitive is being compared against stock native
+behavior. No new lock phase engine, ACE policy, agent loop or approval mechanism
+is introduced. Stable publication remains blocked until the actual native and App
+gates pass.

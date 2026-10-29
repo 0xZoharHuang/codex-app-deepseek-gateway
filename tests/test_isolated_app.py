@@ -164,7 +164,7 @@ def test_sqlite_home_stays_with_native_home(fixture, outside):
     else: app.validate_request(request, backend)
     assert not backend.spawned
 
-@pytest.mark.parametrize("existing_app", [True, False])
+@pytest.mark.parametrize("existing_app", [True, False, "foreign-default", "foreign-distinct"])
 def test_prepare_runtime_copies_only_official_sidecar_and_never_runs(fixture, existing_app):
     paths, expected, path, value, request, backend = fixture
     original_host = path.parent / "codex-code-mode-host.exe"
@@ -174,16 +174,23 @@ def test_prepare_runtime_copies_only_official_sidecar_and_never_runs(fixture, ex
     raw = {k: v for k, v in value.items() if k not in {"app_baseline_sha256", "app_package_full_name"}}
     raw["status"] = "built-not-app-qualified"; raw["outputs"] = raw["outputs"][:-1]
     raw_path = path.parent / "manifest.json"; raw_path.write_text(json.dumps(raw))
-    if existing_app:
+    if existing_app is True:
         backend.existing = [{"pid": 999}]
         with pytest.raises(app.LaunchError): app.prepare_runtime(raw_path, app.sha(raw_path), request["baseline"], backend)
         assert not original_host.exists() and not path.exists()
     else:
+        state = None
+        if existing_app == "foreign-default":state = _foreign_app(backend)
+        elif existing_app == "foreign-distinct":
+            other = str(paths["home"].parent / "foreign")
+            state = _foreign_app(backend,home=other,frontend=other,browser=other)
+        before = copy.deepcopy(state)
         source_before = source.read_bytes()
         prepared = app.prepare_runtime(raw_path, app.sha(raw_path), request["baseline"], backend)
         app.verify_bundle(Path(prepared["manifest"]), prepared["manifest_sha256"], expected)
         assert source.read_bytes() == source_before == original_host.read_bytes()
         assert app.prepare_runtime(raw_path, app.sha(raw_path), request["baseline"], backend) == prepared
+        assert state == before
     assert not backend.spawned and not paths["launches"].exists()
 
 
@@ -733,3 +740,156 @@ def test_cleanup_unused_reparse_is_diagnostic_without_following_target(fixture, 
     monkeypatch.setattr(app, "sha", no_read)
     result = app.verify_bundle(path, request["native_manifest_sha256"], expected, cleanup_only=True)
     assert result["cleanup_verification"]["unexecuted_components"][helper.name]["status"] == "redirected"
+
+
+def _foreign_app(backend, *, home=None, frontend=None, browser=None):
+    """Foreign-process metadata fixture; never starts or controls any process."""
+    identity = {**backend.identity(999), "created":100.0}
+    state = {"identity":copy.deepcopy(identity), "environment":dict.fromkeys(app.CONTROLLED),
+             "arguments":[] if browser is None else ["--user-data-dir=" + browser],
+             "exists":True}
+    state["environment"].update(CODEX_HOME=home,CODEX_ELECTRON_USER_DATA_PATH=frontend)
+    original_identity = backend.identity
+    original_environment = backend.selected_environment
+    original_arguments = backend.profile_arguments
+    def current(pid):
+        if pid != 999: return original_identity(pid)
+        if not state["exists"]: raise app.psutil.NoSuchProcess(pid)
+        return copy.deepcopy(state["identity"])
+    backend.identity = current
+    backend.selected_environment = lambda row: copy.deepcopy(state["environment"]) if row["pid"] == 999 else original_environment(row)
+    backend.profile_arguments = lambda row: list(state["arguments"]) if row["pid"] == 999 else original_arguments(row)
+    backend.existing = [copy.deepcopy(identity)]
+    return state
+
+
+@pytest.mark.parametrize("override",["stock-defaults","native-home","frontend","browser","all"])
+def test_distinct_foreign_App_can_coexist_without_adoption_or_control(fixture,override):
+    paths,_,_,_,request,backend = fixture
+    other = paths["home"].parent / "foreign-home"
+    state = _foreign_app(backend,
+        home=str(other) if override in ("native-home","all") else None,
+        frontend=str(other / "electron") if override in ("frontend","all") else None,
+        browser=str(other / "electron") if override in ("browser","all") else None)
+    before = copy.deepcopy(state)
+    plan = app.prepare_launch(request,backend)
+    result = app.inside_launch(Path(plan["plan"]),plan["plan_sha256"],backend)
+    assert result["status"] == "started_expected_backend"
+    assert result["app"]["pid"] == 101 and result["native_processes"][0]["pid"] == 102
+    assert len(backend.spawned) == 1 and state == before
+    assert 999 not in [row["pid"] for row in result["native_processes"]]
+
+
+@pytest.mark.parametrize("selector",["home","frontend","browser"])
+@pytest.mark.parametrize("alias",["exact","casefold","dotdot"])
+def test_foreign_App_same_native_or_Electron_or_browser_profile_is_denied(fixture,selector,alias):
+    paths,_,_,_,request,backend = fixture
+    value = str(paths["home"] if selector == "home" else paths["frontend"])
+    if alias == "casefold": value = value.swapcase()
+    elif alias == "dotdot": value = str(Path(value) / "unused" / "..")
+    _foreign_app(backend,**{selector:value})
+    with pytest.raises(app.LaunchError,match="dedicated"):
+        app.prepare_launch(request,backend)
+    assert not backend.spawned and not paths["launches"].exists()
+
+
+@pytest.mark.parametrize("arguments",[
+    ["--user-data-dir"],["--user-data-dir",r"C:\foreign"],
+    ["--user-data-dir="],["--user-data-dir=a","--user-data-dir=b"],
+    ["--User-Data-Dir=C:\\foreign"],[None],
+])
+def test_foreign_App_ambiguous_browser_selectors_fail_closed(fixture,arguments):
+    paths,_,_,_,request,backend = fixture
+    state = _foreign_app(backend)
+    state["arguments"] = arguments
+    with pytest.raises(app.LaunchError):
+        app.prepare_launch(request,backend)
+    assert not backend.spawned
+
+
+@pytest.mark.parametrize("fault",["unknown-key","missing-key","empty-home","relative-home","non-string","access-denied","reused-before","reused-after","owner-changed","unknown-exit"])
+def test_foreign_App_unknown_or_reused_identity_never_authorizes_launch(fixture,fault):
+    paths,_,_,_,request,backend = fixture
+    state = _foreign_app(backend)
+    if fault == "unknown-key":state["environment"]["UNRELATED"] = "never expose"
+    elif fault == "missing-key":state["environment"].pop("CODEX_HOME")
+    elif fault == "empty-home":state["environment"]["CODEX_HOME"] = ""
+    elif fault == "relative-home":state["environment"]["CODEX_HOME"] = "relative-home"
+    elif fault == "non-string":state["environment"]["CODEX_CLI_PATH"] = 1
+    elif fault == "access-denied":
+        def denied(row):raise app.psutil.AccessDenied(row["pid"])
+        backend.selected_environment = denied
+    elif fault == "reused-before":state["identity"]["created"] += 1
+    elif fault == "owner-changed":state["identity"]["sid"] = "S-1-5-21-other"
+    else:
+        original = backend.profile_arguments
+        def change(row):
+            if fault == "reused-after":
+                result = original(row);state["identity"]["created"] += 1;return result
+            raise app.psutil.NoSuchProcess(row["pid"])
+        backend.profile_arguments = change
+    with pytest.raises(app.LaunchError):
+        app.prepare_launch(request,backend)
+    assert not backend.spawned
+
+
+def test_foreign_App_natural_disappearance_is_confirmed_not_replaced(fixture):
+    paths,_,_,_,request,backend = fixture
+    state = _foreign_app(backend)
+    original = backend.profile_arguments
+    def vanished(row):
+        state["exists"] = False
+        raise app.psutil.NoSuchProcess(row["pid"])
+    backend.profile_arguments = vanished
+    result = app.validate_request(request,backend)
+    assert result["environment"]["CODEX_HOME"] == str(paths["home"])
+    assert not backend.spawned
+
+
+def test_new_profile_conflict_is_rechecked_inside_original_launch_lock(fixture):
+    paths,_,_,_,request,backend = fixture
+    state = _foreign_app(backend)
+    plan = app.prepare_launch(request,backend)
+    state["arguments"] = ["--user-data-dir=" + str(paths["frontend"])]
+    with pytest.raises(app.LaunchError,match="dedicated"):
+        app.inside_launch(Path(plan["plan"]),plan["plan_sha256"],backend)
+    assert not backend.spawned
+
+
+def test_selected_environment_keeps_only_four_case_insensitive_selectors(monkeypatch):
+    backend = object.__new__(app.WindowsBackend)
+    backend._require_live = lambda *args:None
+    class Process:
+        def environ(self):
+            return {"codex_home":r"C:\private","PATH":"unrelated secret fixture",
+                    "CODEX_ELECTRON_USER_DATA_PATH":r"C:\frontend","OPENROUTER_API_KEY":"not returned"}
+    monkeypatch.setattr(app.psutil,"Process",lambda pid:Process())
+    values = backend.selected_environment({"pid":999})
+    assert set(values) == app.CONTROLLED
+    assert values["CODEX_HOME"] == r"C:\private"
+    assert values["CODEX_CLI_PATH"] is None
+    assert "not returned" not in json.dumps(values)
+
+
+def test_selected_environment_rejects_ambiguous_Windows_case_aliases(monkeypatch):
+    backend = object.__new__(app.WindowsBackend)
+    backend._require_live = lambda *args:None
+    class Process:
+        def environ(self):return {"CODEX_HOME":r"C:\a","codex_home":r"C:\b"}
+    monkeypatch.setattr(app.psutil,"Process",lambda pid:Process())
+    with pytest.raises(app.LaunchError,match="ambiguous"):
+        backend.selected_environment({"pid":999})
+
+@pytest.mark.parametrize("arguments",[
+    ["--user-data-dir"],["--user-data-dir",r"C:\profile"],
+    [r"-user-data-dir=C:\profile"],[r"/user-data-dir=C:\profile"],
+    [r"--USER-DATA-DIR=C:\profile"],["--user-data-dir-unknown=anything"],
+])
+def test_browser_selector_observation_retains_ambiguous_switch_aliases(monkeypatch,arguments):
+    backend = object.__new__(app.WindowsBackend)
+    backend._require_live = lambda *args:None
+    class Process:
+        def cmdline(self):return ["ChatGPT.exe",*arguments,"--type=renderer"]
+    monkeypatch.setattr(app.psutil,"Process",lambda pid:Process())
+    retained = backend.profile_arguments({"pid":999})
+    assert retained == [arguments[0]]

@@ -21,7 +21,7 @@ their own actual App evidence.
 
 ## Fixed inputs
 
-`native/app-launch-baseline.json` fixes package `OpenAI.Codex_26.1016.8120.0_x64__2p2nqsd0c76g0`,
+`native/app-launch-baseline.json` fixes package `OpenAI.Codex_26.1023.6621.0_x64__2p2nqsd0c76g0`,
 its production package identity, valid signatures, executable signer, App/archive
 hashes, official Code Mode Host, Node/Node REPL, ripgrep, and resource manifests.
 It is itself hash-pinned by the installed launcher module. An App update fails
@@ -29,8 +29,8 @@ preflight until a new combination is independently qualified; no automatic basel
 refresh or fallback is performed.
 
 Supply a native manifest and its separately trusted SHA-256. The manifest must
-identify upstream `680c4ba93ec79c292287fb9e0b627dc7a76e3b5e` and native version
-`0.163.0-alpha.11.1`, a full source SHA-256, and exactly these four private executables:
+identify upstream `720fec862a608ae1e5878d1eecb04fb93192e93c` and native version
+`0.165.0-alpha.1.2`, a full source SHA-256, and exactly these four private executables:
 `codex.exe`, `codex-command-runner.exe`, `codex-windows-sandbox-setup.exe`, and
 `codex-windows-managed-deny-probe.exe`. Every binary's size/hash is checked. Paths
 must remain in the manifest's directory. The launcher does not infer provenance
@@ -56,9 +56,10 @@ only the matching official `codex-code-mode-host.exe` into the private candidate
 directory; the source App resource is never modified. That sibling is necessary
 because the App's `CODEX_CLI_PATH` override bypasses its usual CLI/host-copy path.
 The script preserves the raw manifest, writes `app-runtime-manifest.json` with the
-host's source/hash, and returns its SHA-256. Existing conflicting files or a running
-App for the current user cause an error. This step does not execute any native
-binary, helper, or App.
+host's source/hash, and returns its SHA-256. Existing conflicting files or an App using this dedicated native home,
+frontend or browser profile cause an error. A disjoint stock or separate-profile
+App is not stopped and does not by itself block preparation. This step does not
+execute any native binary, helper, or App.
 
 ## Check and launch in the current interactive desktop
 
@@ -116,9 +117,21 @@ locations must still be checked for each qualified App combination.
 The only optional caller-supplied App argument is `-Accessibility`, which supplies
 `--force-renderer-accessibility`. Arbitrary arguments, user-supplied profile paths
 and deep links are rejected.
-The launcher refuses any existing Codex App for the current user, in any session.
-It never adopts that instance or sends it a second launch. A user-scoped lock also
-prevents simultaneous launches from this entrypoint.
+The launcher checks existing same-user App identities and only four controlled
+selectors plus the filtered browser-profile switch. It rejects a matching native
+home, frontend or browser profile, relative/ambiguous selectors, PID reuse and
+unknown observation failures. A freshly confirmed natural disappearance can be
+ignored; a replacement is never adopted. The fixed App's unset selectors denote
+its stock default directories, which differ from this gateway's validated
+dedicated local-data paths. Separate profiles may coexist.
+
+This check runs both during admission and again inside the existing launch lock.
+The fixed 26.1023.6621.0 bootstrap sets its Electron userData path before requesting
+the native single-instance lock; the browser switch is also present from process
+creation. Own-process ancestry, exact environment/arguments, executable hashes and
+actual backend checks remain required after spawn. No command, model prompt,
+deep link or control operation is sent to another App. The source and fixture
+checks alone do not prove real GUI coexistence; that remains an actual App gate.
 
 ## Git as an external Windows dependency
 

@@ -1,91 +1,23 @@
 {
   "schema_version": 1,
-  "upstream_commit": "680c4ba93ec79c292287fb9e0b627dc7a76e3b5e",
-  "archive_sha256": "b95f2de5822fa83b277207b8c88dd19404427d54a16e87726a4d2039c4619ebb",
-  "native_version": "0.163.0-alpha.11.1",
+  "upstream_commit": "720fec862a608ae1e5878d1eecb04fb93192e93c",
+  "archive_sha256": "37f7f01a5e404b5015b47decececba7a3f0b9526bc951d0624bd57008a972a14",
+  "native_version": "0.165.0-alpha.1.2",
   "rust_version": "1.99.1",
   "target": "x86_64-pc-windows-msvc",
   "patches": [
     {
-      "file": "windows-sandbox-isolation.patch",
-      "sha256": "83385cafd4b4d966a40a5d5b21ef8b279a3b085da5d20324558eda50baf8ba6d"
+      "file": "windows-home-namespace-0165.patch",
+      "sha256": "6e1181120c199fbbf841c07ab197abd8453be00449d6e80b2b455b59a66c8a93"
     },
     {
-      "file": "payload-too-large.patch",
-      "sha256": "f3f864e75fa03adf30ce4f93acde65987b776682d3305ba191425bdca98a3fe3"
-    },
-    {
-      "file": "mcp-keyring-isolation.patch",
-      "sha256": "a832e31fdb867d6910ec88e385b891f1441dfffaacd8423c4e4da88dc88a3ddc"
-    },
-    {
-      "file": "windows-sandbox-help.patch",
-      "sha256": "1ae3bf9388ab8e9acbfc3002c0056862024ed41a0967da4efafb2a386a1a5bfd"
-    },
-    {
-      "file": "windows-loopback-policy.patch",
-      "sha256": "537d83d9196e2fdc51b6fda1a489efeee1df87a477e87309d46f4b724f20e86a"
-    },
-    {
-      "file": "windows-wfp-readiness.patch",
-      "sha256": "187549003c49e760864b1e4b482fd28e94208d6e3f2600dbdf3c6783e854e8ba"
-    },
-    {
-      "file": "windows-artifact-readroots.patch",
-      "sha256": "f9fb3adcacd75c27a9e54683786a5d61a2ca4b78c95a992ee2cae0cd9c0e85af"
-    },
-    {
-      "file": "windows-home-metadata.patch",
-      "sha256": "33acda210a87d114467e16468df6e858274dbe39642985bf41aa05dcf2952569"
-    },
-    {
-      "file": "windows-critical-read.patch",
-      "sha256": "cc540b093e537576cdeaa561c38c7b42869c9960273a3de40ca372cebb28c577"
-    },
-    {
-      "file": "windows-acl-lifecycle.patch",
-      "sha256": "eda8311d1818b0154f7e102a200c0a2e4228c48f5ca14962970b9783735cc5bd"
-    },
-    {
-      "file": "cadsg-request-capacity-port.patch",
-      "sha256": "125bdbfc6ab2a365655ac962b6fe32c71f768a37aa095e4b0c69301083ce24a7"
-    },
-    {
-      "file": "windows-existing-critical-read.patch",
-      "sha256": "5878b629c02294ab11d753c2094e6074989b3d407378bda488eeab24d4127cb5"
-    },
-    {
-      "file": "cadsg-680-summary-kind-compat.patch",
-      "sha256": "7d70de14bee5d408580e6d546dfbb3c60dcfa429032774235ead3f62641ff726"
-    },
-    {
-      "file": "windows-critical-read-deny-readiness.patch",
-      "sha256": "6ea930fedafdd8bcc1fa8c2563845661cf038c5be86d50488ebfd918fa4bb0bc"
-    },
-    {
-      "file": "windows-metadata-owner-policy.patch",
-      "sha256": "82d9c9d7ee9b57603e359092ef891a0842209df325128db7241eaceb0067944b"
-    },
-    {
-      "file": "windows-app-sandbox-coordination.patch",
-      "sha256": "b1c912934e080d366b59cf91089f1feccc311223ffd69755a65048c9b84d8411"
-    },
-    {
-      "file": "windows-native-metadata-minimal.patch",
-      "sha256": "3f676554a68bafb74ceaa1f78021fe30f9f5fc8ffc9c572a8e182a07a0cda071"
-    },
-    {
-      "file": "windows-setup-refresh-handles.patch",
-      "sha256": "7b65691a04c1fb1309f94cab6621f423b711b0256f85c94326d82da1fc15fe76"
-    },
-    {
-      "file": "payload-request-capacity-replay.patch",
-      "sha256": "bce3a17c66fafbdeaa6112afbbbdd28c2fd70852fb0c436cb5d7ccc767b58fee"
+      "file": "mcp-keyring-isolation-0165.patch",
+      "sha256": "2b98b46dec58a0b37c4880a991b7efdc81e5c1ce564f49fa369145e80711c769"
     }
   ],
-  "prepared_source_sha256": "3be6efb7b73138f54cae24f6f6f04da5a348b02483f2a36dbeddc766689a77bc",
-  "prepared_source_files": 9201,
-  "cargo_lock_sha256": "fc643e0bfc6c6a3682e5cba84daf8df7ccf1987c364498e0827d161eb607418d",
+  "prepared_source_sha256": "bbd0dc8ccc46d03134f887503b48c008731f622acc05e208bba4c110ec704178",
+  "prepared_source_files": 9513,
+  "cargo_lock_sha256": "7537da7c5e154334b15ef9b59091f5fed3a8e480b77c037e3a8b7f07d1614709",
   "release_environment": {
     "CARGO_BUILD_JOBS": "2",
     "CARGO_INCREMENTAL": "0",
@@ -96,7 +28,10 @@
     "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16"
   },
   "binaries": [
-    "codex.exe"
+    "codex.exe",
+    "codex-command-runner.exe",
+    "codex-windows-sandbox-setup.exe",
+    "codex-windows-managed-deny-probe.exe"
   ],
-  "candidate_revision": "N"
+  "candidate_revision": "O165"
 }

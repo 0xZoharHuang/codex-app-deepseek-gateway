@@ -544,6 +544,7 @@ def _activate_locked(install_root: Path, release_id: str) -> dict:
 # Version provenance is the previously verified official signed binary, never
 # the caller's requested baseline. Unknown updates require fresh qualification.
 KNOWN_OFFICIAL_NATIVE_VERSIONS = {
+    "0c09e45bc76433756eb2d492f6db0ce6f269967e6618f4a6ae73e2fa239694b8": "0.165.0-alpha.1.2",
     "e757246b4de87359e660647fa9514955a0971ff6a30affdd8c145d1d5ece7b84": "0.163.0-alpha.11.1",
 }
 

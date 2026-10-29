@@ -84,8 +84,9 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(result[1]["auto_review_model_override"], PINNED_MODEL)
 
     def test_rejects_unsupported_binary_and_duplicate_source(self):
-        with self.assertRaises(CatalogCompatibilityError):
-            build_catalog(bundled(), native_version="0.164.0")
+        for older in ("0.164.0", "0.163.0-alpha.11.1"):
+            with self.assertRaises(CatalogCompatibilityError):
+                build_catalog(bundled(), native_version=older)
         source = bundled()
         source["models"].append(source["models"][0])
         with self.assertRaises(CatalogCompatibilityError):

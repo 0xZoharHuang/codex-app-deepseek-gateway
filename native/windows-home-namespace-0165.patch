@@ -1,0 +1,5161 @@
+diff --git a/NOTICE b/NOTICE
+--- a/NOTICE
++++ b/NOTICE
+@@ -4,3 +4,25 @@
+ This project includes code derived from [Ratatui](https://github.com/ratatui/ratatui), licensed under the MIT license.
+ Copyright (c) 2016-2022 Florian Dehau
+ Copyright (c) 2023-2025 The Ratatui Developers
++
++CADSG Windows namespace adaptation for Codex 0.165
++-------------------------------------------------
++This source includes private-home Windows resource identity adaptations by the
++Codex App DeepSeek Gateway project, based on OpenAI Codex commit
++720fec862a608ae1e5878d1eecb04fb93192e93c. The original Codex LICENSE and notices
++remain applicable.
++
++The Windows filesystem ACL coordination modules acl_lock.rs and
++private_acl_lock.rs are reused without source changes from the published
++codex-deepseek-runtime 0.6.7 source, commit
++cb788738864e97a16cde82f3c584164162ab6f7c (Apache-2.0). Their exact helper-producer
++source bytes are recorded in the patch provenance/source map. The native ACL
++policy, token construction, execution loop, tools, approvals, and thread
++orchestration remain from the upstream Codex source. Reusing OS coordination
++does not import CDS launchers, supervisors, credentials, sessions, or runtime
++business logic.
++
++The adaptation changes native Windows resource labels and validates private
++home ownership. Its original and modified file hashes and source recipe are
++provided with the source patch. It does not redistribute the proprietary
++desktop App, ASAR, or publisher-signed runtime package.
+diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -287,7 +287,7 @@
+ 
+ [[package]]
+ name = "app_test_support"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -1888,7 +1888,7 @@
+ 
+ [[package]]
+ name = "codex-agent-extension"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "codex-core",
+@@ -1900,7 +1900,7 @@
+ 
+ [[package]]
+ name = "codex-agent-graph-store"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-protocol",
+  "codex-state",
+@@ -1915,7 +1915,7 @@
+ 
+ [[package]]
+ name = "codex-agent-identity"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -1935,7 +1935,7 @@
+ 
+ [[package]]
+ name = "codex-agent-message-board-client"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -1958,7 +1958,7 @@
+ 
+ [[package]]
+ name = "codex-agent-message-board-extension"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-extension-api",
+  "codex-message-board",
+@@ -1972,7 +1972,7 @@
+ 
+ [[package]]
+ name = "codex-agent-roles"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-config",
+  "codex-file-system",
+@@ -1985,7 +1985,7 @@
+ 
+ [[package]]
+ name = "codex-analytics"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-app-server-protocol",
+  "codex-git-utils",
+@@ -2008,7 +2008,7 @@
+ 
+ [[package]]
+ name = "codex-ansi-escape"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "ansi-to-tui",
+  "pretty_assertions",
+@@ -2019,7 +2019,7 @@
+ 
+ [[package]]
+ name = "codex-api"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "assert_matches",
+@@ -2057,7 +2057,7 @@
+ 
+ [[package]]
+ name = "codex-app-server"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -2175,7 +2175,7 @@
+ 
+ [[package]]
+ name = "codex-app-server-client"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-app-server",
+  "codex-app-server-protocol",
+@@ -2202,7 +2202,7 @@
+ 
+ [[package]]
+ name = "codex-app-server-daemon"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "blake3",
+@@ -2232,7 +2232,7 @@
+ 
+ [[package]]
+ name = "codex-app-server-protocol"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "codex-app-server-protocol-noop-macros",
+@@ -2266,11 +2266,11 @@
+ 
+ [[package]]
+ name = "codex-app-server-protocol-noop-macros"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ 
+ [[package]]
+ name = "codex-app-server-test-client"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2292,7 +2292,7 @@
+ 
+ [[package]]
+ name = "codex-app-server-transport"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "axum",
+  "base64 0.22.1",
+@@ -2335,7 +2335,7 @@
+ 
+ [[package]]
+ name = "codex-apply-patch"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -2355,7 +2355,7 @@
+ 
+ [[package]]
+ name = "codex-arg0"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "codex-apply-patch",
+@@ -2378,7 +2378,7 @@
+ 
+ [[package]]
+ name = "codex-async-utils"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "pretty_assertions",
+  "rand 0.9.3",
+@@ -2388,7 +2388,7 @@
+ 
+ [[package]]
+ name = "codex-attachment-store"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "pretty_assertions",
+  "serde",
+@@ -2398,7 +2398,7 @@
+ 
+ [[package]]
+ name = "codex-aws-auth"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "aws-config",
+  "aws-credential-types",
+@@ -2424,7 +2424,7 @@
+ 
+ [[package]]
+ name = "codex-backend-client"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "codex-api",
+@@ -2444,7 +2444,7 @@
+ 
+ [[package]]
+ name = "codex-backend-openapi-models"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "serde",
+  "serde_json",
+@@ -2453,7 +2453,7 @@
+ 
+ [[package]]
+ name = "codex-build-info"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-install-context",
+  "pretty_assertions",
+@@ -2466,7 +2466,7 @@
+ 
+ [[package]]
+ name = "codex-bwrap"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "cc",
+  "libc",
+@@ -2475,7 +2475,7 @@
+ 
+ [[package]]
+ name = "codex-chatgpt"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2497,7 +2497,7 @@
+ 
+ [[package]]
+ name = "codex-cli"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -2602,7 +2602,7 @@
+ 
+ [[package]]
+ name = "codex-client"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-http-client",
+  "eventsource-stream",
+@@ -2616,7 +2616,7 @@
+ 
+ [[package]]
+ name = "codex-cloud-client"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "async-stream",
+@@ -2640,7 +2640,7 @@
+ 
+ [[package]]
+ name = "codex-cloud-config"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "base64 0.22.1",
+  "chrono",
+@@ -2668,7 +2668,7 @@
+ 
+ [[package]]
+ name = "codex-cloud-tasks"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -2701,7 +2701,7 @@
+ 
+ [[package]]
+ name = "codex-cloud-tasks-client"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -2716,7 +2716,7 @@
+ 
+ [[package]]
+ name = "codex-cloud-tasks-mock-client"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "chrono",
+  "codex-cloud-tasks-client",
+@@ -2725,7 +2725,7 @@
+ 
+ [[package]]
+ name = "codex-code-mode"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-code-mode-protocol",
+  "codex-http-client",
+@@ -2749,7 +2749,7 @@
+ 
+ [[package]]
+ name = "codex-code-mode-host"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -2778,7 +2778,7 @@
+ 
+ [[package]]
+ name = "codex-code-mode-protocol"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-protocol",
+  "glob",
+@@ -2796,7 +2796,7 @@
+ 
+ [[package]]
+ name = "codex-code-mode-runtime"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-code-mode-protocol",
+@@ -2814,11 +2814,11 @@
+ 
+ [[package]]
+ name = "codex-collaboration-mode-templates"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ 
+ [[package]]
+ name = "codex-config"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -2871,7 +2871,7 @@
+ 
+ [[package]]
+ name = "codex-config-schema"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2880,7 +2880,7 @@
+ 
+ [[package]]
+ name = "codex-connectors"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -2902,7 +2902,7 @@
+ 
+ [[package]]
+ name = "codex-connectors-extension"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-connectors",
+  "codex-core-plugins",
+@@ -2916,7 +2916,7 @@
+ 
+ [[package]]
+ name = "codex-context-fragments"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-protocol",
+  "codex-protocol-test-support",
+@@ -2927,7 +2927,7 @@
+ 
+ [[package]]
+ name = "codex-core"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -3073,7 +3073,7 @@
+ 
+ [[package]]
+ name = "codex-core-api"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-analytics",
+  "codex-app-server-protocol",
+@@ -3096,7 +3096,7 @@
+ 
+ [[package]]
+ name = "codex-core-plugin-common"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "semver",
+@@ -3107,7 +3107,7 @@
+ 
+ [[package]]
+ name = "codex-core-plugins"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3164,7 +3164,7 @@
+ 
+ [[package]]
+ name = "codex-diagnostics"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "libc",
+  "pretty_assertions",
+@@ -3172,7 +3172,7 @@
+ 
+ [[package]]
+ name = "codex-direct-tool-timing"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-utils-critical-path",
+  "pretty_assertions",
+@@ -3180,7 +3180,7 @@
+ 
+ [[package]]
+ name = "codex-exec"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -3233,7 +3233,7 @@
+ 
+ [[package]]
+ name = "codex-exec-server"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -3305,7 +3305,7 @@
+ 
+ [[package]]
+ name = "codex-exec-server-protocol"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-file-system",
+@@ -3323,7 +3323,7 @@
+ 
+ [[package]]
+ name = "codex-exec-server-test-support"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "codex-exec-server",
+@@ -3338,7 +3338,7 @@
+ 
+ [[package]]
+ name = "codex-execpolicy"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -3356,7 +3356,7 @@
+ 
+ [[package]]
+ name = "codex-experimental-api-macros"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+@@ -3365,7 +3365,7 @@
+ 
+ [[package]]
+ name = "codex-extension-api"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-api",
+  "codex-config",
+@@ -3388,7 +3388,7 @@
+ 
+ [[package]]
+ name = "codex-extension-items"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "pretty_assertions",
+@@ -3400,7 +3400,7 @@
+ 
+ [[package]]
+ name = "codex-external-agent-migration"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "chrono",
+  "codex-analytics",
+@@ -3431,7 +3431,7 @@
+ 
+ [[package]]
+ name = "codex-features"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-network-proxy",
+  "codex-protocol",
+@@ -3445,7 +3445,7 @@
+ 
+ [[package]]
+ name = "codex-feedback"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "bytes",
+@@ -3473,7 +3473,7 @@
+ 
+ [[package]]
+ name = "codex-file-search"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -3489,7 +3489,7 @@
+ 
+ [[package]]
+ name = "codex-file-system"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "bytes",
+  "codex-protocol",
+@@ -3503,7 +3503,7 @@
+ 
+ [[package]]
+ name = "codex-file-watcher"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "notify",
+  "pretty_assertions",
+@@ -3514,7 +3514,7 @@
+ 
+ [[package]]
+ name = "codex-git-attribution"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-backend-client",
+  "codex-extension-api",
+@@ -3527,7 +3527,7 @@
+ 
+ [[package]]
+ name = "codex-git-utils"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3555,7 +3555,7 @@
+ 
+ [[package]]
+ name = "codex-goal-extension"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3580,7 +3580,7 @@
+ 
+ [[package]]
+ name = "codex-guardian-context"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-context-fragments",
+  "codex-history",
+@@ -3593,7 +3593,7 @@
+ 
+ [[package]]
+ name = "codex-guardian-reviewer"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "codex-analytics",
+@@ -3618,7 +3618,7 @@
+ 
+ [[package]]
+ name = "codex-guardian-v2"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "codex-analytics",
+@@ -3657,7 +3657,7 @@
+ 
+ [[package]]
+ name = "codex-guardian-v3"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-message-board",
+  "codex-protocol",
+@@ -3666,7 +3666,7 @@
+ 
+ [[package]]
+ name = "codex-history"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "codex-protocol",
+@@ -3678,7 +3678,7 @@
+ 
+ [[package]]
+ name = "codex-history-notes-extension"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-analytics",
+  "codex-client",
+@@ -3704,7 +3704,7 @@
+ 
+ [[package]]
+ name = "codex-home"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-extension-api",
+  "codex-utils-absolute-path",
+@@ -3716,7 +3716,7 @@
+ 
+ [[package]]
+ name = "codex-hooks"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "async-channel",
+@@ -3745,7 +3745,7 @@
+ 
+ [[package]]
+ name = "codex-http-client"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "bytes",
+  "codex-utils-cargo-bin",
+@@ -3785,7 +3785,7 @@
+ 
+ [[package]]
+ name = "codex-image-generation-extension"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-api",
+@@ -3817,7 +3817,7 @@
+ 
+ [[package]]
+ name = "codex-install-context"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "codex-utils-home-dir",
+@@ -3830,7 +3830,7 @@
+ 
+ [[package]]
+ name = "codex-keyring-store"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "keyring",
+  "pretty_assertions",
+@@ -3841,7 +3841,7 @@
+ 
+ [[package]]
+ name = "codex-linux-sandbox"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "clap",
+  "codex-core",
+@@ -3870,7 +3870,7 @@
+ 
+ [[package]]
+ name = "codex-lmstudio"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-core",
+  "codex-http-client",
+@@ -3884,7 +3884,7 @@
+ 
+ [[package]]
+ name = "codex-login"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -3930,7 +3930,7 @@
+ 
+ [[package]]
+ name = "codex-mcp"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -3974,7 +3974,7 @@
+ 
+ [[package]]
+ name = "codex-mcp-extension"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -4007,7 +4007,7 @@
+ 
+ [[package]]
+ name = "codex-memories-extension"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-core",
+  "codex-extension-api",
+@@ -4029,7 +4029,7 @@
+ 
+ [[package]]
+ name = "codex-memories-read"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-protocol",
+  "codex-shell-command",
+@@ -4039,7 +4039,7 @@
+ 
+ [[package]]
+ name = "codex-memories-write"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -4076,7 +4076,7 @@
+ 
+ [[package]]
+ name = "codex-mermaid"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "insta",
+  "pretty_assertions",
+@@ -4085,7 +4085,7 @@
+ 
+ [[package]]
+ name = "codex-message-board"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "base64 0.22.1",
+  "caseless",
+@@ -4108,7 +4108,7 @@
+ 
+ [[package]]
+ name = "codex-message-history"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-config",
+  "memchr",
+@@ -4122,7 +4122,7 @@
+ 
+ [[package]]
+ name = "codex-model-provider"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "base64 0.22.1",
+  "chrono",
+@@ -4156,7 +4156,7 @@
+ 
+ [[package]]
+ name = "codex-model-provider-info"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-client",
+  "codex-http-client",
+@@ -4174,7 +4174,7 @@
+ 
+ [[package]]
+ name = "codex-models-manager"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "chrono",
+  "codex-http-client",
+@@ -4193,7 +4193,7 @@
+ 
+ [[package]]
+ name = "codex-multi-env-copy-file"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "codex-config",
+@@ -4219,7 +4219,7 @@
+ 
+ [[package]]
+ name = "codex-mxc-sandbox"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "codex-network-proxy",
+@@ -4240,7 +4240,7 @@
+ 
+ [[package]]
+ name = "codex-network-proxy"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "aws-credential-types",
+@@ -4291,7 +4291,7 @@
+ 
+ [[package]]
+ name = "codex-ollama"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "assert_matches",
+  "async-stream",
+@@ -4311,7 +4311,7 @@
+ 
+ [[package]]
+ name = "codex-otel"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "bytes",
+  "chrono",
+@@ -4348,7 +4348,7 @@
+ 
+ [[package]]
+ name = "codex-otel-trace-websocket"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -4359,7 +4359,7 @@
+ 
+ [[package]]
+ name = "codex-plugin"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-config",
+  "codex-core-plugin-common",
+@@ -4374,7 +4374,7 @@
+ 
+ [[package]]
+ name = "codex-process-hardening"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "libc",
+  "pretty_assertions",
+@@ -4382,7 +4382,7 @@
+ 
+ [[package]]
+ name = "codex-prompts"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "codex-collaboration-mode-templates",
+@@ -4400,7 +4400,7 @@
+ 
+ [[package]]
+ name = "codex-protocol"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "chardetng",
+@@ -4446,14 +4446,14 @@
+ 
+ [[package]]
+ name = "codex-protocol-test-support"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-protocol",
+ ]
+ 
+ [[package]]
+ name = "codex-queue-extension"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "codex-core",
+@@ -4474,7 +4474,7 @@
+ 
+ [[package]]
+ name = "codex-realtime-webrtc"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "codex-build-info",
+@@ -4493,7 +4493,7 @@
+ 
+ [[package]]
+ name = "codex-response-debug-context"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-api",
+@@ -4504,7 +4504,7 @@
+ 
+ [[package]]
+ name = "codex-responses-api-proxy"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "bytes",
+@@ -4528,7 +4528,7 @@
+ 
+ [[package]]
+ name = "codex-rmcp-client"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -4579,7 +4579,7 @@
+ 
+ [[package]]
+ name = "codex-rollout"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -4612,7 +4612,7 @@
+ 
+ [[package]]
+ name = "codex-rollout-trace"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "codex-code-mode",
+@@ -4629,7 +4629,7 @@
+ 
+ [[package]]
+ name = "codex-runtime-agent-instance"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-agent-identity",
+@@ -4655,7 +4655,7 @@
+ 
+ [[package]]
+ name = "codex-sandboxing"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "codex-mxc-sandbox",
+@@ -4683,7 +4683,7 @@
+ 
+ [[package]]
+ name = "codex-secrets"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "age",
+  "anyhow",
+@@ -4704,7 +4704,7 @@
+ 
+ [[package]]
+ name = "codex-shell-command"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -4727,7 +4727,7 @@
+ 
+ [[package]]
+ name = "codex-skills"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-protocol",
+  "codex-shell-command",
+@@ -4744,7 +4744,7 @@
+ 
+ [[package]]
+ name = "codex-skills-extension"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "assert_matches",
+  "blake3",
+@@ -4784,7 +4784,7 @@
+ 
+ [[package]]
+ name = "codex-state"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -4812,7 +4812,7 @@
+ 
+ [[package]]
+ name = "codex-stdio-to-uds"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "codex-uds",
+@@ -4824,7 +4824,7 @@
+ 
+ [[package]]
+ name = "codex-tcp-tunnel"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "bytes",
+@@ -4845,7 +4845,7 @@
+ 
+ [[package]]
+ name = "codex-terminal-detection"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "pretty_assertions",
+  "tracing",
+@@ -4853,7 +4853,7 @@
+ 
+ [[package]]
+ name = "codex-test-binary-support"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-arg0",
+  "tempfile",
+@@ -4861,7 +4861,7 @@
+ 
+ [[package]]
+ name = "codex-thread-manager-sample"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -4872,7 +4872,7 @@
+ 
+ [[package]]
+ name = "codex-thread-store"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "chrono",
+  "codex-app-server-protocol",
+@@ -4903,7 +4903,7 @@
+ 
+ [[package]]
+ name = "codex-tools"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "bitflags 2.13.1",
+  "codex-attachment-store",
+@@ -4929,7 +4929,7 @@
+ 
+ [[package]]
+ name = "codex-tui"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -5057,7 +5057,7 @@
+ 
+ [[package]]
+ name = "codex-uds"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "async-io",
+  "libc",
+@@ -5071,7 +5071,7 @@
+ 
+ [[package]]
+ name = "codex-user-verification"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "base64 0.22.1",
+  "block2",
+@@ -5092,7 +5092,7 @@
+ 
+ [[package]]
+ name = "codex-utils-absolute-path"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "dirs",
+  "dunce",
+@@ -5106,14 +5106,14 @@
+ 
+ [[package]]
+ name = "codex-utils-approval-presets"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-protocol",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-audio"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-protocol",
+@@ -5127,7 +5127,7 @@
+ 
+ [[package]]
+ name = "codex-utils-cache"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "lru",
+  "sha1 0.10.6",
+@@ -5136,7 +5136,7 @@
+ 
+ [[package]]
+ name = "codex-utils-cargo-bin"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "assert_cmd",
+  "runfiles",
+@@ -5145,7 +5145,7 @@
+ 
+ [[package]]
+ name = "codex-utils-cli"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "clap",
+  "codex-protocol",
+@@ -5157,22 +5157,22 @@
+ 
+ [[package]]
+ name = "codex-utils-critical-path"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "pretty_assertions",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-elapsed"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ 
+ [[package]]
+ name = "codex-utils-fuzzy-match"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ 
+ [[package]]
+ name = "codex-utils-git-discovery"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-git-utils",
+  "codex-utils-absolute-path",
+@@ -5185,7 +5185,7 @@
+ 
+ [[package]]
+ name = "codex-utils-home-dir"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "dirs",
+@@ -5195,7 +5195,7 @@
+ 
+ [[package]]
+ name = "codex-utils-image"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-utils-cache",
+@@ -5209,7 +5209,7 @@
+ 
+ [[package]]
+ name = "codex-utils-json-to-toml"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "pretty_assertions",
+  "serde_json",
+@@ -5218,7 +5218,7 @@
+ 
+ [[package]]
+ name = "codex-utils-oss"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-core",
+  "codex-lmstudio",
+@@ -5228,7 +5228,7 @@
+ 
+ [[package]]
+ name = "codex-utils-output-truncation"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-string",
+@@ -5238,7 +5238,7 @@
+ 
+ [[package]]
+ name = "codex-utils-path"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "dunce",
+@@ -5249,7 +5249,7 @@
+ 
+ [[package]]
+ name = "codex-utils-path-uri"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-utils-absolute-path",
+@@ -5265,7 +5265,7 @@
+ 
+ [[package]]
+ name = "codex-utils-plugins"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-exec-server",
+  "codex-exec-server-protocol",
+@@ -5279,7 +5279,7 @@
+ 
+ [[package]]
+ name = "codex-utils-process"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "pretty_assertions",
+  "tokio",
+@@ -5287,7 +5287,7 @@
+ 
+ [[package]]
+ name = "codex-utils-pty"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "codex-utils-cargo-bin",
+@@ -5306,7 +5306,7 @@
+ 
+ [[package]]
+ name = "codex-utils-readiness"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "assert_matches",
+  "thiserror 2.0.18",
+@@ -5316,7 +5316,7 @@
+ 
+ [[package]]
+ name = "codex-utils-redacted-string"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "schemars 0.8.22",
+  "serde",
+@@ -5324,14 +5324,14 @@
+ 
+ [[package]]
+ name = "codex-utils-rustls-provider"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "rustls",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-sandbox-summary"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-absolute-path",
+@@ -5341,7 +5341,7 @@
+ 
+ [[package]]
+ name = "codex-utils-sleep-inhibitor"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "core-foundation 0.9.4",
+  "libc",
+@@ -5351,14 +5351,14 @@
+ 
+ [[package]]
+ name = "codex-utils-stream-parser"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "pretty_assertions",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-string"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "pretty_assertions",
+  "regex-lite",
+@@ -5368,14 +5368,14 @@
+ 
+ [[package]]
+ name = "codex-utils-template"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "pretty_assertions",
+ ]
+ 
+ [[package]]
+ name = "codex-v8-poc"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "pretty_assertions",
+  "v8",
+@@ -5383,7 +5383,7 @@
+ 
+ [[package]]
+ name = "codex-voice-host"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "codex-install-context",
+@@ -5410,7 +5410,7 @@
+ 
+ [[package]]
+ name = "codex-web-search-extension"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-api",
+  "codex-core",
+@@ -5432,7 +5432,7 @@
+ 
+ [[package]]
+ name = "codex-websocket-auth"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -5451,7 +5451,7 @@
+ 
+ [[package]]
+ name = "codex-websocket-client"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-http-client",
+  "codex-utils-rustls-provider",
+@@ -5467,7 +5467,7 @@
+ 
+ [[package]]
+ name = "codex-windows-sandbox"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -5488,6 +5488,7 @@
+  "rand 0.8.6",
+  "serde",
+  "serde_json",
++ "sha2 0.10.9",
+  "tempfile",
+  "tokio",
+  "tracing-appender",
+@@ -5497,7 +5498,7 @@
+ 
+ [[package]]
+ name = "codex-windows-sandbox-service"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "codex-cloud-config",
+@@ -5515,14 +5516,14 @@
+ 
+ [[package]]
+ name = "codex-windows-sandbox-test-support"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "dirs",
+ ]
+ 
+ [[package]]
+ name = "codex-workload-identity"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "codex-http-client",
+  "pretty_assertions",
+@@ -5537,7 +5538,7 @@
+ 
+ [[package]]
+ name = "codex-worktree"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "codex-git-utils",
+@@ -5790,7 +5791,7 @@
+ 
+ [[package]]
+ name = "core_test_support"
+-version = "0.0.0"
++version = "0.165.0-alpha.1.2"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+diff --git a/codex-rs/windows-sandbox-rs/Cargo.toml b/codex-rs/windows-sandbox-rs/Cargo.toml
+--- a/codex-rs/windows-sandbox-rs/Cargo.toml
++++ b/codex-rs/windows-sandbox-rs/Cargo.toml
+@@ -42,6 +42,7 @@
+ glob = { workspace = true }
+ serde = { version = "1.0", features = ["derive"] }
+ serde_json = "1.0"
++sha2 = { workspace = true }
+ tempfile = "3"
+ tokio = { workspace = true, features = ["sync", "rt", "macros", "signal", "time"] }
+ tracing-appender = { workspace = true }
+diff --git a/codex-rs/windows-sandbox-rs/src/acl.rs b/codex-rs/windows-sandbox-rs/src/acl.rs
+--- a/codex-rs/windows-sandbox-rs/src/acl.rs
++++ b/codex-rs/windows-sandbox-rs/src/acl.rs
+@@ -29,7 +29,6 @@
+ use windows_sys::Win32::Security::Authorization::GetSecurityInfo;
+ use windows_sys::Win32::Security::Authorization::SET_ACCESS;
+ use windows_sys::Win32::Security::Authorization::SetEntriesInAclW;
+-use windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW;
+ use windows_sys::Win32::Security::Authorization::SetSecurityInfo;
+ use windows_sys::Win32::Security::Authorization::TRUSTEE_IS_SID;
+ use windows_sys::Win32::Security::Authorization::TRUSTEE_IS_UNKNOWN;
+@@ -109,6 +108,13 @@
+         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+         .open(path)
+         .with_context(|| format!("open ACL target {}", path.display()))?;
++    fetch_dacl_on_handle(&handle, path)
++}
++
++unsafe fn fetch_dacl_on_handle(
++    handle: &std::fs::File,
++    path: &Path,
++) -> Result<(*mut ACL, *mut c_void)> {
+     let mut p_sd: *mut c_void = std::ptr::null_mut();
+     let mut p_dacl: *mut ACL = std::ptr::null_mut();
+     let code = GetSecurityInfo(
+@@ -572,7 +578,7 @@
+         access_mode
+     };
+ 
+-    let (p_dacl, p_sd) = match directory.as_ref() {
++    let (mut p_dacl, mut p_sd) = match directory.as_ref() {
+         Some(directory) => {
+             let mut security_descriptor: *mut c_void = std::ptr::null_mut();
+             let mut acl: *mut ACL = std::ptr::null_mut();
+@@ -599,41 +605,45 @@
+         }
+         None => fetch_dacl_handle(path)?,
+     };
+-    let mut entries: Vec<EXPLICIT_ACCESS_W> = Vec::new();
+-    for sid in sids {
+-        // A new allow can outrank another trustee's inherited deny, including a
+-        // file-only deny on children. Without the complete token, preserve every deny.
+-        if access_mode == GRANT_ACCESS
+-            && dacl_has_deny_mask(
+-                p_dacl,
+-                DenyAceScope::Any,
+-                allow_mask
+-                    | GENERIC_READ_MASK
+-                    | GENERIC_WRITE_MASK
+-                    | GENERIC_EXECUTE_MASK
+-                    | GENERIC_ALL_MASK,
+-            )
+-        {
+-            continue;
+-        }
+-        if !dacl_allow_mask_needs_refresh(p_dacl, *sid, allow_mask, disallow_mask)
+-            || inheritance == 0 && p_dacl.is_null()
+-        {
+-            continue;
+-        }
+-        entries.push(EXPLICIT_ACCESS_W {
+-            grfAccessPermissions: allow_mask,
+-            grfAccessMode: access_mode,
+-            grfInheritance: inheritance,
+-            Trustee: TRUSTEE_W {
+-                pMultipleTrustee: std::ptr::null_mut(),
+-                MultipleTrusteeOperation: 0,
+-                TrusteeForm: TRUSTEE_IS_SID,
+-                TrusteeType: TRUSTEE_IS_UNKNOWN,
+-                ptstrName: *sid as *mut u16,
+-            },
+-        });
+-    }
++    let entries_for = |p_dacl: *mut ACL| {
++        let mut entries: Vec<EXPLICIT_ACCESS_W> = Vec::new();
++        for sid in sids {
++            // A new allow can outrank another trustee's inherited deny, including a
++            // file-only deny on children. Without the complete token, preserve every deny.
++            if access_mode == GRANT_ACCESS
++                && dacl_has_deny_mask(
++                    p_dacl,
++                    DenyAceScope::Any,
++                    allow_mask
++                        | GENERIC_READ_MASK
++                        | GENERIC_WRITE_MASK
++                        | GENERIC_EXECUTE_MASK
++                        | GENERIC_ALL_MASK,
++                )
++            {
++                continue;
++            }
++            if !dacl_allow_mask_needs_refresh(p_dacl, *sid, allow_mask, disallow_mask)
++                || inheritance == 0 && p_dacl.is_null()
++            {
++                continue;
++            }
++            entries.push(EXPLICIT_ACCESS_W {
++                grfAccessPermissions: allow_mask,
++                grfAccessMode: access_mode,
++                grfInheritance: inheritance,
++                Trustee: TRUSTEE_W {
++                    pMultipleTrustee: std::ptr::null_mut(),
++                    MultipleTrusteeOperation: 0,
++                    TrusteeForm: TRUSTEE_IS_SID,
++                    TrusteeType: TRUSTEE_IS_UNKNOWN,
++                    ptstrName: *sid as *mut u16,
++                },
++            });
++        }
++        entries
++    };
++    let mut entries = entries_for(p_dacl);
+     let mut p_new_dacl: *mut ACL = std::ptr::null_mut();
+     // Collect errors before releasing either allocation so every update path
+     // shares the same cleanup, including failure to open the write handle.
+@@ -641,15 +651,7 @@
+         if entries.is_empty() {
+             return Ok(false);
+         }
+-        let code2 = SetEntriesInAclW(
+-            entries.len() as u32,
+-            entries.as_ptr(),
+-            p_dacl,
+-            &mut p_new_dacl,
+-        );
+-        if code2 != ERROR_SUCCESS {
+-            return Err(anyhow!("SetEntriesInAclW failed: {code2}"));
+-        }
++        // Retain the native write handle and join CDS's exact cooperating object domain.
+         // For files and inheriting directory grants, request ACL-write access only
+         // when an update is needed. Use the same long-path support as the read handle.
+         let handle = match directory {
+@@ -662,6 +664,28 @@
+                 .open(path)
+                 .context("open ACL target for update (READ_CONTROL | WRITE_DAC)")?,
+         };
++        let _scope =
++            crate::acl_lock::acquire(handle.as_raw_handle() as _, crate::acl_lock::deadline())?;
++        if !p_sd.is_null() {
++            LocalFree(p_sd as HLOCAL);
++            p_sd = std::ptr::null_mut();
++        }
++        let (fresh_acl, fresh_sd) = fetch_dacl_on_handle(&handle, path)?;
++        p_dacl = fresh_acl;
++        p_sd = fresh_sd;
++        entries = entries_for(p_dacl);
++        if entries.is_empty() {
++            return Ok(false);
++        }
++        let code2 = SetEntriesInAclW(
++            entries.len() as u32,
++            entries.as_ptr(),
++            p_dacl,
++            &mut p_new_dacl,
++        );
++        if code2 != ERROR_SUCCESS {
++            return Err(anyhow!("SetEntriesInAclW failed: {code2}"));
++        }
+         let code3 = SetSecurityInfo(
+             handle.as_raw_handle() as _,
+             1,
+@@ -788,6 +812,29 @@
+         }
+         return Ok(false);
+     }
++    // Initial native no-op returned above. All writers now reread under the shared object lock.
++    if !p_sd.is_null() {
++        LocalFree(p_sd as HLOCAL);
++    }
++    let (target, _scope) = crate::acl_lock::acquire_path(path, crate::acl_lock::deadline())?;
++    let (fresh_acl, fresh_sd) = fetch_dacl_on_handle(&target, path)?;
++    p_dacl = fresh_acl;
++    p_sd = fresh_sd;
++    if dacl_has_write_allow_for_sid(p_dacl, psid) {
++        if !p_sd.is_null() {
++            LocalFree(p_sd as HLOCAL);
++        }
++        return Ok(false);
++    }
++    let writable = match crate::acl_lock::write_handle(&target) {
++        Ok(writable) => writable,
++        Err(error) => {
++            if !p_sd.is_null() {
++                LocalFree(p_sd as HLOCAL);
++            }
++            return Err(error);
++        }
++    };
+     let mut added = false;
+     // Always ensure write is present: if an allow ACE exists without write, add one with write+RX.
+     let trustee = TRUSTEE_W {
+@@ -805,8 +852,8 @@
+     let mut p_new_dacl: *mut ACL = std::ptr::null_mut();
+     let code2 = SetEntriesInAclW(1, &explicit, p_dacl, &mut p_new_dacl);
+     if code2 == ERROR_SUCCESS {
+-        let code3 = SetNamedSecurityInfoW(
+-            to_wide(path).as_ptr() as *mut u16,
++        let code3 = SetSecurityInfo(
++            writable.as_raw_handle() as _,
+             1,
+             DACL_SECURITY_INFORMATION,
+             std::ptr::null_mut(),
+@@ -917,6 +964,8 @@
+     if matches!(kind, DenyAceKind::Read) {
+         ensure_handle_is_not_filesystem_root(&handle, path)?;
+     }
++    let _scope =
++        crate::acl_lock::acquire(handle.as_raw_handle() as _, crate::acl_lock::deadline())?;
+     let mut p_sd: *mut c_void = std::ptr::null_mut();
+     let mut p_dacl: *mut ACL = std::ptr::null_mut();
+     let code = GetSecurityInfo(
+@@ -1049,6 +1098,19 @@
+         }
+         return Ok(());
+     }
++    if !p_sd.is_null() {
++        LocalFree(p_sd as HLOCAL);
++    }
++    let (target, _scope) = crate::acl_lock::acquire_path(path, crate::acl_lock::deadline())?;
++    let (fresh_acl, fresh_sd) = fetch_dacl_on_handle(&target, path)?;
++    p_dacl = fresh_acl;
++    p_sd = fresh_sd;
++    if p_dacl.is_null() {
++        if !p_sd.is_null() {
++            LocalFree(p_sd as HLOCAL);
++        }
++        return Ok(());
++    }
+     let trustee = TRUSTEE_W {
+         pMultipleTrustee: std::ptr::null_mut(),
+         MultipleTrusteeOperation: 0,
+@@ -1072,8 +1134,9 @@
+         if (*p_new_dacl).AceCount == (*p_dacl).AceCount {
+             return Ok(());
+         }
+-        let code = SetNamedSecurityInfoW(
+-            to_wide(path).as_ptr() as *mut u16,
++        let writable = crate::acl_lock::write_handle(&target)?;
++        let code = SetSecurityInfo(
++            writable.as_raw_handle() as _,
+             1,
+             DACL_SECURITY_INFORMATION,
+             std::ptr::null_mut(),
+diff --git a/codex-rs/windows-sandbox-rs/src/acl_lock.rs b/codex-rs/windows-sandbox-rs/src/acl_lock.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/acl_lock.rs
+@@ -0,0 +1,575 @@
++//! File-object coordination for cooperating native DACL writers.
++//! The target is exclusive; inherited ancestors are shared through the nearest
++//! protected boundary. Thus sibling updates proceed while parent propagation
++//! and a child's read/modify/write cannot overwrite one another.
++use crate::no_reparse_dir::{DirectoryOpenDisposition, open_directory_no_reparse};
++use crate::private_acl_lock::PrivateLockDirectory;
++use anyhow::{Context, Result, bail, ensure};
++use std::collections::{BTreeMap, BTreeSet};
++use std::fs::{File, OpenOptions};
++use std::os::windows::ffi::OsStringExt;
++use std::os::windows::fs::OpenOptionsExt;
++use std::os::windows::io::{AsRawHandle, OwnedHandle};
++use std::path::{Path, PathBuf};
++use std::time::{Duration, Instant};
++use windows_sys::Win32::Foundation::{ERROR_HANDLE_EOF, HANDLE, INVALID_HANDLE_VALUE, LocalFree};
++use windows_sys::Win32::Security::Authorization::GetSecurityInfo;
++use windows_sys::Win32::Security::{
++    DACL_SECURITY_INFORMATION, GetSecurityDescriptorControl, SE_DACL_PROTECTED,
++};
++use windows_sys::Win32::Storage::FileSystem as fs;
++
++#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
++struct Identity {
++    volume: u64,
++    id: [u8; 16],
++}
++impl Identity {
++    fn read(handle: HANDLE) -> Result<Self> {
++        let mut info = fs::FILE_ID_INFO::default();
++        ensure!(
++            unsafe {
++                fs::GetFileInformationByHandleEx(
++                    handle,
++                    fs::FileIdInfo,
++                    (&mut info as *mut fs::FILE_ID_INFO).cast(),
++                    size_of::<fs::FILE_ID_INFO>() as u32,
++                )
++            } != 0,
++            "read ACL file identity: {}",
++            std::io::Error::last_os_error()
++        );
++        ensure!(
++            info.FileId.Identifier != [0; 16],
++            "ACL target has no stable file identity"
++        );
++        Ok(Self {
++            volume: info.VolumeSerialNumber,
++            id: info.FileId.Identifier,
++        })
++    }
++    fn leaf(&self) -> String {
++        format!(
++            "{:016x}-{}.lock",
++            self.volume,
++            self.id
++                .iter()
++                .map(|b| format!("{b:02x}"))
++                .collect::<String>()
++        )
++    }
++}
++fn physical_path(handle: HANDLE) -> Result<PathBuf> {
++    let mut buffer = vec![0u16; 32768];
++    let length = unsafe {
++        fs::GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, 0)
++    };
++    ensure!(
++        length != 0 && (length as usize) < buffer.len(),
++        "resolve ACL file path: {}",
++        std::io::Error::last_os_error()
++    );
++    buffer.truncate(length as usize);
++    Ok(PathBuf::from(std::ffi::OsString::from_wide(&buffer)))
++}
++fn protected(handle: HANDLE) -> Result<bool> {
++    let mut sd = std::ptr::null_mut();
++    let status = unsafe {
++        GetSecurityInfo(
++            handle,
++            1,
++            DACL_SECURITY_INFORMATION,
++            std::ptr::null_mut(),
++            std::ptr::null_mut(),
++            std::ptr::null_mut(),
++            std::ptr::null_mut(),
++            &mut sd,
++        )
++    };
++    let result = (|| {
++        ensure!(status == 0, "read ACL inheritance boundary: {status}");
++        let (mut control, mut revision) = (0, 0);
++        ensure!(
++            unsafe { GetSecurityDescriptorControl(sd, &mut control, &mut revision) } != 0,
++            "read ACL inheritance flags"
++        );
++        Ok(control & SE_DACL_PROTECTED != 0)
++    })();
++    if !sd.is_null() {
++        unsafe {
++            LocalFree(sd);
++        }
++    }
++    result
++}
++struct Pin {
++    handle: OwnedHandle,
++    protected: bool,
++}
++struct Plan {
++    modes: BTreeMap<Identity, bool>, // true = exclusive
++    pins: BTreeMap<Identity, Pin>,
++    links: BTreeMap<Identity, BTreeSet<PathBuf>>,
++}
++impl Plan {
++    fn new() -> Self {
++        Self {
++            modes: BTreeMap::new(),
++            pins: BTreeMap::new(),
++            links: BTreeMap::new(),
++        }
++    }
++    fn add_mode(&mut self, id: Identity, exclusive: bool) {
++        self.modes
++            .entry(id)
++            .and_modify(|mode| *mode |= exclusive)
++            .or_insert(exclusive);
++    }
++    fn ancestors(&mut self, path: &Path) -> Result<()> {
++        for path in path.ancestors() {
++            let handle = open_directory_no_reparse(
++                path,
++                fs::READ_CONTROL | fs::FILE_READ_ATTRIBUTES | fs::FILE_TRAVERSE,
++                fs::FILE_SHARE_READ | fs::FILE_SHARE_WRITE,
++                DirectoryOpenDisposition::OpenExisting,
++            )?;
++            let id = Identity::read(handle.as_raw_handle() as _)?;
++            let boundary = protected(handle.as_raw_handle() as _)?;
++            self.add_mode(id.clone(), false);
++            self.pins.entry(id).or_insert(Pin {
++                handle,
++                protected: boundary,
++            });
++            if boundary {
++                break;
++            }
++        }
++        Ok(())
++    }
++    fn target(&mut self, target: HANDLE) -> Result<()> {
++        let path = physical_path(target)?;
++        let id = Identity::read(target)?;
++        let file = OpenOptions::new()
++            .access_mode(fs::READ_CONTROL | fs::FILE_READ_ATTRIBUTES)
++            .share_mode(fs::FILE_SHARE_READ | fs::FILE_SHARE_WRITE | fs::FILE_SHARE_DELETE)
++            .custom_flags(fs::FILE_FLAG_BACKUP_SEMANTICS | fs::FILE_FLAG_OPEN_REPARSE_POINT)
++            .open(&path)?;
++        ensure!(
++            Identity::read(file.as_raw_handle() as _)? == id,
++            "ACL target identity changed"
++        );
++        let mut basic = fs::BY_HANDLE_FILE_INFORMATION::default();
++        ensure!(
++            unsafe { fs::GetFileInformationByHandle(file.as_raw_handle() as _, &mut basic) } != 0,
++            "inspect ACL target: {}",
++            std::io::Error::last_os_error()
++        );
++        ensure!(
++            basic.dwFileAttributes & fs::FILE_ATTRIBUTE_REPARSE_POINT == 0,
++            "resolved ACL target is a reparse point"
++        );
++        let is_dir = basic.dwFileAttributes & fs::FILE_ATTRIBUTE_DIRECTORY != 0;
++        let boundary = protected(file.as_raw_handle() as _)?;
++        let links = if !is_dir && basic.nNumberOfLinks > 1 {
++            hardlink_paths(&path)?
++        } else {
++            BTreeSet::from([path.clone()])
++        };
++        // Every hard-link parent can propagate onto this same file object.
++        if !boundary {
++            for link in &links {
++                if let Some(parent) = link.parent() {
++                    self.ancestors(parent)?;
++                }
++            }
++        }
++        self.links.insert(id.clone(), links);
++        self.add_mode(id.clone(), true);
++        let handle = if is_dir {
++            open_directory_no_reparse(
++                &path,
++                fs::READ_CONTROL | fs::FILE_READ_ATTRIBUTES | fs::FILE_TRAVERSE,
++                fs::FILE_SHARE_READ | fs::FILE_SHARE_WRITE,
++                DirectoryOpenDisposition::OpenExisting,
++            )?
++        } else {
++            file.into()
++        };
++        ensure!(
++            Identity::read(handle.as_raw_handle() as _)? == id,
++            "ACL target changed while pinning"
++        );
++        self.pins.insert(
++            id,
++            Pin {
++                handle,
++                protected: boundary,
++            },
++        );
++        Ok(())
++    }
++    fn signature(
++        &self,
++    ) -> (
++        BTreeMap<Identity, bool>,
++        BTreeMap<Identity, bool>,
++        BTreeMap<Identity, BTreeSet<PathBuf>>,
++    ) {
++        (
++            self.modes.clone(),
++            self.pins
++                .iter()
++                .map(|(id, p)| (id.clone(), p.protected))
++                .collect(),
++            self.links.clone(),
++        )
++    }
++    fn validate(&self) -> Result<()> {
++        for (id, pin) in &self.pins {
++            ensure!(
++                Identity::read(pin.handle.as_raw_handle() as _)? == *id
++                    && protected(pin.handle.as_raw_handle() as _)? == pin.protected,
++                "ACL identity or inheritance boundary changed"
++            );
++        }
++        Ok(())
++    }
++}
++fn hardlink_paths(path: &Path) -> Result<BTreeSet<PathBuf>> {
++    let mut root = path.to_path_buf();
++    while root.parent().is_some() {
++        root.pop();
++    }
++    let mut buffer = vec![0u16; 32768];
++    let mut length = buffer.len() as u32;
++    let raw = unsafe {
++        fs::FindFirstFileNameW(
++            crate::winutil::to_wide(path).as_ptr(),
++            0,
++            &mut length,
++            buffer.as_mut_ptr(),
++        )
++    };
++    ensure!(
++        raw != INVALID_HANDLE_VALUE,
++        "enumerate ACL hard links: {}",
++        std::io::Error::last_os_error()
++    );
++    struct Search(HANDLE);
++    impl Drop for Search {
++        fn drop(&mut self) {
++            unsafe {
++                fs::FindClose(self.0);
++            }
++        }
++    }
++    let search = Search(raw);
++    let mut links = BTreeSet::new();
++    loop {
++        let end = buffer
++            .iter()
++            .position(|u| *u == 0)
++            .context("unterminated ACL hard-link path")?;
++        let relative = std::ffi::OsString::from_wide(&buffer[1..end]);
++        links.insert(root.join(relative));
++        buffer.fill(0);
++        length = buffer.len() as u32;
++        if unsafe { fs::FindNextFileNameW(search.0, &mut length, buffer.as_mut_ptr()) } == 0 {
++            let error = std::io::Error::last_os_error();
++            ensure!(
++                error.raw_os_error() == Some(ERROR_HANDLE_EOF as i32),
++                "enumerate next ACL hard link: {error}"
++            );
++            break;
++        }
++    }
++    Ok(links)
++}
++#[must_use]
++pub(crate) struct AclScope {
++    files: Vec<(String, File)>,
++    directory: PrivateLockDirectory,
++    _plan: Plan,
++}
++impl Drop for AclScope {
++    fn drop(&mut self) {
++        // Unlock/close before attempting exclusive DELETE open. Waiting users
++        // retain their own non-delete-shared handles, so their generation wins.
++        let leaves = self
++            .files
++            .drain(..)
++            .map(|(leaf, file)| {
++                drop(file);
++                leaf
++            })
++            .collect::<Vec<_>>();
++        for leaf in leaves {
++            // A cleanup failure never invalidates a completed ACL operation.
++            // The empty file remains safe and is retried by the next user.
++            let _ = self.directory.try_cleanup(&leaf);
++        }
++    }
++}
++pub(crate) fn acquire(target: HANDLE, deadline: Option<Instant>) -> Result<AclScope> {
++    acquire_many(&[target], deadline)
++}
++pub(crate) fn acquire_path(path: &Path, deadline: Option<Instant>) -> Result<(File, AclScope)> {
++    let file = OpenOptions::new()
++        .access_mode(fs::READ_CONTROL | fs::FILE_READ_ATTRIBUTES)
++        .share_mode(fs::FILE_SHARE_READ | fs::FILE_SHARE_WRITE | fs::FILE_SHARE_DELETE)
++        .custom_flags(fs::FILE_FLAG_BACKUP_SEMANTICS)
++        .open(path)?;
++    let scope = acquire(file.as_raw_handle() as _, deadline)?;
++    Ok((file, scope))
++}
++/// Native setup has no independent five-second lifecycle limit. Cancellation
++/// ends its existing process/operation; the OS releases every held file lock.
++pub(crate) fn deadline() -> Option<Instant> {
++    None
++}
++fn before_deadline(deadline: Option<Instant>) -> bool {
++    deadline.is_none_or(|end| Instant::now() < end)
++}
++/// Open only the pinned object's physical name and verify its identity before
++/// mutation. The original caller's alias never participates in this write.
++pub(crate) fn write_handle(target: &File) -> Result<File> {
++    let file = OpenOptions::new()
++        .access_mode(fs::READ_CONTROL | fs::WRITE_DAC)
++        .share_mode(fs::FILE_SHARE_READ | fs::FILE_SHARE_WRITE | fs::FILE_SHARE_DELETE)
++        .custom_flags(fs::FILE_FLAG_BACKUP_SEMANTICS | fs::FILE_FLAG_OPEN_REPARSE_POINT)
++        .open(physical_path(target.as_raw_handle() as _)?)?;
++    ensure!(
++        Identity::read(file.as_raw_handle() as _)? == Identity::read(target.as_raw_handle() as _)?,
++        "locked ACL target identity changed before write"
++    );
++    Ok(file)
++}
++fn acquire_many(targets: &[HANDLE], deadline: Option<Instant>) -> Result<AclScope> {
++    loop {
++        let mut plan = Plan::new();
++        for target in targets {
++            plan.target(*target)?;
++        }
++        let directory = PrivateLockDirectory::open()?;
++        let mut scope = AclScope {
++            files: Vec::new(),
++            directory,
++            _plan: plan,
++        };
++        for (id, exclusive) in &scope._plan.modes {
++            let leaf = id.leaf();
++            let file = loop {
++                match scope.directory.open_leaf(&leaf) {
++                    Ok(file) => break file,
++                    Err(error)
++                        if before_deadline(deadline)
++                            && error
++                                .chain()
++                                .filter_map(|e| e.downcast_ref::<std::io::Error>())
++                                .any(|e| matches!(e.raw_os_error(), Some(32 | 303))) =>
++                    {
++                        std::thread::sleep(Duration::from_millis(5))
++                    }
++                    Err(error) => return Err(error).context("open ACL inheritance lock"),
++                }
++            };
++            loop {
++                let result = if *exclusive {
++                    file.try_lock()
++                } else {
++                    file.try_lock_shared()
++                };
++                match result {
++                    Ok(()) => break,
++                    Err(std::fs::TryLockError::WouldBlock) if before_deadline(deadline) => {
++                        std::thread::sleep(Duration::from_millis(5))
++                    }
++                    Err(std::fs::TryLockError::WouldBlock) => {
++                        bail!("timed out waiting for ACL inheritance domain ({leaf})")
++                    }
++                    Err(std::fs::TryLockError::Error(error)) => {
++                        return Err(error).context("lock ACL inheritance domain");
++                    }
++                }
++            }
++            // Retain the same file across every wait, hold and unlock.
++            scope.files.push((leaf, file));
++        }
++        let mut fresh = Plan::new();
++        for target in targets {
++            fresh.target(*target)?;
++        }
++        if scope._plan.signature() == fresh.signature() {
++            scope._plan.validate()?;
++            return Ok(scope);
++        }
++        drop(scope);
++        ensure!(
++            before_deadline(deadline),
++            "ACL inheritance domain changed while locking"
++        );
++    }
++}
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::sync::mpsc;
++    #[test]
++    fn siblings_share_ancestors_but_parent_and_alias_wait() -> Result<()> {
++        let temp = tempfile::tempdir()?;
++        let a = temp.path().join("a");
++        let b = temp.path().join("b");
++        std::fs::create_dir(&a)?;
++        std::fs::create_dir(&b)?;
++        let (_file, scope) = acquire_path(&a, deadline())?;
++        let (_other, other_scope) =
++            acquire_path(&b, Some(Instant::now() + Duration::from_millis(100)))?;
++        drop(other_scope);
++        let (tx, rx) = mpsc::channel();
++        let a2 = a.join(".");
++        let parent = temp.path().to_path_buf();
++        let worker = std::thread::spawn(move || {
++            tx.send(acquire_path(&a2, Some(Instant::now() + Duration::from_millis(40))).is_err())
++                .unwrap();
++            tx.send(
++                acquire_path(&parent, Some(Instant::now() + Duration::from_millis(40))).is_err(),
++            )
++            .unwrap();
++        });
++        assert!(rx.recv_timeout(Duration::from_secs(2))?);
++        assert!(rx.recv_timeout(Duration::from_secs(2))?);
++        worker.join().unwrap();
++        drop(scope);
++        let _released = acquire_path(&a, deadline())?;
++        Ok(())
++    }
++    #[test]
++    fn hardlink_aliases_have_one_target_and_both_parent_domains() -> Result<()> {
++        let temp = tempfile::tempdir()?;
++        let a = temp.path().join("a");
++        let b = temp.path().join("b");
++        std::fs::create_dir(&a)?;
++        std::fs::create_dir(&b)?;
++        std::fs::write(a.join("file"), b"x")?;
++        std::fs::hard_link(a.join("file"), b.join("link"))?;
++        let (f, scope) = acquire_path(&a.join("file"), deadline())?;
++        let alias = OpenOptions::new().read(true).open(b.join("link"))?;
++        assert_eq!(
++            Identity::read(f.as_raw_handle() as _)?,
++            Identity::read(alias.as_raw_handle() as _)?
++        );
++        assert!(
++            acquire(
++                alias.as_raw_handle() as _,
++                Some(Instant::now() + Duration::from_millis(40))
++            )
++            .is_err()
++        );
++        assert!(acquire_path(&b, Some(Instant::now() + Duration::from_millis(40))).is_err());
++        drop(scope);
++        let _released = acquire(alias.as_raw_handle() as _, deadline())?;
++        Ok(())
++    }
++    #[test]
++    fn crash_child_owner() -> Result<()> {
++        let Some(path) = std::env::var_os("CDS_ACL_UNIT_CHILD_TARGET") else {
++            return Ok(());
++        };
++        let _scope = acquire_path(Path::new(&path), deadline())?;
++        std::fs::write(
++            std::env::var_os("CDS_ACL_UNIT_CHILD_READY").context("child ready path")?,
++            b"locked",
++        )?;
++        std::thread::sleep(Duration::from_secs(30));
++        bail!("parent should terminate only this owned lock-test child");
++    }
++    #[test]
++    fn terminated_process_releases_all_os_locks() -> Result<()> {
++        use std::process::{Command, Stdio};
++        let temp = tempfile::tempdir()?;
++        let target = temp.path().join("target");
++        std::fs::create_dir(&target)?;
++        let ready = temp.path().join("ready");
++        let mut child = Command::new(std::env::current_exe()?)
++            .args([
++                "--exact",
++                "acl_lock::tests::crash_child_owner",
++                "--test-threads=1",
++            ])
++            .env("CDS_ACL_UNIT_CHILD_TARGET", &target)
++            .env("CDS_ACL_UNIT_CHILD_READY", &ready)
++            .stdin(Stdio::null())
++            .stdout(Stdio::null())
++            .stderr(Stdio::null())
++            .spawn()?;
++        let wait = Instant::now() + Duration::from_secs(3);
++        while !ready.exists() && Instant::now() < wait && child.try_wait()?.is_none() {
++            std::thread::sleep(Duration::from_millis(5));
++        }
++        let observed = ready.exists();
++        if child.try_wait()?.is_none() {
++            child.kill()?;
++        }
++        let status = child.wait()?;
++        ensure!(
++            observed && !status.success(),
++            "lock-test child failed before holding the scope"
++        );
++        let _scope = acquire_path(&target, deadline())?;
++        Ok(())
++    }
++    #[test]
++    fn native_related_wait_exceeds_five_seconds_without_blocking_sibling() -> Result<()> {
++        let temp = tempfile::tempdir()?;
++        let parent = temp.path().join("parent");
++        let child = parent.join("child");
++        let other = temp.path().join("sibling");
++        std::fs::create_dir_all(&child)?;
++        std::fs::create_dir(&other)?;
++        let (_p, parent_scope) = acquire_path(&parent, deadline())?;
++        let (tx, rx) = mpsc::channel();
++        let worker = std::thread::spawn(move || {
++            let start = Instant::now();
++            let (_child, scope) = acquire_path(&child, deadline()).unwrap();
++            tx.send(start.elapsed()).unwrap();
++            drop(scope);
++        });
++        let start = Instant::now();
++        let _sibling = acquire_path(&other, Some(Instant::now() + Duration::from_millis(200)))?;
++        assert!(start.elapsed() < Duration::from_secs(1));
++        assert!(rx.recv_timeout(Duration::from_millis(5200)).is_err());
++        drop(parent_scope);
++        assert!(rx.recv_timeout(Duration::from_secs(2))? >= Duration::from_secs(5));
++        worker.join().unwrap();
++        Ok(())
++    }
++    #[test]
++    fn replacing_file_alias_cannot_redirect_the_locked_writer() -> Result<()> {
++        let temp = tempfile::tempdir()?;
++        let original = temp.path().join("original");
++        let alias = temp.path().join("alias");
++        std::fs::write(&original, b"original")?;
++        std::fs::hard_link(&original, &alias)?;
++        let (target, _scope) = acquire_path(&alias, deadline())?;
++        // The same file must be writable before the adversarial alias change.
++        // A blanket refusal therefore cannot satisfy this negative test.
++        let initial = write_handle(&target)?;
++        assert_eq!(
++            Identity::read(initial.as_raw_handle() as _)?,
++            Identity::read(target.as_raw_handle() as _)?
++        );
++        drop(initial);
++        std::fs::remove_file(&alias)?;
++        std::fs::write(&alias, b"replacement")?;
++        match write_handle(&target) {
++            Ok(writable) => assert_eq!(
++                Identity::read(writable.as_raw_handle() as _)?,
++                Identity::read(target.as_raw_handle() as _)?
++            ),
++            Err(error) => eprintln!("changed alias was rejected before ACL mutation: {error:#}"),
++        }
++        assert_eq!(std::fs::read(alias)?, b"replacement");
++        assert_eq!(std::fs::read(original)?, b"original");
++        Ok(())
++    }
++}
+diff --git a/codex-rs/windows-sandbox-rs/src/bin/command_runner/win.rs b/codex-rs/windows-sandbox-rs/src/bin/command_runner/win.rs
+--- a/codex-rs/windows-sandbox-rs/src/bin/command_runner/win.rs
++++ b/codex-rs/windows-sandbox-rs/src/bin/command_runner/win.rs
+@@ -75,13 +75,11 @@
+ use windows_sys::Win32::System::Threading::GetExitCodeProcess;
+ use windows_sys::Win32::System::Threading::GetProcessId;
+ use windows_sys::Win32::System::Threading::INFINITE;
+-use windows_sys::Win32::System::Threading::MUTEX_ALL_ACCESS;
+ use windows_sys::Win32::System::Threading::OpenMutexW;
+ use windows_sys::Win32::System::Threading::PROCESS_INFORMATION;
+ use windows_sys::Win32::System::Threading::TerminateProcess;
+ use windows_sys::Win32::System::Threading::WaitForSingleObject;
+ 
+-const READ_ACL_MUTEX_NAME: &str = "Local\\CodexSandboxReadAcl";
+ const TERMINATION_WAIT_MS: u32 = 5_000;
+ const WAIT_TIMEOUT: u32 = 0x0000_0102;
+ 
+@@ -205,9 +203,15 @@
+     }
+ }
+ 
+-fn read_acl_mutex_exists() -> Result<bool> {
+-    let name = to_wide(OsStr::new(READ_ACL_MUTEX_NAME));
+-    let handle = unsafe { OpenMutexW(MUTEX_ALL_ACCESS, 0, name.as_ptr()) };
++fn read_acl_mutex_exists(mutex_name: &str) -> Result<bool> {
++    let name = to_wide(OsStr::new(mutex_name));
++    let handle = unsafe {
++        OpenMutexW(
++            windows_sys::Win32::Storage::FileSystem::READ_CONTROL,
++            0,
++            name.as_ptr(),
++        )
++    };
+     if handle.is_null() {
+         let err = unsafe { GetLastError() };
+         if err == ERROR_FILE_NOT_FOUND {
+@@ -222,8 +226,8 @@
+ }
+ 
+ /// Pick an effective CWD, using a junction if the ACL helper is active.
+-fn effective_cwd(req_cwd: &Path, log_dir: Option<&Path>) -> PathBuf {
+-    let use_junction = match read_acl_mutex_exists() {
++fn effective_cwd(req_cwd: &Path, mutex_name: &str, log_dir: Option<&Path>) -> PathBuf {
++    let use_junction = match read_acl_mutex_exists(mutex_name) {
+         Ok(exists) => exists,
+         Err(err) => {
+             log_note(
+@@ -278,6 +282,9 @@
+         .map(LocalSid::as_ptr)
+         .collect();
+     let base = OwnedWinHandle::new(unsafe { get_current_token_for_restriction()? });
++    let read_acl_mutex =
++        unsafe { codex_windows_sandbox::sandbox_read_acl_mutex_name_for_token(base.raw()) }
++            .context("validate runner namespace coordination identity")?;
+     let h_token = unsafe {
+         match token_mode {
+             WindowsSandboxTokenMode::ReadOnlyCapability => {
+@@ -307,7 +314,7 @@
+         }
+     }
+ 
+-    let effective_cwd = effective_cwd(&req.cwd, Some(log_dir.as_path()));
++    let effective_cwd = effective_cwd(&req.cwd, &read_acl_mutex, Some(log_dir.as_path()));
+     let desktop = LaunchDesktop::open_private(
+         req.private_desktop_name
+             .as_deref()
+diff --git a/codex-rs/windows-sandbox-rs/src/deny_read_state.rs b/codex-rs/windows-sandbox-rs/src/deny_read_state.rs
+--- a/codex-rs/windows-sandbox-rs/src/deny_read_state.rs
++++ b/codex-rs/windows-sandbox-rs/src/deny_read_state.rs
+@@ -158,7 +158,7 @@
+     .with_context(|| format!("write deny-read ACL state {}", path.display()))
+ }
+ 
+-fn validate_state_file(file: &File) -> Result<()> {
++pub(crate) fn validate_state_file(file: &File) -> Result<()> {
+     let mut info = unsafe { std::mem::zeroed::<winfs::BY_HANDLE_FILE_INFORMATION>() };
+     if unsafe { winfs::GetFileInformationByHandle(file.as_raw_handle() as win::HANDLE, &mut info) }
+         == 0
+diff --git a/codex-rs/windows-sandbox-rs/src/identity.rs b/codex-rs/windows-sandbox-rs/src/identity.rs
+--- a/codex-rs/windows-sandbox-rs/src/identity.rs
++++ b/codex-rs/windows-sandbox-rs/src/identity.rs
+@@ -5,8 +5,6 @@
+ use crate::dpapi;
+ use crate::logging::debug_log;
+ use crate::resolved_permissions::ResolvedWindowsSandboxPermissions;
+-use crate::setup::OFFLINE_USERNAME;
+-use crate::setup::ONLINE_USERNAME;
+ use crate::setup::OfflineProxySettings;
+ use crate::setup::SandboxNetworkIdentity;
+ use crate::setup::SandboxSetupRequest;
+@@ -108,6 +106,7 @@
+ }
+ 
+ fn load_marker(codex_home: &Path) -> Result<Option<SetupMarker>> {
++    crate::namespace::SandboxNamespace::current(codex_home)?.validate_existing_state()?;
+     let path = setup_marker_path(codex_home);
+     let marker = match fs::read_to_string(&path) {
+         Ok(contents) => match serde_json::from_str::<SetupMarker>(&contents) {
+@@ -133,6 +132,7 @@
+ }
+ 
+ fn load_users(codex_home: &Path) -> Result<Option<SandboxUsersFile>> {
++    crate::namespace::SandboxNamespace::current(codex_home)?.validate_existing_state()?;
+     let path = sandbox_users_path(codex_home);
+     let file = match fs::read_to_string(&path) {
+         Ok(contents) => contents,
+@@ -186,6 +186,12 @@
+     codex_home: &Path,
+     account: SandboxRuntimeAccount,
+ ) -> Result<OwnedHandle> {
++    let namespace = crate::namespace::SandboxNamespace::current(codex_home)?;
++    namespace.require_owned_state()?;
++    let username = match account {
++        SandboxRuntimeAccount::Offline => namespace.key.offline(),
++        SandboxRuntimeAccount::Online => namespace.key.online(),
++    };
+     // Unlike the ordinary app-side readers, this service recovery path must
+     // never create diagnostic files beneath an owner-controlled directory.
+     let marker: SetupMarker = serde_json::from_slice(
+@@ -206,14 +212,14 @@
+         SandboxRuntimeAccount::Online => users.online,
+     };
+     ensure!(
+-        record.username.eq_ignore_ascii_case(account.username()),
++        record.username.eq_ignore_ascii_case(&username),
+         "sandbox account record does not match the managed account"
+     );
+     let password = crate::to_wide(decode_password(&record)?);
+     let mut token = std::ptr::null_mut();
+     if unsafe {
+         LogonUserW(
+-            crate::to_wide(account.username()).as_ptr(),
++            crate::to_wide(&username).as_ptr(),
+             crate::to_wide(".").as_ptr(),
+             password.as_ptr(),
+             LOGON32_LOGON_INTERACTIVE,
+@@ -336,6 +342,8 @@
+         codex_home,
+         proxy_enforced,
+     } = request;
++    let namespace = crate::namespace::SandboxNamespace::current(codex_home)?;
++    namespace.validate_existing_state()?;
+     let sandbox_dir = crate::setup::sandbox_dir(codex_home);
+     let network_identity = SandboxNetworkIdentity::from_permissions(permissions, proxy_enforced);
+     let marker = load_marker(codex_home)?;
+@@ -374,7 +382,7 @@
+         // Cleanup may also have removed the group, so repair missing or disabled accounts before ACL
+         // refresh can fail. Expired passwords also require full setup, since an ACL refresh
+         // cannot rotate the account passwords and update the stored DPAPI credentials.
+-        for username in [OFFLINE_USERNAME, ONLINE_USERNAME] {
++        for username in [&namespace.key.offline(), &namespace.key.online()] {
+             let needs_repair = match read_local_user_flags(username) {
+                 Ok(Some(flags)) => flags & (UF_ACCOUNTDISABLE | UF_PASSWORD_EXPIRED) != 0,
+                 Ok(None) => true,
+@@ -410,7 +418,7 @@
+             },
+             &desired_offline_proxy_settings,
+         )?;
+-        for username in [OFFLINE_USERNAME, ONLINE_USERNAME] {
++        for username in [&namespace.key.offline(), &namespace.key.online()] {
+             if let Ok(Some(flags)) = read_local_user_flags(username) {
+                 anyhow::ensure!(
+                     flags & UF_PASSWORD_EXPIRED == 0,
+diff --git a/codex-rs/windows-sandbox-rs/src/lib.rs b/codex-rs/windows-sandbox-rs/src/lib.rs
+--- a/codex-rs/windows-sandbox-rs/src/lib.rs
++++ b/codex-rs/windows-sandbox-rs/src/lib.rs
+@@ -60,10 +60,14 @@
+ #[cfg(target_os = "windows")]
+ mod acl;
+ #[cfg(target_os = "windows")]
++mod acl_lock;
++#[cfg(target_os = "windows")]
+ mod allow;
+ #[cfg(target_os = "windows")]
+ mod app_package;
+ #[cfg(target_os = "windows")]
++mod private_acl_lock;
++#[cfg(target_os = "windows")]
+ #[doc(hidden)]
+ pub use app_package::registered_core_needs_refresh;
+ #[cfg(target_os = "windows")]
+@@ -96,7 +100,15 @@
+ #[cfg(target_os = "windows")]
+ mod logging;
+ #[cfg(target_os = "windows")]
++mod namespace;
++#[cfg(target_os = "windows")]
++mod namespace_coordination;
++#[cfg(target_os = "windows")]
++mod namespace_key;
++#[cfg(target_os = "windows")]
+ mod no_reparse_dir;
++#[cfg(target_os = "windows")]
++pub use namespace_coordination::sandbox_read_acl_mutex_name_for_token;
+ #[cfg(target_os = "windows")]
+ mod package_identity;
+ #[cfg(target_os = "windows")]
+diff --git a/codex-rs/windows-sandbox-rs/src/namespace.rs b/codex-rs/windows-sandbox-rs/src/namespace.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/namespace.rs
+@@ -0,0 +1,276 @@
++//! Home-scoped identities for the private App runtime. Native sandbox algorithms are unchanged.
++use crate::namespace_key::NamespaceKey;
++use anyhow::{Context, Result, ensure};
++use std::path::{Path, PathBuf};
++
++#[derive(Clone, Debug)]
++pub(crate) struct SandboxNamespace {
++    pub(crate) key: NamespaceKey,
++    pub(crate) home: PathBuf,
++    pub(crate) owner_sid: String,
++    volume: u64,
++    file_id: [u8; 16],
++}
++impl SandboxNamespace {
++    pub(crate) fn current(home: &Path) -> Result<Self> {
++        Self::for_user(home, &crate::runtime_ownership::current_setup_user()?)
++    }
++    pub(crate) fn for_user(home: &Path, real_user: &str) -> Result<Self> {
++        ensure!(
++            !crate::registered_core_requested(),
++            "home-isolated runtime cannot use the shared RegisteredCore service"
++        );
++        ensure!(
++            home.is_absolute(),
++            "sandbox namespace requires an absolute home"
++        );
++        let home = dunce::canonicalize(home).context("resolve sandbox namespace home")?;
++        let canonical = home
++            .to_str()
++            .context("sandbox home is not valid Unicode")?
++            .to_lowercase();
++        let sid = crate::winutil::resolve_sid(real_user).context("resolve namespace owner SID")?;
++        let owner_sid = crate::winutil::string_from_sid_bytes(&sid).map_err(anyhow::Error::msg)?;
++        ensure!(owner_sid.starts_with("S-1-"), "invalid namespace owner SID");
++        let (volume, file_id) = directory_identity(&home)?;
++        Ok(Self {
++            key: NamespaceKey::for_directory(&canonical, &owner_sid, volume, file_id),
++            home,
++            owner_sid,
++            volume,
++            file_id,
++        })
++    }
++    pub(crate) fn from_environment() -> Result<Self> {
++        let home = std::env::var_os("CODEX_HOME")
++            .context("isolated sandbox cleanup requires explicit CODEX_HOME")?;
++        Self::current(Path::new(&home))
++    }
++    pub(crate) fn validate_names(&self, offline: &str, online: &str) -> Result<()> {
++        ensure!(
++            offline == self.key.offline() && online == self.key.online(),
++            "sandbox identities belong to another home or legacy installation; refusing to adopt or modify them"
++        );
++        Ok(())
++    }
++    fn owner_path(&self) -> PathBuf {
++        crate::setup::sandbox_secrets_dir(&self.home).join("namespace_owner.json")
++    }
++    fn owner_record(&self) -> serde_json::Value {
++        serde_json::json!({"schema":1,"namespace":self.key.id(),"owner_sid":self.owner_sid,
++            "home":self.home.to_string_lossy().to_lowercase(),"volume":self.volume,"file_id":self.file_id,"offline":self.key.offline(),
++            "online":self.key.online(),"group":self.key.group()})
++    }
++    fn validate_owner_record(&self) -> Result<bool> {
++        let bytes = match std::fs::read(self.owner_path()) {
++            Ok(bytes) => bytes,
++            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
++            Err(e) => return Err(e).context("read namespace owner record"),
++        };
++        let record: serde_json::Value =
++            serde_json::from_slice(&bytes).context("invalid namespace owner record")?;
++        ensure!(
++            record == self.owner_record(),
++            "sandbox owner record belongs to another installation"
++        );
++        Ok(true)
++    }
++    pub(crate) fn require_owned_state(&self) -> Result<()> {
++        self.validate_existing_state()?;
++        ensure!(
++            self.validate_owner_record()?,
++            "sandbox namespace has no owner reservation"
++        );
++        Ok(())
++    }
++    pub(crate) fn reserve_owner(&self) -> Result<()> {
++        // Caller holds the native machine-wide setup lock, and validation preceded every mutation.
++        self.validate_existing_state()?;
++        if self.validate_owner_record()? {
++            return Ok(());
++        }
++        std::fs::create_dir_all(crate::setup::sandbox_secrets_dir(&self.home))?;
++        let bytes = serde_json::to_vec(&self.owner_record())?;
++        crate::file_write::write_file_atomically(&self.owner_path(), &bytes)
++    }
++    /// Only schema/identity fields are inspected; encrypted credentials are never decoded here.
++    pub(crate) fn validate_existing_state(&self) -> Result<()> {
++        ensure!(
++            !crate::setup::sandbox_dir(&self.home)
++                .join("sandbox_users.json")
++                .try_exists()?,
++            "legacy sandbox credentials found; isolated runtime will not migrate or delete them"
++        );
++        let owned = self.validate_owner_record()?;
++        let has_state = crate::setup::setup_marker_path(&self.home).try_exists()?
++            || crate::setup::sandbox_users_path(&self.home).try_exists()?;
++        ensure!(
++            !has_state || owned,
++            "sandbox state exists without its owner reservation; refusing to adopt it"
++        );
++        if !has_state && !owned {
++            // No adoption: a first setup may only create absent namespace principals.
++            for name in [self.key.offline(), self.key.online()] {
++                ensure!(
++                    crate::winutil::local_user_flags(&name)?.is_none(),
++                    "namespace account already exists without owned state; refusing to change it"
++                );
++            }
++            ensure!(
++                !local_group_exists(&self.key.group())?,
++                "namespace group already exists without owned state; refusing to adopt it"
++            );
++        }
++        for (path, marker) in [
++            (crate::setup::setup_marker_path(&self.home), true),
++            (crate::setup::sandbox_users_path(&self.home), false),
++        ] {
++            let bytes = match std::fs::read(&path) {
++                Ok(bytes) => bytes,
++                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
++                Err(e) => return Err(e).context("read sandbox identity metadata"),
++            };
++            // Native setup creates an empty protected marker before committing it. Only our
++            // previously persisted owner reservation permits recovery of that interrupted state.
++            if marker && bytes.is_empty() && owned {
++                continue;
++            }
++            let value: serde_json::Value = serde_json::from_slice(&bytes)
++                .context("existing sandbox state is invalid; no implicit adoption")?;
++            ensure!(
++                value.get("namespace").and_then(|v| v.as_str()) == Some(self.key.id().as_str()),
++                "existing sandbox state is not owned by this home namespace; use a separate home"
++            );
++            let (offline, online) = if marker {
++                (value.get("offline_username"), value.get("online_username"))
++            } else {
++                (
++                    value.get("offline").and_then(|v| v.get("username")),
++                    value.get("online").and_then(|v| v.get("username")),
++                )
++            };
++            ensure!(
++                self.key.owns_state(
++                    value.get("namespace").and_then(|v| v.as_str()),
++                    offline.and_then(|v| v.as_str()),
++                    online.and_then(|v| v.as_str())
++                ),
++                "sandbox identity metadata does not match its namespace"
++            );
++        }
++        Ok(())
++    }
++}
++pub(crate) fn local_group_exists(name: &str) -> Result<bool> {
++    use windows_sys::Win32::NetworkManagement::NetManagement as net;
++    let mut data = std::ptr::null_mut();
++    let status = unsafe {
++        net::NetLocalGroupGetInfo(
++            std::ptr::null(),
++            crate::winutil::to_wide(name).as_ptr(),
++            0,
++            &mut data,
++        )
++    };
++    if !data.is_null() {
++        unsafe { net::NetApiBufferFree(data as _) };
++    }
++    match status {
++        net::NERR_Success => Ok(true),
++        net::NERR_GroupNotFound => Ok(false),
++        value => anyhow::bail!("read namespace group metadata failed: {value}"),
++    }
++}
++
++fn directory_identity(home: &Path) -> Result<(u64, [u8; 16])> {
++    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
++    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
++    use windows_sys::Win32::Storage::FileSystem as fs;
++    let raw = unsafe {
++        fs::CreateFileW(
++            crate::winutil::to_wide(home).as_ptr(),
++            fs::FILE_READ_ATTRIBUTES,
++            fs::FILE_SHARE_READ | fs::FILE_SHARE_WRITE | fs::FILE_SHARE_DELETE,
++            std::ptr::null(),
++            fs::OPEN_EXISTING,
++            fs::FILE_FLAG_BACKUP_SEMANTICS,
++            std::ptr::null_mut(),
++        )
++    };
++    ensure!(
++        raw != INVALID_HANDLE_VALUE,
++        "open canonical sandbox home identity: {}",
++        std::io::Error::last_os_error()
++    );
++    let handle = unsafe { OwnedHandle::from_raw_handle(raw as _) };
++    let mut id = fs::FILE_ID_INFO::default();
++    let ok = unsafe {
++        fs::GetFileInformationByHandleEx(
++            handle.as_raw_handle() as _,
++            fs::FileIdInfo,
++            (&mut id as *mut fs::FILE_ID_INFO).cast(),
++            std::mem::size_of::<fs::FILE_ID_INFO>() as u32,
++        )
++    };
++    ensure!(
++        ok != 0,
++        "read canonical sandbox directory identity: {}",
++        std::io::Error::last_os_error()
++    );
++    ensure!(
++        id.FileId.Identifier != [0; 16],
++        "sandbox filesystem does not expose a stable directory identity"
++    );
++    Ok((id.VolumeSerialNumber, id.FileId.Identifier))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn correctly_named_marker_without_owner_is_not_adopted() -> Result<()> {
++        let temp = tempfile::tempdir()?;
++        let namespace = SandboxNamespace::current(temp.path())?;
++        let path = crate::setup::setup_marker_path(temp.path());
++        std::fs::create_dir_all(path.parent().unwrap())?;
++        let original = serde_json::to_vec(&serde_json::json!({"namespace":namespace.key.id(),
++            "offline_username":namespace.key.offline(),"online_username":namespace.key.online()}))?;
++        std::fs::write(&path, &original)?;
++        assert!(
++            namespace
++                .validate_existing_state()
++                .unwrap_err()
++                .to_string()
++                .contains("without its owner reservation")
++        );
++        assert!(!namespace.owner_path().exists());
++        assert_eq!(std::fs::read(path)?, original);
++        Ok(())
++    }
++    #[test]
++    fn owned_interrupted_marker_recovers_but_corruption_does_not() -> Result<()> {
++        let temp = tempfile::tempdir()?;
++        let namespace = SandboxNamespace::current(temp.path())?;
++        namespace.reserve_owner()?;
++        let path = crate::setup::setup_marker_path(temp.path());
++        std::fs::create_dir_all(path.parent().unwrap())?;
++        std::fs::write(&path, [])?;
++        namespace.validate_existing_state()?;
++        std::fs::write(&path, b"broken")?;
++        assert!(namespace.validate_existing_state().is_err());
++        assert_eq!(std::fs::read(path)?, b"broken");
++        Ok(())
++    }
++    #[test]
++    fn namespace_changes_for_a_different_directory_object_at_same_path() -> Result<()> {
++        let temp = tempfile::tempdir()?;
++        let home = temp.path().join("home");
++        std::fs::create_dir(&home)?;
++        let a = SandboxNamespace::current(&home)?;
++        std::fs::rename(&home, temp.path().join("retained-original-home"))?;
++        std::fs::create_dir(&home)?;
++        let b = SandboxNamespace::current(&home)?;
++        assert_ne!(a.key, b.key);
++        Ok(())
++    }
++}
+diff --git a/codex-rs/windows-sandbox-rs/src/namespace_coordination.rs b/codex-rs/windows-sandbox-rs/src/namespace_coordination.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/namespace_coordination.rs
+@@ -0,0 +1,258 @@
++//! Read-only namespace identity from the runner's actual Windows token.
++//! No private-home reads, inherited environment values, or unauthenticated IPC identity.
++use crate::namespace_key::NamespaceKey;
++use crate::token::{get_user_sid_bytes, token_groups};
++use crate::winutil::to_wide;
++use anyhow::{Context, Result, ensure};
++use std::ptr::{null, null_mut};
++use windows_sys::Win32::Foundation::{ERROR_NON_DOMAIN_SID, GetLastError, HANDLE};
++use windows_sys::Win32::NetworkManagement::NetManagement::{
++    NERR_Success, NetApiBufferFree, NetUserGetInfo, USER_INFO_23,
++};
++use windows_sys::Win32::Security::{
++    CopySid, EqualDomainSid, EqualSid, GetLengthSid, IsValidSid, LookupAccountSidW, SidTypeAlias,
++    SidTypeUser,
++};
++use windows_sys::Win32::System::SystemServices::{SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY};
++
++#[derive(Debug)]
++struct GroupObservation {
++    name: String,
++    kind: i32,
++    attributes: u32,
++    local_domain: bool,
++}
++
++fn enabled(attributes: u32) -> bool {
++    attributes & (SE_GROUP_ENABLED as u32) != 0
++        && attributes & (SE_GROUP_USE_FOR_DENY_ONLY as u32) == 0
++}
++
++fn select_namespace(user_name: &str, groups: &[GroupObservation]) -> Result<NamespaceKey> {
++    let mut selected = None;
++    for group in groups {
++        if !enabled(group.attributes)
++            || !group.local_domain
++            || !NamespaceKey::claims_group_name(&group.name)
++        {
++            continue;
++        }
++        ensure!(
++            group.kind == SidTypeAlias,
++            "runner namespace membership is not a local alias"
++        );
++        let key = NamespaceKey::from_group_name(&group.name)
++            .context("runner namespace group name is invalid")?;
++        ensure!(
++            user_name.eq_ignore_ascii_case(&key.offline())
++                || user_name.eq_ignore_ascii_case(&key.online()),
++            "runner token user does not match namespace account"
++        );
++        ensure!(
++            selected.is_none(),
++            "runner token has ambiguous namespace memberships"
++        );
++        selected = Some(key);
++    }
++    selected.context("runner token has no enabled local namespace alias")
++}
++
++pub(crate) fn account_name(sid: &[u8]) -> Result<(String, i32)> {
++    let mut name_len = 0;
++    let mut domain_len = 0;
++    let mut kind = 0;
++    unsafe {
++        LookupAccountSidW(
++            null(),
++            sid.as_ptr() as _,
++            null_mut(),
++            &mut name_len,
++            null_mut(),
++            &mut domain_len,
++            &mut kind,
++        )
++    };
++    ensure!(
++        name_len > 0 && name_len <= 32_768 && domain_len <= 32_768,
++        "cannot resolve runner token SID: {}",
++        unsafe { GetLastError() }
++    );
++    let mut name = vec![0; name_len as usize];
++    let mut domain = vec![0; domain_len.max(1) as usize];
++    ensure!(
++        unsafe {
++            LookupAccountSidW(
++                null(),
++                sid.as_ptr() as _,
++                name.as_mut_ptr(),
++                &mut name_len,
++                domain.as_mut_ptr(),
++                &mut domain_len,
++                &mut kind,
++            )
++        } != 0,
++        "LookupAccountSidW for runner failed: {}",
++        unsafe { GetLastError() }
++    );
++    ensure!(
++        name_len as usize <= name.len(),
++        "invalid runner account name size"
++    );
++    let name = String::from_utf16(&name[..name_len as usize])
++        .context("runner account name is not Unicode")?;
++    Ok((name.trim_end_matches('\0').to_string(), kind))
++}
++
++pub(crate) fn local_user_sid(name: &str) -> Result<Vec<u8>> {
++    let mut data = null_mut();
++    // NULL server binds this lookup to the local SAM, not a similarly named domain user.
++    let status = unsafe { NetUserGetInfo(null(), to_wide(name).as_ptr(), 23, &mut data) };
++    if status != NERR_Success {
++        if !data.is_null() {
++            unsafe { NetApiBufferFree(data as _) };
++        }
++        anyhow::bail!("resolve local runner user SID failed: {status}");
++    }
++    let result = (|| {
++        ensure!(
++            !data.is_null(),
++            "local runner user query returned no record"
++        );
++        let sid = unsafe { (*(data as *const USER_INFO_23)).usri23_user_sid };
++        ensure!(
++            !sid.is_null() && unsafe { IsValidSid(sid) } != 0,
++            "local runner user has invalid SID"
++        );
++        let length = unsafe { GetLengthSid(sid) };
++        ensure!(
++            length >= 8 && length <= 68,
++            "local runner user SID size is invalid"
++        );
++        let mut owned = vec![0; length as usize];
++        ensure!(
++            unsafe { CopySid(length, owned.as_mut_ptr().cast(), sid) } != 0,
++            "copy local runner SID failed"
++        );
++        Ok(owned)
++    })();
++    unsafe { NetApiBufferFree(data as _) };
++    result
++}
++
++pub(crate) fn same_domain(user: &[u8], group: &[u8]) -> Result<bool> {
++    let mut equal = 0;
++    if unsafe { EqualDomainSid(user.as_ptr() as _, group.as_ptr() as _, &mut equal) } != 0 {
++        return Ok(equal != 0);
++    }
++    let error = unsafe { GetLastError() };
++    // Builtin, logon-session and capability SIDs are not account-domain memberships.
++    if error == ERROR_NON_DOMAIN_SID {
++        return Ok(false);
++    }
++    anyhow::bail!("compare runner token account domains failed: {error}")
++}
++
++/// Derives only a coordination name, after binding the actual user and local alias.
++///
++/// # Safety
++/// The caller retains a valid token HANDLE with TOKEN_QUERY rights for this call.
++pub unsafe fn sandbox_read_acl_mutex_name_for_token(token: HANDLE) -> Result<String> {
++    let user = unsafe { get_user_sid_bytes(token) }?;
++    let (name, kind) = account_name(&user)?;
++    ensure!(
++        kind == SidTypeUser,
++        "runner token user is not a user account"
++    );
++    let local_user = local_user_sid(&name)?;
++    ensure!(
++        unsafe { EqualSid(user.as_ptr() as _, local_user.as_ptr() as _) } != 0,
++        "runner token user is not the local SAM account"
++    );
++    let mut observations = Vec::new();
++    for group in unsafe { token_groups(token, 1_048_576) }? {
++        if !enabled(group.attributes) || !same_domain(&local_user, &group.sid)? {
++            continue;
++        }
++        let (name, kind) = account_name(&group.sid)?;
++        observations.push(GroupObservation {
++            name,
++            kind,
++            attributes: group.attributes,
++            local_domain: true,
++        });
++    }
++    Ok(select_namespace(&name, &observations)?.read_acl_mutex())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn key() -> NamespaceKey {
++        NamespaceKey::new(r"c:\qa-home", "S-1-5-21-1-1001")
++    }
++    fn group() -> GroupObservation {
++        GroupObservation {
++            name: key().group(),
++            kind: SidTypeAlias,
++            attributes: SE_GROUP_ENABLED as u32,
++            local_domain: true,
++        }
++    }
++    #[test]
++    fn namespace_coordination_reuses_account_and_mutex_factories() {
++        for user in [key().offline(), key().online().to_uppercase()] {
++            assert_eq!(select_namespace(&user, &[group()]).unwrap(), key());
++        }
++        assert_eq!(NamespaceKey::from_group_name(&key().group()), Some(key()));
++    }
++    #[test]
++    fn namespace_coordination_rejects_missing_ambiguous_or_wrong_user() {
++        assert!(select_namespace(&key().offline(), &[]).is_err());
++        assert!(select_namespace(&key().offline(), &[group(), group()]).is_err());
++        assert!(select_namespace("admin", &[group()]).is_err());
++    }
++    #[test]
++    fn namespace_coordination_rejects_disabled_deny_only_foreign_or_wrong_type() {
++        let mut value = group();
++        value.attributes = 0;
++        assert!(select_namespace(&key().offline(), &[value]).is_err());
++        let mut value = group();
++        value.attributes |= SE_GROUP_USE_FOR_DENY_ONLY as u32;
++        assert!(select_namespace(&key().offline(), &[value]).is_err());
++        let mut value = group();
++        value.local_domain = false;
++        assert!(select_namespace(&key().offline(), &[value]).is_err());
++        let mut value = group();
++        value.kind = SidTypeUser;
++        assert!(select_namespace(&key().offline(), &[value]).is_err());
++    }
++    #[test]
++    fn namespace_coordination_handles_non_account_domain_sids() {
++        fn sid(authority: u8, parts: &[u32]) -> Vec<u8> {
++            let mut value = vec![1, parts.len() as u8, 0, 0, 0, 0, 0, authority];
++            for part in parts {
++                value.extend_from_slice(&part.to_le_bytes());
++            }
++            value
++        }
++        let user = sid(5, &[21, 1, 2, 3, 1001]);
++        assert!(same_domain(&user, &sid(5, &[21, 1, 2, 3, 1014])).unwrap());
++        assert!(!same_domain(&user, &sid(5, &[21, 1, 2, 4, 1014])).unwrap());
++        for other in [sid(5, &[32, 545]), sid(5, &[5, 1, 2]), sid(15, &[3, 1])] {
++            assert!(!same_domain(&user, &other).unwrap());
++        }
++    }
++    #[test]
++    fn namespace_coordination_rejects_malformed_or_cross_namespace_labels() {
++        for name in [
++            "CodexAppDeepSeek-short".to_string(),
++            format!("CodexAppDeepSeek-{}", "A".repeat(64)),
++            key().group().to_uppercase(),
++            NamespaceKey::new("other", "owner").group(),
++        ] {
++            let mut value = group();
++            value.name = name;
++            assert!(select_namespace(&key().offline(), &[value]).is_err());
++        }
++    }
++}
+diff --git a/codex-rs/windows-sandbox-rs/src/namespace_key.rs b/codex-rs/windows-sandbox-rs/src/namespace_key.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/namespace_key.rs
+@@ -0,0 +1,238 @@
++//! Pure resource identity derivation. No Windows calls, filesystem writes, or process state.
++use sha2::{Digest, Sha256};
++
++const GROUP_PREFIX: &str = "CodexAppDeepSeek-";
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(crate) struct NamespaceKey {
++    digest: [u8; 32],
++}
++impl NamespaceKey {
++    pub(crate) fn claims_group_name(name: &str) -> bool {
++        name.get(..GROUP_PREFIX.len())
++            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(GROUP_PREFIX))
++    }
++    pub(crate) fn from_group_name(name: &str) -> Option<Self> {
++        let id = name.strip_prefix(GROUP_PREFIX)?;
++        if !is_namespace_id(id) {
++            return None;
++        }
++        let mut digest = [0; 32];
++        for (index, byte) in digest.iter_mut().enumerate() {
++            *byte = u8::from_str_radix(&id[index * 2..index * 2 + 2], 16).ok()?;
++        }
++        Some(Self { digest })
++    }
++    pub(crate) fn new(canonical_home: &str, owner_sid: &str) -> Self {
++        let mut hash = Sha256::new();
++        hash.update(b"codex-app-deepseek/windows-sandbox/v1\0");
++        for value in [canonical_home, owner_sid] {
++            hash.update((value.len() as u64).to_le_bytes());
++            hash.update(value.as_bytes());
++        }
++        Self {
++            digest: hash.finalize().into(),
++        }
++    }
++    pub(crate) fn for_directory(
++        canonical_home: &str,
++        owner_sid: &str,
++        volume: u64,
++        file_id: [u8; 16],
++    ) -> Self {
++        let id: String = file_id.iter().map(|byte| format!("{byte:02x}")).collect();
++        // A case-sensitive Windows directory can contain different objects whose lowercase
++        // paths match. Bind the actual canonical directory object as well as its spelling.
++        Self::new(&format!("{canonical_home}\0{volume:016x}:{id}"), owner_sid)
++    }
++    pub(crate) fn owns_state(
++        &self,
++        namespace: Option<&str>,
++        offline: Option<&str>,
++        online: Option<&str>,
++    ) -> bool {
++        namespace == Some(self.id().as_str())
++            && offline == Some(self.offline().as_str())
++            && online == Some(self.online().as_str())
++    }
++    pub(crate) fn id(&self) -> String {
++        self.digest
++            .iter()
++            .map(|byte| format!("{byte:02x}"))
++            .collect()
++    }
++    fn account_id(&self) -> String {
++        const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
++        let mut value = 0_u128;
++        for byte in &self.digest[..10] {
++            value = (value << 8) | *byte as u128;
++        }
++        (0..16)
++            .rev()
++            .map(|n| ALPHABET[((value >> (n * 5)) & 31) as usize] as char)
++            .collect()
++    }
++    pub(crate) fn offline(&self) -> String {
++        format!("Cdx{}f", self.account_id())
++    }
++    pub(crate) fn online(&self) -> String {
++        format!("Cdx{}n", self.account_id())
++    }
++    pub(crate) fn group(&self) -> String {
++        format!("{GROUP_PREFIX}{}", self.id())
++    }
++    pub(crate) fn read_acl_mutex(&self) -> String {
++        read_acl_mutex_for_id(&self.id()).expect("digest is hex")
++    }
++    pub(crate) fn firewall(&self, original: &str) -> String {
++        format!("{original}-cdag-{}", self.id())
++    }
++    pub(crate) fn guid(&self, original: u128) -> u128 {
++        let mut hash = Sha256::new();
++        hash.update(b"codex-app-deepseek/windows-sandbox/wfp/v1\0");
++        hash.update(self.digest);
++        hash.update(original.to_be_bytes());
++        let bytes = hash.finalize();
++        let mut uuid: [u8; 16] = bytes[..16].try_into().expect("fixed digest size");
++        uuid[6] = (uuid[6] & 0x0f) | 0x80;
++        uuid[8] = (uuid[8] & 0x3f) | 0x80;
++        u128::from_be_bytes(uuid)
++    }
++}
++fn is_namespace_id(id: &str) -> bool {
++    id.len() == 64
++        && id
++            .bytes()
++            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
++}
++pub(crate) fn read_acl_mutex_for_id(id: &str) -> Option<String> {
++    is_namespace_id(id).then(|| format!(r"Local\CodexAppDeepSeekReadAcl-{id}"))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn stable_identity() {
++        let a = NamespaceKey::new(r"c:\codex\home", "S-1-5-21-1-1001");
++        assert_eq!(a, NamespaceKey::new(r"c:\codex\home", "S-1-5-21-1-1001"));
++        assert_eq!(a.offline().len(), 20);
++        assert_eq!(a.online().len(), 20);
++        assert_ne!(a.offline(), a.online());
++        assert!(a.offline().bytes().all(|b| b.is_ascii_alphanumeric()));
++        assert_ne!(a.offline(), "CodexSandboxOffline");
++        assert_ne!(a.group(), "CodexSandboxUsers");
++    }
++    #[test]
++    fn every_resource_changes_with_home_and_owner() {
++        let a = NamespaceKey::new(r"c:\a", "S-1-5-21-1-1001");
++        for b in [
++            NamespaceKey::new(r"c:\b", "S-1-5-21-1-1001"),
++            NamespaceKey::new(r"c:\a", "S-1-5-21-1-1002"),
++        ] {
++            assert_ne!(a.id(), b.id());
++            assert_ne!(a.offline(), b.offline());
++            assert_ne!(a.online(), b.online());
++            assert_ne!(a.group(), b.group());
++            assert_ne!(a.read_acl_mutex(), b.read_acl_mutex());
++            assert_ne!(a.firewall("rule"), b.firewall("rule"));
++            assert_ne!(a.guid(1), b.guid(1));
++        }
++    }
++    #[test]
++    fn resource_classes_and_input_boundaries_do_not_alias() {
++        let a = NamespaceKey::new("ab", "c");
++        let b = NamespaceKey::new("a", "bc");
++        assert_ne!(a, b);
++        assert_ne!(a.guid(1), a.guid(2));
++        assert_ne!(a.firewall("a"), a.firewall("b"));
++        assert_eq!((a.guid(1) >> 76) & 15, 8);
++        assert_eq!((a.guid(1) >> 62) & 3, 2);
++    }
++    #[test]
++    fn marker_cannot_choose_arbitrary_named_object() {
++        for id in [
++            "",
++            "Global\\CodexSandboxSetup",
++            &"0".repeat(63),
++            &"G".repeat(64),
++            &"A".repeat(64),
++        ] {
++            assert!(read_acl_mutex_for_id(id).is_none());
++        }
++    }
++}
++
++#[cfg(test)]
++mod isolation_regressions {
++    use super::*;
++    #[test]
++    fn fixed_version_identity_vector() {
++        let key = NamespaceKey::new(r"c:\codex\home", "S-1-5-21-1-1001");
++        assert_eq!(
++            key.id(),
++            "bb0079331ec29687adf304fda911f1cb63faea80e3926c1f11c05322c0bfde08"
++        );
++    }
++    #[test]
++    fn legacy_missing_cross_home_and_swapped_state_are_rejected() {
++        let key = NamespaceKey::new(r"c:\codex\home", "S-1-5-21-1-1001");
++        let other = NamespaceKey::new(r"c:\codex\other", "S-1-5-21-1-1001");
++        assert!(key.owns_state(Some(&key.id()), Some(&key.offline()), Some(&key.online())));
++        assert!(!key.owns_state(
++            None,
++            Some("CodexSandboxOffline"),
++            Some("CodexSandboxOnline")
++        ));
++        assert!(!key.owns_state(
++            Some(&other.id()),
++            Some(&other.offline()),
++            Some(&other.online())
++        ));
++        assert!(!key.owns_state(Some(&key.id()), Some(&key.online()), Some(&key.offline())));
++        assert!(!key.owns_state(Some(&key.id()), None, Some(&key.online())));
++    }
++    #[test]
++    fn every_fixed_native_wfp_object_is_disjoint() {
++        let native: [u128; 14] = [
++            0x9f5f3812_79f0_4fe9_9615_4c2c92d2f0ff,
++            0x87498484_45ab_4510_845e_ece8b791b3bc,
++            0xaf4751de_f874_4a7b_a34d_f0d0f22d1d9b,
++            0xea10db66_a928_4b2e_a82e_a376a54f93ba,
++            0x83172805_f6be_4ae1_9dc6_6847aef04e7f,
++            0xd23b2efb_1efb_46b2_96f3_b0ccda5690c8,
++            0x420b026f_9dc9_4aea_88f4_0f2b9feab39a,
++            0x8d917c81_99cc_45e7_84d6_824df860cfb8,
++            0xe1d6e0af_ce5f_471b_b2d3_15ca00e966f3,
++            0xc2bceca4_66ef_4a0f_ba80_f4f761b8c6f0,
++            0xba10c618_84e7_4b83_8f74_36e22b2fa1ff,
++            0xfe7f22b8_5cf5_4adb_b2aa_71fc0a8f5d44,
++            0x2e31d31c_3948_4753_9117_e5d1a6496f41,
++            0xe65054fd_4d32_4c7c_95ef_621f0cf6431a,
++        ];
++        let key = NamespaceKey::new(r"c:\codex\home", "S-1-5-21-1-1001");
++        let other = NamespaceKey::new(r"c:\codex\other", "S-1-5-21-1-1001");
++        let derived: std::collections::HashSet<_> = native.iter().map(|id| key.guid(*id)).collect();
++        assert_eq!(derived.len(), native.len());
++        assert!(native.iter().all(|id| !derived.contains(id)));
++        assert!(native.iter().all(|id| !derived.contains(&other.guid(*id))));
++    }
++}
++
++#[cfg(test)]
++mod directory_identity_regressions {
++    use super::*;
++    #[test]
++    fn different_objects_never_alias_after_case_normalization() {
++        let a = NamespaceKey::for_directory(r"c:\case\home", "S-1-5-21-1-1001", 1, [1; 16]);
++        let b = NamespaceKey::for_directory(r"c:\case\home", "S-1-5-21-1-1001", 1, [2; 16]);
++        let other_volume =
++            NamespaceKey::for_directory(r"c:\case\home", "S-1-5-21-1-1001", 2, [1; 16]);
++        assert_ne!(a, b);
++        assert_ne!(a, other_volume);
++        assert_eq!(
++            a,
++            NamespaceKey::for_directory(r"c:\case\home", "S-1-5-21-1-1001", 1, [1; 16])
++        );
++    }
++}
+diff --git a/codex-rs/windows-sandbox-rs/src/no_reparse_dir.rs b/codex-rs/windows-sandbox-rs/src/no_reparse_dir.rs
+--- a/codex-rs/windows-sandbox-rs/src/no_reparse_dir.rs
++++ b/codex-rs/windows-sandbox-rs/src/no_reparse_dir.rs
+@@ -229,6 +229,27 @@
+     disposition: u32,
+     create_options: u32,
+ ) -> Result<OwnedHandle> {
++    open_no_reparse_with_security(
++        root_directory,
++        name,
++        desired_access,
++        share_access,
++        disposition,
++        create_options,
++        ptr::null(),
++    )
++}
++
++/// Same pinned-parent open, with a caller-owned descriptor used only at creation.
++pub(crate) fn open_no_reparse_with_security(
++    root_directory: HANDLE,
++    name: &mut [u16],
++    desired_access: u32,
++    share_access: u32,
++    disposition: u32,
++    create_options: u32,
++    security_descriptor: *const c_void,
++) -> Result<OwnedHandle> {
+     let name_length = u16::try_from((name.len() - 1) * size_of::<u16>())
+         .context("no-reparse path is too long")?;
+     let maximum_length = u16::try_from(size_of_val(name)).context("no-reparse path is too long")?;
+@@ -242,7 +263,7 @@
+         root_directory,
+         object_name: &object_name,
+         attributes: OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE,
+-        security_descriptor: ptr::null(),
++        security_descriptor,
+         security_quality_of_service: ptr::null(),
+     };
+     let mut io_status_block = IO_STATUS_BLOCK {
+diff --git a/codex-rs/windows-sandbox-rs/src/private_acl_lock.rs b/codex-rs/windows-sandbox-rs/src/private_acl_lock.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/private_acl_lock.rs
+@@ -0,0 +1,316 @@
++//! Owner-private, zero-byte coordination files. They carry no persistent state.
++//! Keeping each live RW handle non-delete-shared prevents cleanup split locks.
++use crate::no_reparse_dir::{
++    DirectoryOpenDisposition, open_directory_no_reparse, open_no_reparse_with_security,
++};
++use anyhow::{Context, Result, ensure};
++use std::ffi::c_void;
++use std::fs::File;
++use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
++use std::path::Path;
++use windows_sys::Win32::Foundation::{HANDLE, LocalFree};
++use windows_sys::Win32::Security::Authorization::{
++    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
++};
++use windows_sys::Win32::Security::{
++    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
++    GetSecurityDescriptorControl, GetSecurityDescriptorDacl, OWNER_SECURITY_INFORMATION,
++    SE_DACL_PROTECTED, TOKEN_QUERY,
++};
++use windows_sys::Win32::Storage::FileSystem as fs;
++use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
++
++struct Descriptor(*mut c_void);
++impl Drop for Descriptor {
++    fn drop(&mut self) {
++        if !self.0.is_null() {
++            unsafe {
++                LocalFree(self.0);
++            }
++        }
++    }
++}
++pub(crate) struct PrivatePolicy {
++    descriptor: Descriptor,
++    user: Vec<u8>,
++}
++impl PrivatePolicy {
++    pub(crate) fn current() -> Result<Self> {
++        let mut token = std::ptr::null_mut();
++        ensure!(
++            unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } != 0,
++            "open private lock owner token: {}",
++            std::io::Error::last_os_error()
++        );
++        let token = unsafe { OwnedHandle::from_raw_handle(token) };
++        let user = unsafe { crate::token::get_user_sid_bytes(token.as_raw_handle() as _) }?;
++        let user_text = crate::winutil::string_from_sid_bytes(&user).map_err(anyhow::Error::msg)?;
++        let text = crate::winutil::to_wide(format!(
++            "O:{user_text}D:P(A;;FA;;;{user_text})(A;;FA;;;SY)(A;;FA;;;BA)"
++        ));
++        let mut descriptor = Descriptor(std::ptr::null_mut());
++        ensure!(
++            unsafe {
++                ConvertStringSecurityDescriptorToSecurityDescriptorW(
++                    text.as_ptr(),
++                    1,
++                    &mut descriptor.0,
++                    std::ptr::null_mut(),
++                )
++            } != 0,
++            "create private lock security: {}",
++            std::io::Error::last_os_error()
++        );
++        Ok(Self { descriptor, user })
++    }
++    pub(crate) fn validate(&self, handle: HANDLE) -> Result<()> {
++        let mut actual = Descriptor(std::ptr::null_mut());
++        let (mut owner, mut acl) = (std::ptr::null_mut(), std::ptr::null_mut());
++        let status = unsafe {
++            GetSecurityInfo(
++                handle,
++                1,
++                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
++                &mut owner,
++                std::ptr::null_mut(),
++                &mut acl,
++                std::ptr::null_mut(),
++                &mut actual.0,
++            )
++        };
++        ensure!(status == 0, "inspect private lock security: {status}");
++        let (mut control, mut revision) = (0, 0);
++        ensure!(
++            unsafe { GetSecurityDescriptorControl(actual.0, &mut control, &mut revision) } != 0,
++            "inspect private lock flags"
++        );
++        ensure!(
++            control & SE_DACL_PROTECTED != 0
++                && !owner.is_null()
++                && unsafe { EqualSid(owner, self.user.as_ptr() as _) } != 0,
++            "lock object is not private to its owner"
++        );
++        let (mut expected, mut present, mut defaulted) = (std::ptr::null_mut(), 0, 0);
++        ensure!(
++            unsafe {
++                GetSecurityDescriptorDacl(
++                    self.descriptor.0,
++                    &mut present,
++                    &mut expected,
++                    &mut defaulted,
++                )
++            } != 0
++                && present != 0
++                && !acl.is_null()
++                && !expected.is_null(),
++            "invalid private lock DACL"
++        );
++        ensure!(
++            unsafe { entries(acl)? == entries(expected)? },
++            "private lock DACL differs from owner-private policy"
++        );
++        Ok(())
++    }
++    pub(crate) fn open_file(
++        &self,
++        parent: HANDLE,
++        name: &str,
++        access: u32,
++        share: u32,
++        disposition: u32,
++    ) -> Result<File> {
++        ensure!(
++            Path::new(name).file_name().is_some_and(|leaf| leaf == name) && !name.contains(':'),
++            "private lock name must be a plain leaf"
++        );
++        let mut wide = crate::winutil::to_wide(name);
++        let handle = open_no_reparse_with_security(
++            parent,
++            &mut wide,
++            access,
++            share,
++            disposition,
++            0x40 | 0x20,
++            self.descriptor.0,
++        )?;
++        let file = File::from(handle);
++        crate::deny_read_state::validate_state_file(&file)?;
++        self.validate(file.as_raw_handle() as _)?;
++        Ok(file)
++    }
++    fn open_directory(&self, parent: HANDLE, name: &str) -> Result<OwnedHandle> {
++        let mut wide = crate::winutil::to_wide(name);
++        let handle = open_no_reparse_with_security(
++            parent,
++            &mut wide,
++            fs::FILE_GENERIC_READ | fs::FILE_GENERIC_WRITE | fs::FILE_GENERIC_EXECUTE,
++            fs::FILE_SHARE_READ | fs::FILE_SHARE_WRITE,
++            3,
++            1 | 0x20,
++            self.descriptor.0,
++        )?;
++        self.validate(handle.as_raw_handle() as _)?;
++        Ok(handle)
++    }
++}
++unsafe fn entries(acl: *mut ACL) -> Result<Vec<Vec<u8>>> {
++    let mut result = Vec::new();
++    for index in 0..unsafe { (*acl).AceCount } as u32 {
++        let mut entry = std::ptr::null_mut();
++        ensure!(
++            unsafe { GetAce(acl, index, &mut entry) } != 0,
++            "read private lock ACE"
++        );
++        let header = unsafe { &*entry.cast::<ACE_HEADER>() };
++        ensure!(
++            header.AceType == 0
++                && header.AceFlags == 0
++                && header.AceSize as usize >= size_of::<ACCESS_ALLOWED_ACE>(),
++            "non-private lock ACE"
++        );
++        let ace = unsafe { &*entry.cast::<ACCESS_ALLOWED_ACE>() };
++        ensure!(
++            ace.Mask == fs::FILE_ALL_ACCESS,
++            "unexpected private lock access"
++        );
++        result.push(
++            unsafe { std::slice::from_raw_parts(entry.cast::<u8>(), header.AceSize as usize) }
++                .to_vec(),
++        );
++    }
++    Ok(result)
++}
++pub(crate) struct PrivateLockDirectory {
++    policy: PrivatePolicy,
++    directory: OwnedHandle,
++    _parent: OwnedHandle,
++}
++impl PrivateLockDirectory {
++    pub(crate) fn open() -> Result<Self> {
++        // dirs-next on Windows calls SHGetKnownFolderPath(FOLDERID_LocalAppData).
++        // No environment override, per-install location, or shared CDS/App state.
++        let parent = dirs_next::data_local_dir()
++            .context("Windows LocalAppData known folder is unavailable")?;
++        Self::at(&parent, "CodexDeepSeekNativeAcl")
++    }
++    fn at(parent: &Path, name: &str) -> Result<Self> {
++        let parent = dunce::canonicalize(parent)?;
++        let parent = open_directory_no_reparse(
++            &parent,
++            fs::FILE_TRAVERSE | fs::FILE_READ_ATTRIBUTES,
++            fs::FILE_SHARE_READ | fs::FILE_SHARE_WRITE,
++            DirectoryOpenDisposition::OpenExisting,
++        )?;
++        let policy = PrivatePolicy::current()?;
++        let directory = policy.open_directory(parent.as_raw_handle() as _, name)?;
++        Ok(Self {
++            policy,
++            directory,
++            _parent: parent,
++        })
++    }
++    pub(crate) fn open_leaf(&self, name: &str) -> Result<File> {
++        let file = self.policy.open_file(
++            self.directory.as_raw_handle() as _,
++            name,
++            fs::FILE_GENERIC_READ | fs::FILE_GENERIC_WRITE,
++            fs::FILE_SHARE_READ | fs::FILE_SHARE_WRITE,
++            3,
++        )?;
++        ensure!(
++            file.metadata()?.len() == 0,
++            "ACL coordination file must be empty"
++        );
++        Ok(file)
++    }
++    /// Only an unused leaf can be opened with DELETE access and no sharing.
++    /// Delete by that same validated handle; never unlink/reopen an active name.
++    pub(crate) fn try_cleanup(&self, name: &str) -> Result<bool> {
++        let file = match self.policy.open_file(
++            self.directory.as_raw_handle() as _,
++            name,
++            fs::DELETE | fs::FILE_GENERIC_READ | fs::FILE_GENERIC_WRITE,
++            0,
++            1,
++        ) {
++            Ok(file) => file,
++            Err(error)
++                if error
++                    .chain()
++                    .filter_map(|e| e.downcast_ref::<std::io::Error>())
++                    .any(|e| matches!(e.raw_os_error(), Some(2 | 3 | 5 | 32 | 303))) =>
++            {
++                return Ok(false);
++            }
++            Err(error) => return Err(error),
++        };
++        ensure!(
++            file.metadata()?.len() == 0,
++            "refusing to delete nonempty ACL coordination file"
++        );
++        let disposition = fs::FILE_DISPOSITION_INFO { DeleteFile: true };
++        ensure!(
++            unsafe {
++                fs::SetFileInformationByHandle(
++                    file.as_raw_handle() as _,
++                    fs::FileDispositionInfo,
++                    (&disposition as *const fs::FILE_DISPOSITION_INFO).cast(),
++                    size_of::<fs::FILE_DISPOSITION_INFO>() as u32,
++                )
++            } != 0,
++            "delete unused ACL lock: {}",
++            std::io::Error::last_os_error()
++        );
++        Ok(true)
++    }
++}
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn live_and_waiting_handles_block_cleanup_and_reuse_same_file() -> Result<()> {
++        let temp = tempfile::tempdir()?;
++        let dir = PrivateLockDirectory::at(temp.path(), "private")?;
++        let name = "unit.lock";
++        let held = dir.open_leaf(name)?;
++        held.try_lock()?;
++        let waiting = dir.open_leaf(name)?;
++        assert!(matches!(
++            waiting.try_lock(),
++            Err(std::fs::TryLockError::WouldBlock)
++        ));
++        assert!(!dir.try_cleanup(name)?);
++        drop(held);
++        assert!(!dir.try_cleanup(name)?);
++        waiting.try_lock()?;
++        drop(waiting);
++        assert!(dir.try_cleanup(name)?);
++        assert!(!dir.try_cleanup(name)?);
++        let next = dir.open_leaf(name)?;
++        next.try_lock()?;
++        drop(next);
++        assert!(dir.try_cleanup(name)?);
++        Ok(())
++    }
++    #[test]
++    fn rejects_nonempty_and_hardlinked_files_without_repair() -> Result<()> {
++        use std::io::Write;
++        let temp = tempfile::tempdir()?;
++        let dir = PrivateLockDirectory::at(temp.path(), "private")?;
++        let mut file = dir.open_leaf("nonempty.lock")?;
++        file.write_all(b"not a lock")?;
++        drop(file);
++        assert!(dir.open_leaf("nonempty.lock").is_err());
++        assert!(dir.try_cleanup("nonempty.lock").is_err());
++        assert!(temp.path().join("private/nonempty.lock").exists());
++        let file = dir.open_leaf("linked.lock")?;
++        drop(file);
++        std::fs::hard_link(
++            temp.path().join("private/linked.lock"),
++            temp.path().join("private/other.lock"),
++        )?;
++        assert!(dir.open_leaf("linked.lock").is_err());
++        assert!(dir.try_cleanup("linked.lock").is_err());
++        Ok(())
++    }
++}
+diff --git a/codex-rs/windows-sandbox-rs/src/provisioning_client.rs b/codex-rs/windows-sandbox-rs/src/provisioning_client.rs
+--- a/codex-rs/windows-sandbox-rs/src/provisioning_client.rs
++++ b/codex-rs/windows-sandbox-rs/src/provisioning_client.rs
+@@ -158,29 +158,10 @@
+     listeners: WindowsSandboxProxyListeners,
+     intent: ProvisioningIntent,
+ ) -> anyhow::Result<WindowsSandboxProvisioningOutcome> {
+-    let request = crate::FramedProvisioningMessage {
+-        version: crate::PROVISIONING_PROTOCOL_VERSION,
+-        message: crate::ProvisioningMessage::ProvisionSandboxRequest {
+-            payload: crate::SandboxProvisioningRequest {
+-                codex_home: codex_home
+-                    .to_str()
+-                    .context("sandbox provisioning home is not valid UTF-8")?
+-                    .to_owned(),
+-                registered_core: crate::registered_core_requested(),
+-                refresh_only: matches!(intent, ProvisioningIntent::RefreshRegistration),
+-                settings,
+-                listeners,
+-            },
+-        },
+-    };
+-
+-    match send_service_request(&request, PROVISIONING_TIMEOUT)? {
+-        crate::SandboxProvisioningResponse::Ok => {
+-            Ok(WindowsSandboxProvisioningOutcome::Provisioned)
+-        }
+-        crate::SandboxProvisioningResponse::Unavailable => service_unavailable(),
+-        crate::SandboxProvisioningResponse::Error { message } => Err(anyhow!(message)),
+-    }
++    let _ = (codex_home, settings, listeners, intent);
++    // A custom CLI has no authority to replace the packaged service's owner or accounts.
++    // Preserve the upstream Legacy helper selection and RegisteredCore no-fallback error.
++    service_unavailable()
+ }
+ 
+ fn service_unavailable() -> anyhow::Result<WindowsSandboxProvisioningOutcome> {
+@@ -193,52 +174,13 @@
+ /// Starts a stopped service only for explicit setup. The normal connection path
+ /// waits for startup and authenticates the pipe server; SCM authorizes the start.
+ pub fn start_windows_sandbox_service_for_setup() -> anyhow::Result<()> {
+-    query_service_status()
+-        .and_then(|status| {
+-            if status.dwCurrentState == Services::SERVICE_STOPPED {
+-                let service = open_service(Services::SERVICE_START)
+-                    .context("request permission to start sandbox service for setup")?;
+-                if unsafe { Services::StartServiceW(service.0, 0, ptr::null()) } == 0 {
+-                    let error = io::Error::last_os_error();
+-                    if error.raw_os_error() != Some(ERROR_SERVICE_ALREADY_RUNNING as i32) {
+-                        return Err(error).context("start sandbox service for setup");
+-                    }
+-                }
+-            }
+-            Ok(())
+-        })
+-        .or_else(|error| {
+-            if error.downcast_ref::<io::Error>().is_some_and(|error| {
+-                matches!(error.raw_os_error(), Some(code)
+-                if code == ERROR_SERVICE_DOES_NOT_EXIST as i32
+-                    || code == ERROR_SERVICE_MARKED_FOR_DELETE as i32)
+-            }) {
+-                // The connection path preserves registered Core's no-fallback error.
+-                Ok(())
+-            } else {
+-                Err(error)
+-            }
+-        })
++    bail!("home-isolated runtime cannot start the shared packaged sandbox service")
+ }
+ 
+ /// Records desktop uninstall ownership without creating or enabling a sandbox.
+ pub fn register_desktop_installation(codex_home: &Path) -> anyhow::Result<()> {
+-    let request = crate::FramedProvisioningMessage {
+-        version: crate::PROVISIONING_PROTOCOL_VERSION,
+-        message: crate::ProvisioningMessage::RegisterInstallationRequest {
+-            codex_home: codex_home
+-                .to_str()
+-                .context("desktop home is not valid UTF-8")?
+-                .to_owned(),
+-        },
+-    };
+-    match send_service_request(&request, Duration::from_secs(5))? {
+-        crate::SandboxProvisioningResponse::Ok => Ok(()),
+-        crate::SandboxProvisioningResponse::Unavailable => {
+-            bail!("desktop uninstall registration service is unavailable")
+-        }
+-        crate::SandboxProvisioningResponse::Error { message } => Err(anyhow!(message)),
+-    }
++    let _ = codex_home;
++    bail!("home-isolated runtime does not register ownership with the shared packaged service")
+ }
+ 
+ fn send_service_request(
+diff --git a/codex-rs/windows-sandbox-rs/src/setup.rs b/codex-rs/windows-sandbox-rs/src/setup.rs
+--- a/codex-rs/windows-sandbox-rs/src/setup.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup.rs
+@@ -346,10 +346,12 @@
+     let deny_write_paths = build_payload_deny_write_paths(&request, overrides.deny_write_paths);
+     let offline_proxy_settings =
+         offline_proxy_settings_for_request(&request, offline_proxy_settings_override);
++    let namespace = crate::namespace::SandboxNamespace::current(request.codex_home)?;
++    namespace.validate_existing_state()?;
+     let payload = ElevationPayload {
+         version: SETUP_VERSION,
+-        offline_username: OFFLINE_USERNAME.to_string(),
+-        online_username: ONLINE_USERNAME.to_string(),
++        offline_username: namespace.key.offline(),
++        online_username: namespace.key.online(),
+         codex_home: request.codex_home.to_path_buf(),
+         command_cwd: request.command_cwd.to_path_buf(),
+         read_roots,
+@@ -1141,7 +1143,7 @@
+         &request,
+         offline_proxy_settings_override,
+         crate::runtime_ownership::current_setup_user()?,
+-    );
++    )?;
+     let needs_elevation = !is_elevated().map_err(|err| {
+         failure(
+             SetupErrorCode::OrchestratorElevationCheckFailed,
+@@ -1155,13 +1157,15 @@
+     request: &SandboxSetupRequest<'_>,
+     offline_proxy_settings_override: Option<&OfflineProxySettings>,
+     real_user: String,
+-) -> ElevationPayload {
++) -> Result<ElevationPayload> {
++    let namespace = crate::namespace::SandboxNamespace::for_user(request.codex_home, &real_user)?;
++    namespace.validate_existing_state()?;
+     let offline_proxy_settings =
+         offline_proxy_settings_for_request(request, offline_proxy_settings_override);
+-    ElevationPayload {
++    Ok(ElevationPayload {
+         version: SETUP_VERSION,
+-        offline_username: OFFLINE_USERNAME.to_string(),
+-        online_username: ONLINE_USERNAME.to_string(),
++        offline_username: namespace.key.offline(),
++        online_username: namespace.key.online(),
+         codex_home: request.codex_home.to_path_buf(),
+         command_cwd: request.codex_home.to_path_buf(),
+         read_roots: Vec::new(),
+@@ -1176,7 +1180,7 @@
+         mode: SetupMode::InteractiveProvision,
+         runtime: SetupRuntime::Legacy,
+         refresh_only: false,
+-    }
++    })
+ }
+ 
+ pub fn run_elevated_provisioning_setup(
+@@ -1239,10 +1243,16 @@
+             "sandbox provisioning setup must be run from an elevated process",
+         ));
+     }
++    let namespace = crate::namespace::SandboxNamespace::for_user(codex_home, real_user)?;
++    namespace.validate_existing_state()?;
++    anyhow::ensure!(
++        runtime == SetupRuntime::Legacy,
++        "home-isolated setup requires native Legacy runtime"
++    );
+     let payload = ElevationPayload {
+         version: SETUP_VERSION,
+-        offline_username: OFFLINE_USERNAME.to_string(),
+-        online_username: ONLINE_USERNAME.to_string(),
++        offline_username: namespace.key.offline(),
++        online_username: namespace.key.online(),
+         codex_home: codex_home.to_path_buf(),
+         command_cwd: codex_home.to_path_buf(),
+         read_roots: Vec::new(),
+@@ -1675,6 +1685,9 @@
+         let command_cwd = tmp.path().join("caller-workspace");
+         let codex_home = tmp.path().join("codex-home");
+         fs::create_dir_all(&command_cwd).expect("create workspace");
++        fs::create_dir_all(&codex_home).expect("create namespace home");
++        let real_user =
++            crate::runtime_ownership::current_setup_user().expect("actual setup identity");
+         let permissions = permissions_for(
+             &workspace_write_profile(
+                 workspace_roots_for(&command_cwd).as_slice(),
+@@ -1694,11 +1707,12 @@
+         let payload = super::elevated_provisioning_payload(
+             &request,
+             /*offline_proxy_settings_override*/ None,
+-            r"DOMAIN\alice".to_string(),
+-        );
++            real_user.clone(),
++        )
++        .expect("home-scoped native payload");
+ 
+         assert!(matches!(payload.runtime, super::SetupRuntime::Legacy));
+-        assert_eq!(payload.real_user, r"DOMAIN\alice");
++        assert_eq!(payload.real_user, real_user);
+         assert_eq!(payload.command_cwd, codex_home);
+         assert_eq!(payload.read_roots, Vec::<PathBuf>::new());
+         assert_eq!(payload.write_roots, Vec::<PathBuf>::new());
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+@@ -20,7 +20,6 @@
+ use crate::ensure_allow_write_aces;
+ use crate::extract_setup_failure;
+ use crate::hide_newly_created_users;
+-use crate::install_wfp_filters;
+ use crate::local_user_flags;
+ use crate::log_note;
+ use crate::log_writer;
+@@ -561,11 +560,10 @@
+             payload.runtime == SetupRuntime::Legacy && !crate::registered_core_requested(),
+             "registered Core requires service-owned provisioning"
+         );
+-        anyhow::ensure!(
+-            crate::runtime_ownership::load_installation()?
+-                .is_none_or(|record| record.runtime.is_none()),
+-            "registered Core owns these sandbox accounts; helper provisioning is not permitted"
+-        );
++        let namespace =
++            crate::namespace::SandboxNamespace::for_user(&payload.codex_home, &payload.real_user)?;
++        namespace.validate_names(&payload.offline_username, &payload.online_username)?;
++        namespace.reserve_owner()?;
+         Some(guard)
+     } else {
+         None
+@@ -574,6 +572,14 @@
+ }
+ 
+ fn run_payload(payload: &Payload) -> Result<()> {
++    anyhow::ensure!(
++        payload.runtime == SetupRuntime::Legacy,
++        "home-isolated helper requires native Legacy runtime"
++    );
++    let namespace =
++        crate::namespace::SandboxNamespace::for_user(&payload.codex_home, &payload.real_user)?;
++    namespace.validate_names(&payload.offline_username, &payload.online_username)?;
++    namespace.require_owned_state()?;
+     let sbx_dir = sandbox_dir(&payload.codex_home);
+     std::fs::create_dir_all(&sbx_dir).map_err(|err| {
+         anyhow::Error::new(SetupFailure::new(
+@@ -624,6 +630,14 @@
+     result
+ }
+ 
++fn namespace_for_payload(payload: &Payload) -> Result<crate::namespace::SandboxNamespace> {
++    let namespace =
++        crate::namespace::SandboxNamespace::for_user(&payload.codex_home, &payload.real_user)?;
++    namespace.validate_names(&payload.offline_username, &payload.online_username)?;
++    namespace.require_owned_state()?;
++    Ok(namespace)
++}
++
+ fn run_setup(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Result<()> {
+     let writes_setup_marker = !payload.refresh_only && payload.mode != SetupMode::ReadAclsOnly;
+     let marker = if writes_setup_marker {
+@@ -650,13 +664,21 @@
+             &payload.online_username,
+             &payload.proxy_ports,
+             payload.allow_local_binding,
++            &namespace_for_payload(payload)?,
+         )?;
+     }
+     Ok(())
+ }
+ 
+ fn run_read_acl_only(payload: &Payload, log: &mut dyn Write) -> Result<()> {
+-    let _read_acl_guard = match acquire_read_acl_mutex()? {
++    let namespace = namespace_for_payload(payload)?;
++    let group_sid =
++        string_from_sid_bytes(&resolve_sid(&namespace.key.group())?).map_err(anyhow::Error::msg)?;
++    let _read_acl_guard = match acquire_read_acl_mutex(
++        &namespace.key.read_acl_mutex(),
++        &namespace.owner_sid,
++        &group_sid,
++    )? {
+         Some(guard) => guard,
+         None => {
+             log_line(log, "read ACL helper already running; skipping")?;
+@@ -664,7 +686,7 @@
+         }
+     };
+     log_line(log, "read-acl-only mode: applying read ACLs")?;
+-    let sandbox_group_sid = resolve_sandbox_users_group_sid()?;
++    let sandbox_group_sid = resolve_sandbox_users_group_sid(&namespace_for_payload(payload)?)?;
+     let sandbox_group_psid = sid_bytes_to_psid(&sandbox_group_sid)?;
+     let mut refresh_errors: Vec<String> = Vec::new();
+     if !payload.read_roots.is_empty() {
+@@ -740,6 +762,7 @@
+         new_user_flags,
+         log,
+         payload.mode,
++        &namespace_for_payload(payload)?,
+     );
+     if let Err(err) = provision_result {
+         if extract_setup_failure(&err).is_some() {
+@@ -766,7 +789,8 @@
+     })?;
+     let offline_sid_str = string_from_sid_bytes(&offline_sid).map_err(anyhow::Error::msg)?;
+     configure_offline_sandbox_network(payload, &offline_sid_str, log)?;
+-    let wfp_result = install_wfp_filters(
++    let wfp_result = crate::wfp_setup::install_wfp_filters_for_namespace(
++        &namespace_for_payload(payload)?.key,
+         &payload.codex_home,
+         &payload.offline_username,
+         payload.otel.as_ref(),
+@@ -793,7 +817,8 @@
+     offline_sid_str: &str,
+     log: &mut dyn Write,
+ ) -> Result<()> {
+-    let proxy_allowlist_result = firewall::ensure_offline_proxy_allowlist(
++    let proxy_allowlist_result = firewall::ensure_offline_proxy_allowlist_for_namespace(
++        &namespace_for_payload(payload)?.key,
+         offline_sid_str,
+         &payload.proxy_ports,
+         payload.allow_local_binding,
+@@ -808,7 +833,11 @@
+             format!("ensure offline proxy allowlist failed: {err}"),
+         )));
+     }
+-    let firewall_result = firewall::ensure_offline_network_blocks(offline_sid_str, log);
++    let firewall_result = firewall::ensure_offline_network_blocks_for_namespace(
++        &namespace_for_payload(payload)?.key,
++        offline_sid_str,
++        log,
++    );
+     if let Err(err) = firewall_result {
+         if extract_setup_failure(&err).is_some() {
+             return Err(err);
+@@ -896,12 +925,13 @@
+ fn run_provision_only(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Result<()> {
+     provision_sandbox(payload, log, sbx_dir)?;
+ 
+-    let sandbox_group_sid = resolve_sandbox_users_group_sid().map_err(|err| {
+-        anyhow::Error::new(SetupFailure::new(
+-            SetupErrorCode::HelperSidResolveFailed,
+-            format!("resolve sandbox users group SID failed: {err}"),
+-        ))
+-    })?;
++    let sandbox_group_sid = resolve_sandbox_users_group_sid(&namespace_for_payload(payload)?)
++        .map_err(|err| {
++            anyhow::Error::new(SetupFailure::new(
++                SetupErrorCode::HelperSidResolveFailed,
++                format!("resolve sandbox users group SID failed: {err}"),
++            ))
++        })?;
+ 
+     lock_sandbox_bin_dir(payload, &sandbox_group_sid)?;
+     lock_persistent_sandbox_dirs(payload, &sandbox_group_sid)?;
+@@ -915,12 +945,13 @@
+         provision_sandbox(payload, log, sbx_dir)?;
+     }
+ 
+-    let sandbox_group_sid = resolve_sandbox_users_group_sid().map_err(|err| {
+-        anyhow::Error::new(SetupFailure::new(
+-            SetupErrorCode::HelperSidResolveFailed,
+-            format!("resolve sandbox users group SID failed: {err}"),
+-        ))
+-    })?;
++    let sandbox_group_sid = resolve_sandbox_users_group_sid(&namespace_for_payload(payload)?)
++        .map_err(|err| {
++            anyhow::Error::new(SetupFailure::new(
++                SetupErrorCode::HelperSidResolveFailed,
++                format!("resolve sandbox users group SID failed: {err}"),
++            ))
++        })?;
+     let sandbox_group_psid = sid_bytes_to_psid(&sandbox_group_sid).map_err(|err| {
+         anyhow::Error::new(SetupFailure::new(
+             SetupErrorCode::HelperSidResolveFailed,
+@@ -998,7 +1029,7 @@
+     if payload.read_roots.is_empty() {
+         log_line(log, "no read roots to grant; skipping read ACL helper")?;
+     } else {
+-        match read_acl_mutex_exists() {
++        match read_acl_mutex_exists(&namespace_for_payload(payload)?.key.read_acl_mutex()) {
+             Ok(true) => {
+                 log_line(log, "read ACL helper already running; skipping spawn")?;
+             }
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/firewall.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning/firewall.rs
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning/firewall.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning/firewall.rs
+@@ -93,6 +93,29 @@
+     allow_local_binding: bool,
+     log: &mut dyn Write,
+ ) -> Result<()> {
++    let namespace = crate::namespace::SandboxNamespace::from_environment()?;
++    namespace.require_owned_state()?;
++    ensure_offline_proxy_allowlist_for_namespace(
++        &namespace.key,
++        offline_sid,
++        proxy_ports,
++        allow_local_binding,
++        log,
++    )
++}
++pub fn ensure_offline_network_blocks(offline_sid: &str, log: &mut dyn Write) -> Result<()> {
++    let namespace = crate::namespace::SandboxNamespace::from_environment()?;
++    namespace.require_owned_state()?;
++    ensure_offline_network_blocks_for_namespace(&namespace.key, offline_sid, log)
++}
++
++pub fn ensure_offline_proxy_allowlist_for_namespace(
++    namespace: &crate::namespace_key::NamespaceKey,
++    offline_sid: &str,
++    proxy_ports: &[u16],
++    allow_local_binding: bool,
++    log: &mut dyn Write,
++) -> Result<()> {
+     let local_user_spec = format!("O:LSD:(A;;CC;;;{offline_sid})");
+ 
+     let _apartment = FirewallComApartment::initialize()?;
+@@ -117,13 +140,24 @@
+             if allow_local_binding {
+                 // Remove the legacy overlapping allow rule before returning to the local-binding
+                 // mode so stale proxy exceptions do not linger.
+-                remove_rule_if_present(&rules, OFFLINE_PROXY_ALLOW_RULE_NAME, log)?;
+-                remove_rule_if_present(&rules, OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME, log)?;
+-                remove_rule_if_present(&rules, OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME, log)?;
++                remove_rule_if_present(namespace, &rules, OFFLINE_PROXY_ALLOW_RULE_NAME, log)?;
++                remove_rule_if_present(
++                    namespace,
++                    &rules,
++                    OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME,
++                    log,
++                )?;
++                remove_rule_if_present(
++                    namespace,
++                    &rules,
++                    OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME,
++                    log,
++                )?;
+                 return Ok(());
+             }
+ 
+             ensure_block_rule(
++                namespace,
+                 &rules,
+                 &BlockRuleSpec {
+                     internal_name: OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME,
+@@ -141,6 +175,7 @@
+             // Install a broad TCP loopback block before narrowing it to the allowed proxy port
+             // complement. If the narrowing update fails, the sandbox remains fail-closed.
+             ensure_block_rule(
++                namespace,
+                 &rules,
+                 &BlockRuleSpec {
+                     internal_name: OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME,
+@@ -157,10 +192,11 @@
+ 
+             // Remove the legacy overlapping allow rule only after the explicit block rules are in
+             // place so transitions back to proxy-only mode do not fail open.
+-            remove_rule_if_present(&rules, OFFLINE_PROXY_ALLOW_RULE_NAME, log)?;
++            remove_rule_if_present(namespace, &rules, OFFLINE_PROXY_ALLOW_RULE_NAME, log)?;
+ 
+             if let Some(blocked_remote_ports) = blocked_loopback_tcp_remote_ports(proxy_ports) {
+                 ensure_block_rule(
++                    namespace,
+                     &rules,
+                     &BlockRuleSpec {
+                         internal_name: OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME,
+@@ -180,7 +216,11 @@
+     }
+ }
+ 
+-pub fn ensure_offline_network_blocks(offline_sid: &str, log: &mut dyn Write) -> Result<()> {
++pub fn ensure_offline_network_blocks_for_namespace(
++    namespace: &crate::namespace_key::NamespaceKey,
++    offline_sid: &str,
++    log: &mut dyn Write,
++) -> Result<()> {
+     let local_user_spec = format!("O:LSD:(A;;CC;;;{offline_sid})");
+ 
+     let _apartment = FirewallComApartment::initialize()?;
+@@ -204,6 +244,7 @@
+ 
+             // Block all outbound IP protocols for this user.
+             ensure_block_rule(
++                namespace,
+                 &rules,
+                 &BlockRuleSpec {
+                     internal_name: OFFLINE_BLOCK_RULE_NAME,
+@@ -218,6 +259,7 @@
+                 log,
+             )?;
+             ensure_block_rule(
++                namespace,
+                 &rules,
+                 &BlockRuleSpec {
+                     internal_name: OFFLINE_BLOCK_INBOUND_RULE_NAME,
+@@ -237,11 +279,12 @@
+ }
+ 
+ fn remove_rule_if_present(
++    namespace: &crate::namespace_key::NamespaceKey,
+     rules: &INetFwRules,
+     internal_name: &str,
+     log: &mut dyn Write,
+ ) -> Result<()> {
+-    let name = BSTR::from(internal_name);
++    let name = BSTR::from(namespace.firewall(internal_name));
+     if unsafe { rules.Item(&name) }.is_ok() {
+         unsafe { rules.Remove(&name) }.map_err(|err| {
+             anyhow::Error::new(SetupFailure::new(
+@@ -301,11 +344,12 @@
+ }
+ 
+ fn ensure_block_rule(
++    namespace: &crate::namespace_key::NamespaceKey,
+     rules: &INetFwRules,
+     spec: &BlockRuleSpec<'_>,
+     log: &mut dyn Write,
+ ) -> Result<()> {
+-    let name = BSTR::from(spec.internal_name);
++    let name = BSTR::from(namespace.firewall(spec.internal_name));
+     let rule: INetFwRule3 = match unsafe { rules.Item(&name) } {
+         Ok(existing) => existing.cast().map_err(|err| {
+             anyhow::Error::new(SetupFailure::new(
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/read_acl_mutex.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning/read_acl_mutex.rs
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning/read_acl_mutex.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning/read_acl_mutex.rs
+@@ -6,12 +6,13 @@
+ use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
+ use windows_sys::Win32::Foundation::GetLastError;
+ use windows_sys::Win32::Foundation::HANDLE;
++use windows_sys::Win32::Foundation::{HLOCAL, LocalFree};
++use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
++use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+ use windows_sys::Win32::System::Threading::CreateMutexW;
+ use windows_sys::Win32::System::Threading::MUTEX_ALL_ACCESS;
+ use windows_sys::Win32::System::Threading::OpenMutexW;
+ use windows_sys::Win32::System::Threading::ReleaseMutex;
+-
+-const READ_ACL_MUTEX_NAME: &str = "Local\\CodexSandboxReadAcl";
+ 
+ pub(super) struct ReadAclMutexGuard {
+     handle: HANDLE,
+@@ -26,8 +27,8 @@
+     }
+ }
+ 
+-pub(super) fn read_acl_mutex_exists() -> Result<bool> {
+-    let name = to_wide(OsStr::new(READ_ACL_MUTEX_NAME));
++pub(super) fn read_acl_mutex_exists(mutex_name: &str) -> Result<bool> {
++    let name = to_wide(OsStr::new(mutex_name));
+     let handle = unsafe { OpenMutexW(MUTEX_ALL_ACCESS, 0, name.as_ptr()) };
+     if handle.is_null() {
+         let err = unsafe { GetLastError() };
+@@ -42,16 +43,60 @@
+     Ok(true)
+ }
+ 
+-pub(super) fn acquire_read_acl_mutex() -> Result<Option<ReadAclMutexGuard>> {
+-    let name = to_wide(OsStr::new(READ_ACL_MUTEX_NAME));
+-    let handle = unsafe { CreateMutexW(std::ptr::null_mut(), 1, name.as_ptr()) };
++struct MutexSecurity(*mut std::ffi::c_void);
++impl Drop for MutexSecurity {
++    fn drop(&mut self) {
++        unsafe {
++            LocalFree(self.0 as HLOCAL);
++        }
++    }
++}
++fn read_acl_mutex_security(owner_sid: &str, sandbox_group_sid: &str) -> Result<MutexSecurity> {
++    // Validate both identities before interpolation. These come from the validated
++    // namespace and local SAM lookup, never directly from caller-controlled strings.
++    let _owner = crate::token::LocalSid::from_string(owner_sid)?;
++    let _group = crate::token::LocalSid::from_string(sandbox_group_sid)?;
++    let descriptor_text = to_wide(OsStr::new(&format!(
++        "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{owner_sid})(A;;RC;;;{sandbox_group_sid})"
++    )));
++    let mut descriptor = std::ptr::null_mut();
++    if unsafe {
++        ConvertStringSecurityDescriptorToSecurityDescriptorW(
++            descriptor_text.as_ptr(),
++            1,
++            &mut descriptor,
++            std::ptr::null_mut(),
++        )
++    } == 0
++    {
++        anyhow::bail!("create read-ACL mutex security failed: {}", unsafe {
++            GetLastError()
++        });
++    }
++    Ok(MutexSecurity(descriptor))
++}
++
++pub(super) fn acquire_read_acl_mutex(
++    mutex_name: &str,
++    owner_sid: &str,
++    sandbox_group_sid: &str,
++) -> Result<Option<ReadAclMutexGuard>> {
++    let descriptor = read_acl_mutex_security(owner_sid, sandbox_group_sid)?;
++    let security = SECURITY_ATTRIBUTES {
++        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
++        lpSecurityDescriptor: descriptor.0,
++        bInheritHandle: 0,
++    };
++    let name = to_wide(OsStr::new(mutex_name));
++    // Set the namespace's query-only grant atomically at object creation. An existing
++    // object's DACL is never rewritten: that branch still means an active helper.
++    let handle = unsafe { CreateMutexW(&security, 1, name.as_ptr()) };
++    let create_error = unsafe { GetLastError() };
++    drop(descriptor);
+     if handle.is_null() {
+-        return Err(anyhow::anyhow!("CreateMutexW failed: {}", unsafe {
+-            GetLastError()
+-        }));
++        return Err(anyhow::anyhow!("CreateMutexW failed: {create_error}"));
+     }
+-    let err = unsafe { GetLastError() };
+-    if err == ERROR_ALREADY_EXISTS {
++    if create_error == ERROR_ALREADY_EXISTS {
+         unsafe {
+             CloseHandle(handle);
+         }
+@@ -59,3 +104,49 @@
+     }
+     Ok(Some(ReadAclMutexGuard { handle }))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use windows_sys::Win32::Security::{
++        ACCESS_ALLOWED_ACE, ACL, EqualSid, GetAce, GetSecurityDescriptorDacl,
++    };
++    use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
++    #[test]
++    fn read_acl_mutex_security_grants_group_query_only_and_preserves_owner() {
++        let owner = crate::token::LocalSid::from_string("S-1-5-21-1-2-3-1001").unwrap();
++        let group = crate::token::LocalSid::from_string("S-1-5-21-1-2-3-1002").unwrap();
++        let descriptor =
++            read_acl_mutex_security("S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1002").unwrap();
++        let mut present = 0;
++        let mut defaulted = 0;
++        let mut acl: *mut ACL = std::ptr::null_mut();
++        assert_ne!(
++            unsafe {
++                GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut acl, &mut defaulted)
++            },
++            0
++        );
++        assert_eq!(present, 1);
++        assert!(!acl.is_null());
++        let mut owner_masks = Vec::new();
++        let mut group_masks = Vec::new();
++        for index in 0..unsafe { (*acl).AceCount } {
++            let mut entry = std::ptr::null_mut();
++            assert_ne!(unsafe { GetAce(acl, u32::from(index), &mut entry) }, 0);
++            let entry = unsafe { &*(entry as *const ACCESS_ALLOWED_ACE) };
++            assert_eq!(entry.Header.AceType, 0);
++            assert_eq!(entry.Header.AceFlags, 0);
++            let sid = &entry.SidStart as *const u32 as *mut std::ffi::c_void;
++            if unsafe { EqualSid(sid, group.as_ptr()) } != 0 {
++                group_masks.push(entry.Mask);
++            }
++            if unsafe { EqualSid(sid, owner.as_ptr()) } != 0 {
++                owner_masks.push(entry.Mask);
++            }
++        }
++        assert_eq!(group_masks, [READ_CONTROL]);
++        assert_eq!(owner_masks, [0x1000_0000]);
++        assert_eq!(unsafe { (*acl).AceCount }, 4);
++    }
++}
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/sandbox_users.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning/sandbox_users.rs
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning/sandbox_users.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning/sandbox_users.rs
+@@ -38,12 +38,10 @@
+ use windows_sys::Win32::Storage::FileSystem::CreateFileW;
+ use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
+ 
+-use crate::SANDBOX_USERS_GROUP;
+ use crate::SETUP_VERSION;
+ use crate::SetupErrorCode;
+ use crate::SetupFailure;
+ use crate::dpapi_protect;
+-use crate::ensure_sandbox_users_group;
+ use crate::resolve_sid;
+ use crate::sandbox_dir;
+ use crate::sandbox_secrets_dir;
+@@ -59,8 +57,10 @@
+ 
+ const SID_USERS: &str = "S-1-5-32-545";
+ 
+-pub fn resolve_sandbox_users_group_sid() -> Result<Vec<u8>> {
+-    resolve_sid(SANDBOX_USERS_GROUP)
++pub fn resolve_sandbox_users_group_sid(
++    namespace: &crate::namespace::SandboxNamespace,
++) -> Result<Vec<u8>> {
++    resolve_sid(&namespace.key.group())
+ }
+ 
+ pub(super) fn provision_sandbox_users(
+@@ -70,9 +70,13 @@
+     new_user_flags: u32,
+     log: &mut dyn Write,
+     mode: SetupMode,
++    namespace: &crate::namespace::SandboxNamespace,
+ ) -> Result<()> {
+-    if let Err(err) = ensure_sandbox_users_group() {
+-        let message = format!("failed to create local group {SANDBOX_USERS_GROUP}: {err}");
++    namespace.validate_names(offline_username, online_username)?;
++    namespace.require_owned_state()?;
++    let group_name = namespace.key.group();
++    if let Err(err) = crate::winutil::ensure_named_sandbox_users_group(&group_name) {
++        let message = format!("failed to create local group {group_name}: {err}");
+         super::log_line(log, &message)?;
+         return Err(anyhow::Error::new(SetupFailure::new(
+             SetupErrorCode::HelperUsersGroupCreateFailed,
+@@ -85,8 +89,20 @@
+     )?;
+     let offline_password = random_password();
+     let online_password = random_password();
+-    ensure_sandbox_user(offline_username, &offline_password, new_user_flags, log)?;
+-    ensure_sandbox_user(online_username, &online_password, new_user_flags, log)?;
++    ensure_sandbox_user(
++        offline_username,
++        &offline_password,
++        new_user_flags,
++        &group_name,
++        log,
++    )?;
++    ensure_sandbox_user(
++        online_username,
++        &online_password,
++        new_user_flags,
++        &group_name,
++        log,
++    )?;
+     write_secrets(
+         codex_home,
+         offline_username,
+@@ -94,6 +110,7 @@
+         online_username,
+         &online_password,
+         mode,
++        namespace,
+     )?;
+     Ok(())
+ }
+@@ -102,10 +119,11 @@
+     username: &str,
+     password: &str,
+     new_user_flags: u32,
++    group_name: &str,
+     log: &mut dyn Write,
+ ) -> Result<()> {
+     ensure_local_user(username, password, new_user_flags, log)?;
+-    ensure_local_group_member(SANDBOX_USERS_GROUP, username)?;
++    ensure_local_group_member(group_name, username)?;
+     Ok(())
+ }
+ 
+@@ -294,6 +312,7 @@
+ 
+ #[derive(Serialize)]
+ struct SandboxUsersFile {
++    namespace: String,
+     version: u32,
+     offline: SandboxUserRecord,
+     online: SandboxUserRecord,
+@@ -301,6 +320,7 @@
+ 
+ #[derive(Serialize)]
+ struct SetupMarker {
++    namespace: String,
+     version: u32,
+     offline_username: String,
+     online_username: String,
+@@ -318,6 +338,7 @@
+     online_user: &str,
+     online_pwd: &str,
+     mode: SetupMode,
++    namespace: &crate::namespace::SandboxNamespace,
+ ) -> Result<()> {
+     let secrets_dir = sandbox_secrets_dir(codex_home);
+     std::fs::create_dir_all(&secrets_dir).map_err(|err| {
+@@ -342,6 +363,7 @@
+         ))
+     })?;
+     let users = SandboxUsersFile {
++        namespace: namespace.key.id(),
+         version: SETUP_VERSION,
+         offline: SandboxUserRecord {
+             username: offline_user.to_string(),
+@@ -483,8 +505,11 @@
+     online_user: &str,
+     proxy_ports: &[u16],
+     allow_local_binding: bool,
++    namespace: &crate::namespace::SandboxNamespace,
+ ) -> Result<()> {
++    namespace.validate_names(offline_user, online_user)?;
+     let marker = SetupMarker {
++        namespace: namespace.key.id(),
+         version: SETUP_VERSION,
+         offline_username: offline_user.to_string(),
+         online_username: online_user.to_string(),
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/service.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning/service.rs
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning/service.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning/service.rs
+@@ -20,31 +20,6 @@
+     settings: crate::WindowsSandboxProvisioningSettings,
+     runtime: SetupRuntime,
+ ) -> Result<()> {
+-    let payload = Payload {
+-        version: SETUP_VERSION,
+-        offline_username: crate::setup::OFFLINE_USERNAME.to_string(),
+-        online_username: crate::setup::ONLINE_USERNAME.to_string(),
+-        codex_home: codex_home.to_path_buf(),
+-        command_cwd: codex_home.to_path_buf(),
+-        read_roots: Vec::new(),
+-        write_roots: Vec::new(),
+-        deny_read_paths: Vec::new(),
+-        deny_write_paths: Vec::new(),
+-        proxy_ports: settings.proxy_ports,
+-        allow_local_binding: settings.allow_local_binding,
+-        otel: codex_otel::global_statsig_metrics_settings(),
+-        real_user: real_user.to_string(),
+-        user_profile: None,
+-        mode: SetupMode::ProvisionOnly,
+-        runtime,
+-        refresh_only: false,
+-    };
+-    run_payload(&payload)?;
+-    if let Err(err) = crate::setup_error::clear_setup_error_report(codex_home) {
+-        log_note(
+-            &format!("setup orchestrator: failed to clear setup_error.json after success: {err}"),
+-            Some(&sandbox_dir(codex_home)),
+-        );
+-    }
+-    Ok(())
++    let _ = (codex_home, real_user, settings, runtime);
++    anyhow::bail!("home-isolated runtime requires its native Legacy setup helper")
+ }
+diff --git a/codex-rs/windows-sandbox-rs/src/uninstall_windows.rs b/codex-rs/windows-sandbox-rs/src/uninstall_windows.rs
+--- a/codex-rs/windows-sandbox-rs/src/uninstall_windows.rs
++++ b/codex-rs/windows-sandbox-rs/src/uninstall_windows.rs
+@@ -9,9 +9,6 @@
+ use windows::Win32::System::Com::COINIT_MULTITHREADED;
+ use windows::Win32::System::Com::CoInitializeEx;
+ use windows::Win32::System::Com::CoUninitialize;
+-
+-use crate::setup::OFFLINE_USERNAME;
+-use crate::setup::ONLINE_USERNAME;
+ 
+ mod firewall;
+ mod principals;
+@@ -25,8 +22,8 @@
+         "sandbox cleanup requires administrator privileges"
+     );
+     let _setup_lock = crate::setup_mutex::acquire_sandbox_setup_lock(/*timeout_ms*/ 5_000)?;
+-    // Retire the previous owner so future setup can use a different user or home.
+-    crate::runtime_ownership::remove_installation()?;
++    // Private cleanup never retires the stock service installation owner.
++    crate::namespace::SandboxNamespace::from_environment()?.require_owned_state()?;
+     unsafe {
+         CoInitializeEx(/*pvreserved*/ None, COINIT_MULTITHREADED).ok()?
+     };
+@@ -63,6 +60,7 @@
+ /// remove protections, or undo work performed between the two phases.
+ #[must_use = "finish cleanup or leave the sandbox accounts disabled with their protections intact"]
+ pub struct PreparedWindowsSandboxCleanup {
++    namespace: crate::namespace::SandboxNamespace,
+     _setup_lock: crate::setup_mutex::SandboxSetupLock,
+     users: principals::DisabledSandboxUsers,
+     _retained_logons: retained_logons::RetainedLogons,
+@@ -86,7 +84,9 @@
+ ) -> Result<PreparedWindowsSandboxCleanup> {
+     let setup_lock = crate::setup_mutex::acquire_sandbox_setup_lock(/*timeout_ms*/ 5_000)?;
+     let mut errors = Vec::new();
+-    let mut users = principals::DisabledSandboxUsers::default();
++    let namespace = crate::namespace::SandboxNamespace::from_environment()?;
++    namespace.require_owned_state()?;
++    let mut users = principals::DisabledSandboxUsers::for_namespace(&namespace);
+     let mut retained = retained_logons::RetainedLogons::default();
+     if let Err(error) = users.disable().and_then(|()| {
+         retained = retained_logons::RetainedLogons::capture(tokens, &users)?;
+@@ -101,6 +101,7 @@
+     }
+ 
+     Ok(PreparedWindowsSandboxCleanup {
++        namespace,
+         _setup_lock: setup_lock,
+         users,
+         _retained_logons: retained,
+@@ -121,6 +122,12 @@
+         report: impl Fn(&str),
+         clean_up_desktop: impl FnOnce() -> Result<()>,
+     ) -> Result<()> {
++        if let Some(home) = codex_home {
++            anyhow::ensure!(
++                dunce::canonicalize(home)? == self.namespace.home,
++                "cleanup home differs from prepared namespace"
++            );
++        }
+         self.users.validate_current()?;
+         let mut errors = Vec::new();
+ 
+@@ -157,11 +164,20 @@
+         }
+ 
+         for (operation, result) in [
+-            ("remove WFP filters", crate::wfp::remove_wfp_filters()),
+-            ("remove firewall rules", firewall::cleanup_firewall_rules()),
++            (
++                "remove WFP filters",
++                crate::wfp::remove_namespaced_wfp_filters(&self.namespace.key),
++            ),
++            (
++                "remove firewall rules",
++                firewall::cleanup_firewall_rules(&self.namespace.key),
++            ),
+             (
+                 "remove hidden-user entries",
+-                crate::hide_users::unhide_sandbox_users(&[OFFLINE_USERNAME, ONLINE_USERNAME]),
++                crate::hide_users::unhide_sandbox_users(&[
++                    self.namespace.key.offline().as_str(),
++                    self.namespace.key.online().as_str(),
++                ]),
+             ),
+         ] {
+             match result {
+@@ -184,7 +200,7 @@
+                 .sids()
+                 .any(|sid| self._retained_logons.contains_sid(sid))
+         {
+-            match principals::remove_sandbox_principal("CodexSandboxUsers") {
++            match principals::remove_sandbox_principal(&self.namespace.key.group()) {
+                 Ok(()) => report("remove sandbox group: completed"),
+                 Err(error) => {
+                     report(&format!("remove sandbox group: failed, {error:#}"));
+diff --git a/codex-rs/windows-sandbox-rs/src/uninstall_windows/firewall.rs b/codex-rs/windows-sandbox-rs/src/uninstall_windows/firewall.rs
+--- a/codex-rs/windows-sandbox-rs/src/uninstall_windows/firewall.rs
++++ b/codex-rs/windows-sandbox-rs/src/uninstall_windows/firewall.rs
+@@ -9,7 +9,7 @@
+ use windows::Win32::System::Com::CoCreateInstance;
+ use windows::core::BSTR;
+ 
+-pub(super) fn cleanup_firewall_rules() -> Result<()> {
++pub(super) fn cleanup_firewall_rules(namespace: &crate::namespace_key::NamespaceKey) -> Result<()> {
+     let policy: INetFwPolicy2 = unsafe {
+         CoCreateInstance(&NetFwPolicy2, /*punkouter*/ None, CLSCTX_INPROC_SERVER)
+             .context("access firewall policy for sandbox uninstall")?
+@@ -23,7 +23,7 @@
+         "codex_sandbox_offline_block_loopback_udp",
+         "codex_sandbox_offline_allow_loopback_proxy",
+     ] {
+-        if let Err(error) = unsafe { rules.Remove(&BSTR::from(name)) } {
++        if let Err(error) = unsafe { rules.Remove(&BSTR::from(namespace.firewall(name))) } {
+             errors.push(format!("remove sandbox firewall rule {name}: {error}"));
+         }
+     }
+diff --git a/codex-rs/windows-sandbox-rs/src/uninstall_windows/principals.rs b/codex-rs/windows-sandbox-rs/src/uninstall_windows/principals.rs
+--- a/codex-rs/windows-sandbox-rs/src/uninstall_windows/principals.rs
++++ b/codex-rs/windows-sandbox-rs/src/uninstall_windows/principals.rs
+@@ -12,8 +12,6 @@
+ use windows_sys::Win32::System::Registry as registry;
+ use windows_sys::Win32::UI::Shell::DeleteProfileW;
+ 
+-use crate::setup::OFFLINE_USERNAME;
+-use crate::setup::ONLINE_USERNAME;
+ use crate::winutil::local_user_flags;
+ use crate::winutil::resolve_sid;
+ use crate::winutil::set_local_user_flags;
+@@ -25,24 +23,31 @@
+ #[derive(Default)]
+ pub(super) struct DisabledSandboxUsers {
+     users: Vec<SandboxUser>,
++    names: Vec<String>,
+ }
+ 
+ struct SandboxUser {
+-    name: &'static str,
++    name: String,
+     original_flags: u32,
+     sid: Vec<u8>,
+ }
+ 
+ impl DisabledSandboxUsers {
++    pub(super) fn for_namespace(namespace: &crate::namespace::SandboxNamespace) -> Self {
++        Self {
++            users: Vec::new(),
++            names: vec![namespace.key.offline(), namespace.key.online()],
++        }
++    }
+     pub(super) fn disable(&mut self) -> Result<()> {
+-        for name in [OFFLINE_USERNAME, ONLINE_USERNAME] {
++        for name in &self.names {
+             let Some(original_flags) = local_user_flags(name)? else {
+                 continue;
+             };
+             let sid = resolve_sid(name)?;
+ 
+             self.users.push(SandboxUser {
+-                name,
++                name: name.clone(),
+                 original_flags,
+                 sid,
+             });
+@@ -56,11 +61,11 @@
+     }
+ 
+     pub(super) fn validate_current(&self) -> Result<()> {
+-        for name in [OFFLINE_USERNAME, ONLINE_USERNAME] {
++        for name in &self.names {
+             let Some(flags) = local_user_flags(name)? else {
+                 continue;
+             };
+-            let captured = self.users.iter().find(|user| user.name == name);
++            let captured = self.users.iter().find(|user| &user.name == name);
+             ensure!(
+                 captured.is_some_and(|user| resolve_sid(name).is_ok_and(|sid| sid == user.sid))
+                     && flags & network::UF_ACCOUNTDISABLE != 0,
+@@ -73,7 +78,7 @@
+     pub(super) fn restore(&self) -> Result<()> {
+         let mut errors = Vec::new();
+         for user in &self.users {
+-            if let Err(error) = set_local_user_flags(user.name, user.original_flags)
++            if let Err(error) = set_local_user_flags(&user.name, user.original_flags)
+                 && error
+                     .downcast_ref::<std::io::Error>()
+                     .and_then(std::io::Error::raw_os_error)
+@@ -158,8 +163,9 @@
+     // In-memory admission fixture only; this does not resolve or change a local account.
+     pub(super) fn for_token_test(sid: Vec<u8>) -> Self {
+         Self {
++            names: vec!["CdxTestf".to_string()],
+             users: vec![SandboxUser {
+-                name: OFFLINE_USERNAME,
++                name: "CdxTestf".to_string(),
+                 original_flags: network::UF_ACCOUNTDISABLE,
+                 sid,
+             }],
+@@ -169,7 +175,7 @@
+ 
+ pub(super) fn remove_sandbox_principal(name: &str) -> Result<()> {
+     let name_wide = to_wide(name);
+-    let status = if name == "CodexSandboxUsers" {
++    let status = if crate::namespace_key::NamespaceKey::from_group_name(name).is_some() {
+         unsafe { network::NetLocalGroupDel(null(), name_wide.as_ptr()) }
+     } else {
+         unsafe { network::NetUserDel(null(), name_wide.as_ptr()) }
+diff --git a/codex-rs/windows-sandbox-rs/src/uninstall_windows/principals_tests.rs b/codex-rs/windows-sandbox-rs/src/uninstall_windows/principals_tests.rs
+--- a/codex-rs/windows-sandbox-rs/src/uninstall_windows/principals_tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/uninstall_windows/principals_tests.rs
+@@ -81,7 +81,7 @@
+     fn drop(&mut self) {
+         let _ = self.stop();
+         let result = if self.user.sid.is_empty() {
+-            super::remove_sandbox_principal(self.user.name)
++            super::remove_sandbox_principal(&self.user.name)
+         } else {
+             self.user.remove()
+         };
+@@ -127,7 +127,7 @@
+     );
+     let mut fixture = ProfileFixture {
+         user: SandboxUser {
+-            name,
++            name: name.to_string(),
+             original_flags: user_info.usri1_flags,
+             sid: Vec::new(),
+         },
+diff --git a/codex-rs/windows-sandbox-rs/src/wfp.rs b/codex-rs/windows-sandbox-rs/src/wfp.rs
+--- a/codex-rs/windows-sandbox-rs/src/wfp.rs
++++ b/codex-rs/windows-sandbox-rs/src/wfp.rs
+@@ -81,17 +81,36 @@
+ /// This is intended to run from the already-elevated setup helper. Callers
+ /// may continue ordinary setup after an error, but must restore these filters
+ /// before re-enabling accounts left disabled by interrupted cleanup.
+-pub fn install_wfp_filters_for_account(account: &str) -> Result<usize> {
++pub fn install_wfp_filters_for_account(_account: &str) -> Result<usize> {
++    anyhow::bail!("home-isolated WFP setup requires an explicit validated namespace")
++}
++
++fn namespaced_guid(namespace: &crate::namespace_key::NamespaceKey, key: GUID) -> GUID {
++    let original = ((key.data1 as u128) << 96)
++        | ((key.data2 as u128) << 80)
++        | ((key.data3 as u128) << 64)
++        | (u64::from_be_bytes(key.data4) as u128);
++    GUID::from_u128(namespace.guid(original))
++}
++
++pub(crate) fn install_namespaced_wfp_filters_for_account(
++    namespace: &crate::namespace_key::NamespaceKey,
++    account: &str,
++) -> Result<usize> {
++    anyhow::ensure!(
++        account == namespace.offline(),
++        "WFP account does not match namespace"
++    );
+     let engine = Engine::open(INFINITE)?;
+     let mut transaction = engine.begin_transaction()?;
+-    ensure_provider(engine.handle)?;
+-    ensure_sublayer(engine.handle)?;
++    ensure_provider(engine.handle, namespace)?;
++    ensure_sublayer(engine.handle, namespace)?;
+ 
+     let user_condition = UserMatchCondition::for_account(account)?;
+     let mut installed_filter_count = 0;
+     for spec in FILTER_SPECS {
+-        delete_filter_if_present(engine.handle, &spec.key)?;
+-        add_filter(engine.handle, spec, &user_condition)?;
++        delete_filter_if_present(engine.handle, &namespaced_guid(namespace, spec.key))?;
++        add_filter(engine.handle, namespace, spec, &user_condition)?;
+         installed_filter_count += 1;
+     }
+ 
+@@ -99,21 +118,27 @@
+     Ok(installed_filter_count)
+ }
+ 
+-pub(crate) fn remove_wfp_filters() -> Result<()> {
++pub(crate) fn remove_namespaced_wfp_filters(
++    namespace: &crate::namespace_key::NamespaceKey,
++) -> Result<()> {
+     // Leave time for other cleanup if a WFP policy writer holds the transaction lock.
+     let engine = Engine::open(/*transaction_wait_timeout_ms*/ 1_000)?;
+     let mut transaction = engine.begin_transaction()?;
+     for spec in FILTER_SPECS {
+-        delete_filter_if_present(engine.handle, &spec.key)?;
++        delete_filter_if_present(engine.handle, &namespaced_guid(namespace, spec.key))?;
+     }
+     for (result, operation, missing) in [
+         (
+-            unsafe { FwpmSubLayerDeleteByKey0(engine.handle, &SUBLAYER_KEY) },
++            unsafe {
++                FwpmSubLayerDeleteByKey0(engine.handle, &namespaced_guid(namespace, SUBLAYER_KEY))
++            },
+             "FwpmSubLayerDeleteByKey0",
+             FWP_E_SUBLAYER_NOT_FOUND as u32,
+         ),
+         (
+-            unsafe { FwpmProviderDeleteByKey0(engine.handle, &PROVIDER_KEY) },
++            unsafe {
++                FwpmProviderDeleteByKey0(engine.handle, &namespaced_guid(namespace, PROVIDER_KEY))
++            },
+             "FwpmProviderDeleteByKey0",
+             FWP_E_PROVIDER_NOT_FOUND as u32,
+         ),
+@@ -253,11 +278,11 @@
+ }
+ 
+ /// Ensures the persistent Codex WFP provider exists.
+-fn ensure_provider(engine: HANDLE) -> Result<()> {
++fn ensure_provider(engine: HANDLE, namespace: &crate::namespace_key::NamespaceKey) -> Result<()> {
+     let provider_name = to_wide(OsStr::new(PROVIDER_NAME));
+     let provider_description = to_wide(OsStr::new(PROVIDER_DESCRIPTION));
+     let provider = FWPM_PROVIDER0 {
+-        providerKey: PROVIDER_KEY,
++        providerKey: namespaced_guid(namespace, PROVIDER_KEY),
+         displayData: FWPM_DISPLAY_DATA0 {
+             name: provider_name.as_ptr() as *mut _,
+             description: provider_description.as_ptr() as *mut _,
+@@ -272,12 +297,12 @@
+ }
+ 
+ /// Ensures the persistent Codex sublayer exists under the Codex provider.
+-fn ensure_sublayer(engine: HANDLE) -> Result<()> {
++fn ensure_sublayer(engine: HANDLE, namespace: &crate::namespace_key::NamespaceKey) -> Result<()> {
+     let sublayer_name = to_wide(OsStr::new(SUBLAYER_NAME));
+     let sublayer_description = to_wide(OsStr::new(SUBLAYER_DESCRIPTION));
+-    let provider_key = PROVIDER_KEY;
++    let provider_key = namespaced_guid(namespace, PROVIDER_KEY);
+     let sublayer = FWPM_SUBLAYER0 {
+-        subLayerKey: SUBLAYER_KEY,
++        subLayerKey: namespaced_guid(namespace, SUBLAYER_KEY),
+         displayData: FWPM_DISPLAY_DATA0 {
+             name: sublayer_name.as_ptr() as *mut _,
+             description: sublayer_description.as_ptr() as *mut _,
+@@ -295,15 +320,16 @@
+ /// Adds one blocking WFP filter from the static filter spec list.
+ fn add_filter(
+     engine: HANDLE,
++    namespace: &crate::namespace_key::NamespaceKey,
+     spec: &FilterSpec,
+     user_condition: &UserMatchCondition,
+ ) -> Result<()> {
+     let filter_name = to_wide(OsStr::new(spec.name));
+     let filter_description = to_wide(OsStr::new(spec.description));
+     let mut filter_conditions = build_conditions(spec.conditions, user_condition);
+-    let provider_key = PROVIDER_KEY;
++    let provider_key = namespaced_guid(namespace, PROVIDER_KEY);
+     let filter = FWPM_FILTER0 {
+-        filterKey: spec.key,
++        filterKey: namespaced_guid(namespace, spec.key),
+         displayData: FWPM_DISPLAY_DATA0 {
+             name: filter_name.as_ptr() as *mut _,
+             description: filter_description.as_ptr() as *mut _,
+@@ -312,7 +338,7 @@
+         providerKey: &provider_key as *const _ as *mut _,
+         providerData: empty_blob(),
+         layerKey: spec.layer_key,
+-        subLayerKey: SUBLAYER_KEY,
++        subLayerKey: namespaced_guid(namespace, SUBLAYER_KEY),
+         weight: empty_value(),
+         numFilterConditions: filter_conditions.len() as u32,
+         filterCondition: filter_conditions.as_mut_ptr(),
+diff --git a/codex-rs/windows-sandbox-rs/src/wfp_setup.rs b/codex-rs/windows-sandbox-rs/src/wfp_setup.rs
+--- a/codex-rs/windows-sandbox-rs/src/wfp_setup.rs
++++ b/codex-rs/windows-sandbox-rs/src/wfp_setup.rs
+@@ -1,4 +1,3 @@
+-use crate::install_wfp_filters_for_account;
+ use crate::setup_error::sanitize_setup_metric_tag_value;
+ use anyhow::Result;
+ use codex_otel::OtelExporter;
+@@ -130,13 +129,28 @@
+     codex_home: &Path,
+     offline_username: &str,
+     otel: Option<&StatsigMetricsSettings>,
++    log: F,
++) -> Result<()>
++where
++    F: FnMut(&str),
++{
++    let namespace = crate::namespace::SandboxNamespace::current(codex_home)?;
++    namespace.require_owned_state()?;
++    install_wfp_filters_for_namespace(&namespace.key, codex_home, offline_username, otel, log)
++}
++
++pub(crate) fn install_wfp_filters_for_namespace<F>(
++    namespace: &crate::namespace_key::NamespaceKey,
++    codex_home: &Path,
++    offline_username: &str,
++    otel: Option<&StatsigMetricsSettings>,
+     mut log: F,
+ ) -> Result<()>
+ where
+     F: FnMut(&str),
+ {
+     let metric = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+-        install_wfp_filters_for_account(offline_username)
++        crate::wfp::install_namespaced_wfp_filters_for_account(namespace, offline_username)
+     })) {
+         Ok(Ok(installed_filter_count)) => {
+             log(&format!(
+diff --git a/codex-rs/windows-sandbox-rs/src/winutil.rs b/codex-rs/windows-sandbox-rs/src/winutil.rs
+--- a/codex-rs/windows-sandbox-rs/src/winutil.rs
++++ b/codex-rs/windows-sandbox-rs/src/winutil.rs
+@@ -221,10 +221,16 @@
+ }
+ 
+ pub fn ensure_sandbox_users_group() -> Result<Vec<u8>> {
++    let namespace = crate::namespace::SandboxNamespace::from_environment()?;
++    namespace.require_owned_state()?;
++    ensure_named_sandbox_users_group(&namespace.key.group())
++}
++
++pub(crate) fn ensure_named_sandbox_users_group(group_name: &str) -> Result<Vec<u8>> {
+     const ERROR_ALIAS_EXISTS: u32 = 1379;
+     const NERR_GROUP_EXISTS: u32 = 2223;
+ 
+-    let name = to_wide(SANDBOX_USERS_GROUP);
++    let name = to_wide(group_name);
+     let comment = to_wide(SANDBOX_USERS_GROUP_COMMENT);
+     let info = LOCALGROUP_INFO_1 {
+         lgrpi1_name: name.as_ptr() as *mut u16,
+@@ -241,11 +247,11 @@
+     };
+     if status != NERR_Success && status != ERROR_ALIAS_EXISTS && status != NERR_GROUP_EXISTS {
+         return Err(anyhow::anyhow!(
+-            "NetLocalGroupAdd failed for {SANDBOX_USERS_GROUP} code {status} parm_err={parameter_error}"
++            "NetLocalGroupAdd failed for {group_name} code {status} parm_err={parameter_error}"
+         ));
+     }
+ 
+-    resolve_sid(SANDBOX_USERS_GROUP)
++    resolve_sid(group_name)
+ }
+ 
+ pub fn resolve_sid(name: &str) -> Result<Vec<u8>> {
+diff --git a/codex-rs/windows-sandbox-rs/src/identity_integration_tests.rs b/codex-rs/windows-sandbox-rs/src/identity_integration_tests.rs
+--- a/codex-rs/windows-sandbox-rs/src/identity_integration_tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/identity_integration_tests.rs
+@@ -1,7 +1,8 @@
+ //! Exercises account preparation with real marker files and DPAPI credentials.
+-//! Setup and account lookup callbacks isolate machine state. This does not exercise
+-//! the public wrapper, native account queries, payload serialization, singleflight,
+-//! or helper launches.
++//! Setup and account-status callbacks prevent real provisioning. Temporary namespace
++//! reservations perform only read-only local account/group identity checks; all writes
++//! remain in fixture directories. This does not exercise helper launches, payload
++//! serialization, native singleflight, or the public wrapper.
+ 
+ use super::SandboxAccountCredentialMismatch;
+ use super::account_logon_error;
+@@ -12,8 +13,6 @@
+ use crate::WindowsSandboxProvisioningSettings;
+ use crate::WindowsSandboxProxySettingsMode;
+ use crate::resolved_permissions::ResolvedWindowsSandboxPermissions;
+-use crate::setup::OFFLINE_USERNAME;
+-use crate::setup::ONLINE_USERNAME;
+ use crate::setup::SETUP_VERSION;
+ use crate::setup::SandboxSetupRequest;
+ use crate::setup::SandboxUserRecord;
+@@ -35,6 +34,30 @@
+ use windows_sys::Win32::NetworkManagement::NetManagement::UF_NORMAL_ACCOUNT;
+ use windows_sys::Win32::NetworkManagement::NetManagement::UF_PASSWORD_EXPIRED;
+ 
++// Test-only metadata materialization. The reservation performs read-only SAM checks;
++// callbacks below replace provisioning and account mutation. It never creates users,
++// groups, firewall objects, helpers, or service registrations.
++fn fixture_namespace(home: &std::path::Path) -> Result<crate::namespace::SandboxNamespace> {
++    let namespace = crate::namespace::SandboxNamespace::current(home)?;
++    namespace.reserve_owner()?;
++    Ok(namespace)
++}
++
++fn write_fixture_metadata<T: serde::Serialize>(
++    path: &std::path::Path,
++    namespace: &crate::namespace::SandboxNamespace,
++    value: &T,
++) -> Result<()> {
++    let mut value = serde_json::to_value(value)?;
++    value
++        .as_object_mut()
++        .expect("native sandbox metadata is an object")
++        .insert("namespace".into(), namespace.key.id().into());
++    fs::create_dir_all(path.parent().expect("metadata parent"))?;
++    fs::write(path, serde_json::to_vec(&value)?)?;
++    Ok(())
++}
++
+ #[test]
+ fn only_native_bad_or_expired_passwords_trigger_credential_repair() -> Result<()> {
+     for code in [
+@@ -69,18 +92,19 @@
+     let permissions = ResolvedWindowsSandboxPermissions::try_from_permission_profile(
+         &PermissionProfile::read_only(),
+     )?;
+-    for (expired_username, repair_succeeds) in [
++    for (expired_account, repair_succeeds) in [
+         (None, true),
+-        (Some(OFFLINE_USERNAME), true),
+-        (Some(ONLINE_USERNAME), true),
+-        (Some(OFFLINE_USERNAME), false),
+-        (Some(ONLINE_USERNAME), false),
++        (Some(SandboxRuntimeAccount::Offline), true),
++        (Some(SandboxRuntimeAccount::Online), true),
++        (Some(SandboxRuntimeAccount::Offline), false),
++        (Some(SandboxRuntimeAccount::Online), false),
+     ] {
+         let home = tempfile::tempdir()?;
++        let namespace = fixture_namespace(home.path())?;
+         let marker = SetupMarker {
+             version: SETUP_VERSION,
+-            offline_username: OFFLINE_USERNAME.into(),
+-            online_username: ONLINE_USERNAME.into(),
++            offline_username: namespace.key.offline(),
++            online_username: namespace.key.online(),
+             created_at: None,
+             proxy_ports: vec![],
+             allow_local_binding: false,
+@@ -88,21 +112,20 @@
+         let mut users = SandboxUsersFile {
+             version: SETUP_VERSION,
+             offline: SandboxUserRecord {
+-                username: OFFLINE_USERNAME.into(),
++                username: namespace.key.offline(),
+                 password: BASE64.encode(crate::dpapi::protect(b"old-test-password")?),
+             },
+             online: SandboxUserRecord {
+-                username: ONLINE_USERNAME.into(),
++                username: namespace.key.online(),
+                 password: BASE64.encode(crate::dpapi::protect(b"old-test-password")?),
+             },
+         };
+-        for (path, bytes) in [
+-            (setup_marker_path(home.path()), serde_json::to_vec(&marker)?),
+-            (sandbox_users_path(home.path()), serde_json::to_vec(&users)?),
+-        ] {
+-            fs::create_dir_all(path.parent().unwrap())?;
+-            fs::write(path, bytes)?;
+-        }
++        write_fixture_metadata(&setup_marker_path(home.path()), &namespace, &marker)?;
++        write_fixture_metadata(&sandbox_users_path(home.path()), &namespace, &users)?;
++        let expired_username = expired_account.map(|account| match account {
++            SandboxRuntimeAccount::Offline => namespace.key.offline(),
++            SandboxRuntimeAccount::Online => namespace.key.online(),
++        });
+         let setups = Cell::new(/*value*/ 0);
+         let env = HashMap::new();
+         let result = require_sandbox_account_with_setup(
+@@ -121,12 +144,13 @@
+                 users.offline.password =
+                     BASE64.encode(crate::dpapi::protect(b"new-test-password")?);
+                 users.online.password = users.offline.password.clone();
+-                fs::write(sandbox_users_path(home.path()), serde_json::to_vec(&users)?)?;
++                write_fixture_metadata(&sandbox_users_path(home.path()), &namespace, &users)?;
+                 Ok(())
+             },
+             |username| {
+                 Ok(Some(
+-                    if expired_username == Some(username) && (setups.get() == 0 || !repair_succeeds)
++                    if expired_username.as_deref() == Some(username)
++                        && (setups.get() == 0 || !repair_succeeds)
+                     {
+                         UF_NORMAL_ACCOUNT | UF_PASSWORD_EXPIRED
+                     } else {
+@@ -144,7 +168,7 @@
+                 Err("Windows sandbox account password is still expired after setup".into())
+             } else {
+                 Ok((
+-                    OFFLINE_USERNAME.into(),
++                    namespace.key.offline(),
+                     if expired_username.is_some() {
+                         "new-test-password"
+                     } else {
+@@ -178,10 +202,11 @@
+     ] {
+         let full_setups = Cell::new(/*value*/ 0);
+         let home = tempfile::tempdir()?;
++        let namespace = fixture_namespace(home.path())?;
+         let marker = SetupMarker {
+             version: SETUP_VERSION,
+-            offline_username: "offline".into(),
+-            online_username: "online".into(),
++            offline_username: namespace.key.offline(),
++            online_username: namespace.key.online(),
+             created_at: None,
+             proxy_ports: vec![3128],
+             allow_local_binding: stored_binding,
+@@ -198,14 +223,8 @@
+                 ..user
+             },
+         };
+-        let marker_bytes = serde_json::to_vec(&marker)?;
+-        for (path, bytes) in [
+-            (setup_marker_path(home.path()), marker_bytes.clone()),
+-            (sandbox_users_path(home.path()), serde_json::to_vec(&users)?),
+-        ] {
+-            fs::create_dir_all(path.parent().unwrap())?;
+-            fs::write(path, bytes)?;
+-        }
++        write_fixture_metadata(&setup_marker_path(home.path()), &namespace, &marker)?;
++        write_fixture_metadata(&sandbox_users_path(home.path()), &namespace, &users)?;
+         let env = HashMap::from([
+             ("CODEX_WINDOWS_SANDBOX_PROXY_PORTS".into(), ports.into()),
+             (
+@@ -237,11 +256,12 @@
+                     let mut reconciled = marker.clone();
+                     reconciled.proxy_ports = desired.proxy_ports.clone();
+                     reconciled.allow_local_binding = desired.allow_local_binding;
+-                    fs::write(
+-                        setup_marker_path(home.path()),
+-                        serde_json::to_vec(&reconciled)?,
++                    write_fixture_metadata(
++                        &setup_marker_path(home.path()),
++                        &namespace,
++                        &reconciled,
+                     )?;
+-                    fs::write(sandbox_users_path(home.path()), serde_json::to_vec(&users)?)?;
++                    write_fixture_metadata(&sandbox_users_path(home.path()), &namespace, &users)?;
+                     account_flags.set(enabled);
+                     Ok(())
+                 },
+@@ -252,7 +272,7 @@
+             let (creds, _) = prepare()?;
+             assert_eq!(
+                 (creds.username, creds.password),
+-                ("offline".into(), "test-password".into())
++                (namespace.key.offline(), "test-password".into())
+             );
+         }
+         // The second command reuses reconciled settings, including when filtering removed the proxy.

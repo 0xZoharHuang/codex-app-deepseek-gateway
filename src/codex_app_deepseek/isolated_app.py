@@ -11,7 +11,7 @@ from pathlib import Path
 import psutil
 from .app_config import _atomic_write, _private
 
-BASELINE_SHA256 = "a67ef1480c1a526f56b4cd84e8a2e87c8fa26b3868aa4baf5a3fbf8586c53325"
+BASELINE_SHA256 = "725d53f2db45d33efbe4f5babe9b8a4479887c4d18434d6d9f6fd836dc5b9536"
 CONTROLLED = {"CODEX_HOME", "CODEX_CLI_PATH", "CODEX_ELECTRON_USER_DATA_PATH", "CODEX_APP_SERVER_FORCE_CLI"}
 REMOVED = {
     "OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENROUTER_API_KEY",
@@ -486,7 +486,13 @@ $signature=Get-AuthenticodeSignature -LiteralPath (Join-Path $p.InstallLocation 
     def selected_environment(self, identity):
         self._require_live(identity, "owned process exited or PID was reused")
         values = psutil.Process(identity["pid"]).environ()
-        result = {key: values.get(key) for key in CONTROLLED}
+        result = dict.fromkeys(CONTROLLED)
+        selected = set()
+        for key, value in values.items():
+            name = key.upper()
+            if name in CONTROLLED:
+                require(name not in selected, "ambiguous controlled Windows environment selector")
+                selected.add(name); result[name] = value
         self._require_live(identity, "owned process changed during environment observation")
         return result
 
@@ -494,7 +500,7 @@ $signature=Get-AuthenticodeSignature -LiteralPath (Join-Path $p.InstallLocation 
         self._require_live(identity, "owned App exited or PID was reused")
         args = psutil.Process(identity["pid"]).cmdline()[1:]
         self._require_live(identity, "owned App changed during argument observation")
-        return [arg for arg in args if arg == "--user-data-dir" or arg.startswith("--user-data-dir=")]
+        return [arg for arg in args if arg.lstrip("-/").casefold().startswith("user-data-dir")]
 
     def native_role(self, identity):
         try:
@@ -656,6 +662,66 @@ $signature=Get-AuthenticodeSignature -LiteralPath (Join-Path $p.InstallLocation 
         self._require_live(root, "owned App exited during observation")
         return found
 
+
+def _profile_path(value):
+    require(isinstance(value, str) and value and not any(c in value for c in "\x00\r\n"),
+            "existing App has an ambiguous profile path")
+    path = Path(value)
+    require(path.is_absolute(), "existing App has a relative profile path")
+    value = str(path.resolve())
+    if value.startswith("\\\\?\\UNC\\"):
+        value = "\\\\" + value[8:]
+    elif value.startswith("\\\\?\\"):
+        value = value[4:]
+    return ntpath.normcase(ntpath.normpath(value))
+
+
+def require_disjoint_apps(backend, owner, paths):
+    """Inspect identity and four selectors only; never adopt or control another App."""
+    wanted_home = _profile_path(str(paths["home"]))
+    wanted_frontend = _profile_path(str(paths["frontend"]))
+    keys = ("pid", "created", "sid", "session", "exe")
+    for observed in backend.existing_apps(owner):
+        try:
+            require(all(key in observed for key in keys), "existing App identity is incomplete")
+            actual = backend.identity(observed["pid"])
+            require(all(actual[key] == observed[key] for key in keys)
+                    and actual["sid"] == owner["sid"] and backend.live(observed),
+                    "existing App identity changed; no launch")
+            environment = backend.selected_environment(observed)
+            require(isinstance(environment, dict) and set(environment) == CONTROLLED
+                    and all(value is None or isinstance(value, str) and bool(value)
+                            for value in environment.values()),
+                    "existing App selectors could not be established")
+            arguments = backend.profile_arguments(observed)
+            require(isinstance(arguments, list) and len(arguments) <= 1
+                    and all(isinstance(arg, str) and arg.startswith("--user-data-dir=")
+                            for arg in arguments), "existing App browser selector is ambiguous")
+            home = environment["CODEX_HOME"]
+            frontend = environment["CODEX_ELECTRON_USER_DATA_PATH"]
+            browser = arguments[0].split("=", 1)[1] if arguments else None
+            require(home is None or _profile_path(home) != wanted_home,
+                    "an existing App uses the dedicated native home")
+            require(all(value is None or _profile_path(value) != wanted_frontend
+                        for value in (frontend, browser)),
+                    "an existing App uses the dedicated frontend or browser profile")
+            # The fixed production App's unset selectors use stock default homes;
+            # these differ from our validated dedicated local-data directories.
+            after = backend.identity(observed["pid"])
+            require(all(after[key] == observed[key] for key in keys)
+                    and backend.live(observed), "existing App changed during profile observation")
+        except psutil.NoSuchProcess:
+            # A second fresh identity read proves disappearance. A replacement
+            # (even at the same PID) is uncertain and never treated as that App.
+            try:
+                backend.identity(observed["pid"])
+            except psutil.NoSuchProcess:
+                continue
+            raise LaunchError("existing App disappeared or was replaced during observation")
+        except (psutil.Error, OSError, KeyError, TypeError, AttributeError) as error:
+            raise LaunchError("cannot establish an existing App's profile; no launch") from error
+
+
 def validate_request(request, backend=None):
     require(set(request) <= {"baseline", "native_manifest", "native_manifest_sha256", "app_args", "timeout_seconds", "expected_config_sha256"}, "unknown launch request field")
     backend = backend or WindowsBackend()
@@ -682,7 +748,7 @@ def validate_request(request, backend=None):
         database = Path(config["sqlite_home"])
         if not database.is_absolute(): database = paths["home"] / database
         require(database.resolve().is_relative_to(paths["home"].resolve()), "sqlite_home escapes the dedicated App home")
-    require(not backend.existing_apps(owner), "this user already has a Codex App instance; quit it explicitly first")
+    require_disjoint_apps(backend, owner, paths)
     arguments = request.get("app_args", [])
     require(isinstance(arguments, list) and all(isinstance(arg, str) and arg in SAFE_APP_ARGS for arg in arguments) and len(arguments) == len(set(arguments)), "unsupported or duplicate App argument")
     timeout = request.get("timeout_seconds", 60)
@@ -802,7 +868,8 @@ def prepare_runtime(manifest_path, manifest_sha, baseline_path, backend=None):
     manifest_path = Path(manifest_path); expected = baseline(baseline_path); backend = backend or WindowsBackend()
     current = backend.current()
     with backend.launch_lock(current["sid"]):
-        require(not backend.existing_apps(current), "this user already has a Codex App instance; no runtime preparation")
+        paths = defaults(); validate_state_paths(paths)
+        require_disjoint_apps(backend, current, paths)
         package = verify_package(backend.package(expected), expected)
         bundle = verify_bundle(manifest_path, manifest_sha, expected, prepared=False)
         root = manifest_path.parent.resolve(); outputs = list(bundle["files"].values())

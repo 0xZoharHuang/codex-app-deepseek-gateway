@@ -901,3 +901,31 @@ def test_nonisolated_or_false_launcher_proof_is_rejected(bundle, mutation):
         receipt["entrypoint"]["interpreter_args"] = ["-E"]
     with pytest.raises(lc.LifecycleError, match="launcher"):
         lc._verify_installation(directory, receipt)
+
+@pytest.mark.parametrize("native_sha,expected_version", [
+    ("e757246b4de87359e660647fa9514955a0971ff6a30affdd8c145d1d5ece7b84", "0.163.0-alpha.11.1"),
+    ("0c09e45bc76433756eb2d492f6db0ce6f269967e6618f4a6ae73e2fa239694b8", "0.165.0-alpha.1.2"),
+    ("0c09e45bc76433756eb2d492f6db0ce6f269967e6618f4a6ae73e2fa239694b9", None),
+])
+def test_fixed_official_hash_mapping_never_infers_version_from_app_label(tmp_path, monkeypatch, native_sha, expected_version):
+    # A trusted package label cannot qualify changed native bytes. No native
+    # process or model is invoked, even when the current App version is known.
+    package = {"app_version": "26.1023.6621.0", "location": str(tmp_path),
+               "publisher_id": "2p2nqsd0c76g0", "signature_kind": "Store", "status": "Ok"}
+    observed_paths = []
+    def digest(path):
+        observed_paths.append(Path(path))
+        return native_sha
+    monkeypatch.setattr(lc, "digest", digest)
+    calls = []
+    def observer(argv, **kwargs):
+        calls.append(argv)
+        assert Path(argv[0]).name.casefold() == "powershell.exe"
+        return SimpleNamespace(stdout=json.dumps(package))
+    result = lc.observe_app(run=observer)
+    assert result["native_version"] == expected_version
+    assert result["native_sha256"] == native_sha
+    assert result["native_version_source"] == ("hash-verified-reference" if expected_version
+                                              else "unrecognized-official-sha256")
+    assert observed_paths == [tmp_path / "app/resources/codex.exe"]
+    assert len(calls) == 1

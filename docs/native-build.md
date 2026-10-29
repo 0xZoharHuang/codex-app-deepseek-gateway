@@ -1,9 +1,97 @@
 # Building the fixed Windows native candidate
 
+The current candidate is **O165**, paired with signed App **26.1023.6621.0**.
+Its official runtime source is
+`720fec862a608ae1e5878d1eecb04fb93192e93c` / `0.165.0-alpha.1.2`.
+`native/build-lock.json` fixes the archive, patches, complete prepared-source
+fingerprint and file count, Cargo.lock, compiler/profile and all four outputs.
+Read those exact values from the lock; no binary hash or runtime acceptance
+is inferred from the source recipe.
+
+Only two patches are applied, in order:
+
+1. `windows-home-namespace-0165.patch` isolates Windows sandbox identities and
+   coordinates filesystem ACL updates across cooperating homes while retaining
+   the native setup, token, ACL, runner and policy algorithms.
+2. `mcp-keyring-isolation-0165.patch` scopes native Direct MCP credential
+   load/save/delete to this project's canonical home. File and encrypted Secrets
+   storage, native refresh coordination and the same-home Secrets masterkey
+   contract remain native.
+
+The previous 0.163 capacity-checkpoint/retry extensions are **not transplanted**
+into this version. Official 0.165 local compaction, error handling, agent loop,
+tool scheduling, approvals and all App RPC methods remain upstream code.
+Source parsing, compilation, native checks and actual App acceptance are separate.
+The new cohort is still undergoing qualification; old N/J and r4/r5 results
+remain historical, not a full 0.165 pass.
+
+## Compile all four native targets
+
+Use a Windows x64 MSVC Developer shell, Python 3.11+, Git and the fixed Rust
+1.99.1 toolchain. The builder installs no dependencies and starts no App, helper
+or sandbox. Substitute your paths; output must be empty:
+
+~~~powershell
+python -I scripts/build_native.py --archive "<source-archive.tar.gz>" --work-dir "<new-short-build-directory>" --toolchain-bin "<Rust-1.99.1-bin-directory>" --output "<empty-candidate-directory>" --dry-run
+~~~
+
+A dry run verifies inputs/tool versions and prints the plan without writing.
+Remove `--dry-run` for the foreground build.
+
+An explicit `--cache-dir "<existing-owned-cache-root>"` reuses that directory's
+`cargo` and `target` caches while leaving extracted source, output and ownership
+records in the selected work directory. Only use a cache owned by this project.
+The option requires an existing directory and rejects overlap with the checkout,
+current source or output, and redirected/non-directory cache entries. It does not
+copy, clean or relocate an older source tree. Omit the option for the unchanged
+default `WORK/cargo` and `WORK/target` layout. The build plan records the actual
+cache root, and packaging checks both cache paths against that plan.
+
+The current lock selects one exact source producer for all four outputs:
+
+~~~text
+cargo build --locked --release -p codex-cli -p codex-windows-sandbox --bin codex --bin codex-command-runner --bin codex-windows-sandbox-setup --bin codex-windows-managed-deny-probe
+~~~
+
+The builder uses two jobs, below-normal priority, no incremental/debug output,
+symbol stripping, no LTO and sixteen codegen units. It verifies the full source,
+patches and archive again before copying outputs. Its raw manifest says
+`built-not-app-qualified`. No Code Mode Host from the official App is compiled
+or included in these four outputs.
+
+## Assemble the current raw distribution
+
+`scripts/package_native_release.py` accepts the current single producer directly
+from its exact builder manifest. It verifies the trusted raw manifest hash,
+current lock, four binary hashes/sizes, source fingerprint, profile and target
+invocation. It generates public provenance without the builder's absolute paths.
+No hand-authored N/J mixed-source receipt is used for O165.
+
+~~~powershell
+python -I -B .\scripts\package_native_release.py --source-root "<verified-prepared-source>" --native-manifest "<candidate>\manifest.json" --native-manifest-sha256 "<trusted-hash>" --cargo "<pinned-rust>\cargo.exe" --cargo-home "<offline-cargo-cache>" --git "C:\Program Files\Git\cmd\git.exe" --output "<new-public-staging>" --evidence-dir "<new-private-evidence>"
+~~~
+
+Assembly requires clean committed project source for public artifacts; an explicit
+`--development-qualification` build remains a qualification archive. It resolves
+the exact target's dependency graph offline, retains available original license
+notices and fixed SPDX texts, and produces a hash-checked deterministic archive.
+Only the four self-built binaries are redistributable here. The normal
+`app-prepare-runtime` command later copies the necessary verified official
+Code Mode Host from the user's local App into a fresh runtime directory.
+Never repack that locally prepared directory as a public raw release.
+
+The historical N/J mode remains explicit: use
+`--build-lock native/build-lock.N.json` and its original
+`--producer-references-sha256`. It cannot be relabeled as O165.
+
+The following retained record describes the old recipes and their evidence only.
+
+# Historical 0.163 N/J build and distribution
+
 This is a build step for the private runtime. It does not install, configure or start
 Codex App, a gateway, a sandbox helper, a Windows service or an agent session.
 
-The current source lock selects **N CLI only**: the eighteen retained M patches
+The historical lock native/build-lock.N.json selects **N CLI only**: the eighteen retained M patches
 plus one replay-hash correction. The prepared source has 9,201 files and
 fingerprint
 `3be6efb7b73138f54cae24f6f6f04da5a348b02483f2a36dbeddc766689a77bc`.
@@ -52,7 +140,7 @@ Use a Windows x64 MSVC Developer PowerShell or Developer Command Prompt with:
 - Python 3.11 or later and Git available.
 - The x64 MSVC linker and Windows SDK configured by the official Developer shell.
 - The already installed `1.99.1-x86_64-pc-windows-msvc` Rust toolchain.
-- The upstream source archive identified by `native/build-lock.json`.
+- The upstream source archive identified by `native/build-lock.N.json`.
 
 The build lock fixes upstream commit `680c4ba93ec79c292287fb9e0b627dc7a76e3b5e`,
 archive SHA-256, every listed patch SHA-256, prepared source SHA-256, Cargo.lock SHA-256,
@@ -129,7 +217,7 @@ python -I scripts/export_sandbox_patch.py --source "<prepared-source-root>" --ar
 required. Output defaults to this repository's `native` directory when omitted.
 The exporter verifies the fixed archive SHA and all external lock records, and binds
 pure-test claims to the tested module's exact SHA. Re-exporting a changed patch does
-not update `native/build-lock.json` automatically and does not qualify a new release.
+not update `native/build-lock.N.json` automatically and does not qualify a new release.
 
 ## Historical candidate K background handle inheritance
 
@@ -339,6 +427,7 @@ not exist:
 
 ~~~powershell
 python -I -B .\scripts\package_native_release.py `
+  --build-lock .\native\build-lock.N.json `
   --source-root C:\NativeBuild\prepared-source `
   --native-manifest C:\VerifiedRawNative\manifest.json `
   --native-manifest-sha256 <trusted-raw-manifest-sha256> `

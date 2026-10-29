@@ -1,5 +1,12 @@
 # Windows sandbox isolation for the private App runtime
 
+Current target: App 26.1023.6621.0 / native 0.165.0-alpha.1.2.
+The record below belongs to the prior 0.163 cohort. Its observed results are
+retained, but are not a 0.165 qualification. The current two-patch recipe and
+its remaining gates are in [native-build.md](native-build.md) and
+[qualification-status.md](qualification-status.md).
+
+
 Status: source patch under qualification. This document is not App or sandbox acceptance.
 
 The fixed upstream is `openai/codex@680c4ba93ec79c292287fb9e0b627dc7a76e3b5e`

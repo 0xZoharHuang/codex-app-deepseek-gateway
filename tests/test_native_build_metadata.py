@@ -120,7 +120,7 @@ def test_replay_candidate_preserves_M_and_J_provenance_and_selects_only_N_CLI():
     mraw = (native / "build-lock.M.json").read_bytes()
     assert hashlib.sha256(mraw).hexdigest() == "3259ede15d27dcc590a62f6bdeea1963357c1f3b2133d21664688cfc420ea1d9"
     previous = json.loads(mraw)
-    raw = (native / "build-lock.json").read_bytes()
+    raw = (native / "build-lock.N.json").read_bytes()
     lock = json.loads(raw)
     assert raw == (json.dumps(lock, indent=2) + "\n").encode()
     assert lock["candidate_revision"] == "N" and lock["binaries"] == ["codex.exe"]
@@ -152,3 +152,113 @@ def test_replay_overlay_changes_only_checkpoint_hash_and_native_regressions():
     assert changed == {"codex-rs/core/src/session/request_capacity.rs"}
     # Exact reviewed patch binds the three native serde/legacy regression tests.
     # Their Rust and App execution receipts remain separate acceptance evidence.
+
+
+def test_current_0165_recipe_is_a_single_four_target_native_producer():
+    native = Path(__file__).parents[1] / "native"
+    raw = (native / "build-lock.json").read_bytes()
+    lock = json.loads(raw)
+    assert lock["candidate_revision"] == "O165"
+    assert lock["upstream_commit"] == "720fec862a608ae1e5878d1eecb04fb93192e93c"
+    assert lock["native_version"] == "0.165.0-alpha.1.2"
+    assert lock["target"] == "x86_64-pc-windows-msvc"
+    assert set(lock["binaries"]) == set(build.NATIVE_TARGETS) and len(lock["binaries"]) == 4
+    assert lock["release_environment"] == build.PROFILE
+    assert [row["file"] for row in lock["patches"]] == [
+        "windows-home-namespace-0165.patch", "mcp-keyring-isolation-0165.patch"]
+    for row in lock["patches"]:
+        assert build.sha(native / row["file"]) == row["sha256"]
+    command, = build.build_commands(Path("pinned-rust"),lock["binaries"])
+    assert command.count("-p") == 2 and command.count("--bin") == 4
+    assert "--bins" not in command
+    baseline = json.loads((native / "app-launch-baseline.json").read_bytes())
+    assert baseline["native_version"] == lock["native_version"]
+    assert baseline["native_upstream_commit"] == lock["upstream_commit"]
+
+
+def test_cache_default_keeps_existing_work_layout_and_release_environment(tmp_path,monkeypatch):
+    work = tmp_path / "new-build"; rust = tmp_path / "pinned-rust"
+    monkeypatch.setenv("RUSTFLAGS","inherited-unsafe")
+    monkeypatch.setenv("CARGO_HOME","inherited-wrong-cache")
+    monkeypatch.setenv("CARGO_PROFILE_RELEASE_LTO","inherited-wrong-profile")
+    assert build.cache_directory(work,work / "source",work / "candidate",None) == work
+    env = build.build_environment(work,rust)
+    assert env["CARGO_HOME"] == str(work / "cargo")
+    assert env["CARGO_TARGET_DIR"] == str(work / "target")
+    assert env["RUSTC"] == str(rust / "rustc.exe")
+    assert "RUSTFLAGS" not in env
+    assert all(env[key] == value for key,value in build.PROFILE.items())
+    assert not work.exists(), "Selecting/default planning must not create build state"
+
+
+def test_explicit_existing_cache_changes_only_cargo_and_target_paths(tmp_path):
+    work = tmp_path / "new-build"; source = work / "source"; output = work / "candidate"
+    cache = tmp_path / "existing-owned-cache"; cache.mkdir()
+    old_source = cache / "source"; old_source.mkdir()
+    sentinel = old_source / "retained.rs"; sentinel.write_bytes(b"retained previous build source")
+    for name in ("cargo","target"):
+        (cache / name).mkdir()
+    selected = build.cache_directory(work,source,output,cache)
+    env = build.build_environment(work,tmp_path / "rust",selected)
+    assert env["CARGO_HOME"] == str(cache / "cargo")
+    assert env["CARGO_TARGET_DIR"] == str(cache / "target")
+    assert sentinel.read_bytes() == b"retained previous build source"
+    assert not work.exists(), "The independent source/output/ownership root must not move or be created here"
+
+
+@pytest.mark.parametrize("location",["checkout","checkout-child","checkout-parent","source","source-child","source-parent","output","output-child","missing","file","cargo-file","target-file"])
+def test_explicit_cache_admission_rejects_overlap_or_invalid_entries(tmp_path,monkeypatch,location):
+    repo = tmp_path / "repo"; repo.mkdir()
+    work = tmp_path / "work"; source = work / "source"; output = tmp_path / "output"
+    source.mkdir(parents=True); output.mkdir()
+    monkeypatch.setattr(build,"REPO",repo)
+    choices = {"checkout":repo, "checkout-child":repo / "cache", "checkout-parent":tmp_path,
+               "source":source, "source-child":source / "cache", "source-parent":work,
+               "output":output, "output-child":output / "cache", "missing":tmp_path / "missing",
+               "file":tmp_path / "file", "cargo-file":tmp_path / "cargo-file",
+               "target-file":tmp_path / "target-file"}
+    # A different enclosing source directory must fail; selecting the ordinary
+    # work root deliberately preserves default layout, so use an intermediate.
+    if location == "source-parent":
+        source = source / "nested-source"
+        cache = source.parent
+    else:
+        cache = choices[location]
+    if location == "file":
+        cache.write_bytes(b"not a directory")
+    elif location != "missing" and not cache.exists():
+        cache.mkdir(parents=True)
+    if location in ("cargo-file","target-file"):
+        (cache / location.split("-")[0]).write_bytes(b"not a directory")
+    with pytest.raises(ValueError,match="cache"):
+        build.cache_directory(work,source,output,cache)
+
+
+def test_explicit_work_cache_preserves_default_layout(tmp_path):
+    work = tmp_path / "work"; work.mkdir()
+    assert build.cache_directory(work,work / "source",work / "candidate",work) == work
+
+
+def test_dry_run_records_explicit_cache_without_mutating_work(tmp_path,monkeypatch,capsys):
+    data = b"fixed source fixture"; archive = tmp_path / "source.tar.gz"; archive.write_bytes(data)
+    work = tmp_path / "new-work"; cache = tmp_path / "existing-cache"; cache.mkdir()
+    toolchain = tmp_path / "rust"
+    lock = {"schema_version":1, "release_environment":build.PROFILE,
+            "archive_sha256":hashlib.sha256(data).hexdigest(), "patches":[],
+            "binaries":["codex.exe"], "rust_version":"1.99.1", "target":"x86_64-pc-windows-msvc",
+            "upstream_commit":"fixed", "native_version":"fixture", "prepared_source_sha256":"1"*64}
+    lock_path = tmp_path / "lock.json"; lock_path.write_text(json.dumps(lock))
+    monkeypatch.setattr(build,"checked_output",lambda cmd:
+        "rustc 1.99.1 (fixture)\nhost: x86_64-pc-windows-msvc" if cmd[0].endswith("rustc.exe")
+        else "cargo 1.99.1 (fixture)")
+    monkeypatch.setattr(build.shutil,"which",lambda name:str(tmp_path / name))
+    monkeypatch.setenv("LIB","fixture SDK")
+    assert build.main(["--archive",str(archive),"--work-dir",str(work),"--cache-dir",str(cache),
+                       "--toolchain-bin",str(toolchain),"--build-lock",str(lock_path),"--dry-run"]) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["source"] == str(work / "source") and plan["output"] == str(work / "candidate")
+    assert plan["work_dir"] == str(work) and plan["cache_dir"] == str(cache)
+    assert plan["cargo_home"] == str(cache / "cargo") and plan["target"] == str(cache / "target")
+    assert plan["runtime_executed"] is False and plan["app_qualified"] is False
+    assert not work.exists()
+    assert list(cache.iterdir()) == []

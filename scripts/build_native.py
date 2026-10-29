@@ -147,7 +147,29 @@ def prepare_source(archive: Path, source: Path, lock: dict, git: str) -> None:
     require(state["count"] == lock["prepared_source_files"], "patched source file count mismatch")
     require(sha(source / "codex-rs" / "Cargo.lock") == lock["cargo_lock_sha256"], "Cargo.lock checksum mismatch")
 
-def build_environment(work: Path, toolchain: Path) -> dict[str, str]:
+
+def cache_directory(work: Path, source: Path, output: Path, selected: Path | None) -> Path:
+    """Select an operator-owned cache without moving source or deployment state."""
+    cache = selected.resolve() if selected is not None else work
+    if selected is None:
+        return cache
+    require(cache.is_dir(), "explicit cache directory must already exist")
+    for protected in (REPO.resolve(), source.resolve(), output.resolve()):
+        # The ordinary work layout is retained when explicitly selected too.
+        if cache == work and protected in (source.resolve(), output.resolve()):
+            continue
+        require(cache != protected and cache not in protected.parents and protected not in cache.parents,
+                "cache directory must not overlap the checkout, current source or output")
+    for name in ("cargo", "target"):
+        child = cache / name
+        require(not child.is_symlink() and not (hasattr(child, "is_junction") and child.is_junction()),
+                "cache entries must not be redirected")
+        require(not child.exists() or child.is_dir(), "cache entries must be directories")
+    return cache
+
+
+def build_environment(work: Path, toolchain: Path, cache_dir: Path | None = None) -> dict[str, str]:
+    cache = cache_dir if cache_dir is not None else work
     environment = dict(os.environ)
     for key in list(environment):
         if key.startswith("CARGO_PROFILE_RELEASE_") or key in {
@@ -156,7 +178,7 @@ def build_environment(work: Path, toolchain: Path) -> dict[str, str]:
         }:
             environment.pop(key)
     environment.update(PROFILE)
-    environment.update({"CARGO_HOME": str(work / "cargo"), "CARGO_TARGET_DIR": str(work / "target"),
+    environment.update({"CARGO_HOME": str(cache / "cargo"), "CARGO_TARGET_DIR": str(cache / "target"),
                         "RUSTC": str(toolchain / "rustc.exe"), "RUSTDOC": str(toolchain / "rustdoc.exe")})
     return environment
 
@@ -166,6 +188,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--work-dir", type=Path, required=True, help="New directory, or a matching owned build directory")
     parser.add_argument("--toolchain-bin", type=Path, required=True, help="Installed Rust 1.99.1 bin directory")
     parser.add_argument("--output", type=Path, help="Empty candidate output directory; defaults to WORK/candidate")
+    parser.add_argument("--cache-dir", type=Path, help="Explicit existing owned Cargo/target cache root; defaults to WORK")
     parser.add_argument("--build-lock", type=Path, default=REPO / "native/build-lock.json", help="Explicit pinned source/target lock; defaults to the current CLI candidate")
     parser.add_argument("--dry-run", action="store_true", help="Verify inputs/tool versions and print the plan without writing")
     args = parser.parse_args(argv)
@@ -177,6 +200,7 @@ def main(argv: list[str] | None = None) -> int:
             "use a separate build directory outside the gateway checkout")
     require(output != source and source not in output.parents and output not in source.parents,
             "candidate output must not overlap the source directory")
+    cache = cache_directory(work, source, output, args.cache_dir)
     lock_path = args.build_lock.resolve()
     lock = json.loads(lock_path.read_text(encoding="utf8"))
     require(lock["schema_version"] == 1 and lock["release_environment"] == PROFILE, "unsupported build lock/profile")
@@ -202,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
             "candidate_revision": lock.get("candidate_revision"),
             "archive": str(archive), "archive_sha256": lock["archive_sha256"], "patches": lock["patches"],
             "source": str(source), "source_sha256": lock["prepared_source_sha256"],
-            "work_dir": str(work), "target": str(work / "target"), "cargo_home": str(work / "cargo"),
+            "work_dir": str(work), "cache_dir": str(cache), "target": str(cache / "target"), "cargo_home": str(cache / "cargo"),
             "output": str(output), "profile": PROFILE, "below_normal_priority": True, "commands": commands, "rustc": rust, "cargo": cargo,
             "linker": linker, "runtime_executed": False, "app_qualified": False}
     marker = work / "build-owner.json"
@@ -227,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
         summary = {"changed_files": [change["path"] for change in changes], "source_changes": changes}
         report.update(summary)
         atomic(work / "source-manifest.json", {**before, **summary})
-        environment = build_environment(work, toolchain)
+        environment = build_environment(work, toolchain, cache)
         # Foreground subprocesses, exactly as in an ordinary developer shell; no service or runner.
         for command in commands:
             phase = {"command": command, "status": "building"}
@@ -247,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
         output.mkdir(parents=True, exist_ok=True)
         binaries = []
         for name in lock["binaries"]:
-            compiled = work / "target" / "release" / name
+            compiled = cache / "target" / "release" / name
             expected = sha(compiled)
             temporary = output / (name + ".partial")
             shutil.copy2(compiled, temporary)

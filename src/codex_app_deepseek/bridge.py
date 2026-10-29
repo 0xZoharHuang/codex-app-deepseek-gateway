@@ -78,7 +78,7 @@ class BridgeSettings:
 
 
 
-# Fixed App 680c4 ResponsesApiRequest plus the explicitly supported stateless
+# Fixed App 720fec ResponsesApiRequest plus the explicitly supported stateless
 # Responses controls. Unknown controls must not reach a provider that may ignore
 # them. JSON Schema objects are deliberately not recursively allowlisted.
 _REQUEST_FIELDS = frozenset({

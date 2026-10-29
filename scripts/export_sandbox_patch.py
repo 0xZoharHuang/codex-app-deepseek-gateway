@@ -1,4 +1,8 @@
-"""Export the fixed-source sandbox patch without executing any native runtime."""
+"""Export the historical 0.163 sandbox patch; not the current 0.165 recipe.
+
+This retained reproducer verifies its original fixed archive and evidence.
+The current two-patch inputs are bound by native/build-lock.json instead.
+"""
 from __future__ import annotations
 import argparse
 import difflib
