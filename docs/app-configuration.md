@@ -147,3 +147,46 @@ passes its existing private-permission callback and preserves its public
 configuration-conflict errors. Release qualification must exercise a real
 production wheel under isolated Python with third-party imports blocked;
 synthetic runtime wheels that include parser code do not prove that boundary.
+
+## Native App tools after an App update
+
+Provider configuration preserves the user's MCP servers. It does not install,
+claim ownership of, or rewrite an arbitrary `mcp_servers.codex_app` definition.
+Prefer installing/enabling Codex App tools through the matched official App's
+plugin interface. A successful gateway/model connection does not establish that
+this separate local MCP server started successfully.
+
+A legacy **explicit** `codex_app` registration can contain an absolute `cwd` into
+an older WindowsApps package, such as
+`...\OpenAI.Codex_<old-version>_x64__2p2nqsd0c76g0\app\resources\plugins\openai-bundled\plugins\codex-app-tools`.
+After an App update removes that package, native startup may report
+`directory name is invalid (os error 267)`. This is an MCP launch-path failure;
+changing the model route or relaxing the sandbox does not repair it.
+
+If this exact legacy registration is still needed, inspect the intended
+project-private App home's `config.toml` and the verified current App package:
+
+1. Retain a private, byte-for-byte config backup and record its SHA256. Do not
+   print or publish the config; unrelated entries can contain credentials.
+2. Confirm that the existing server is the official bundled App tools launcher,
+   not a user-defined server with the same name. Check the installed package
+   identity/signature and the matching official plugin's definition. Do not
+   search for or adopt another account's configuration.
+3. Prefer migrating to the official plugin interface. If maintaining the legacy
+   explicit entry, change only `mcp_servers.codex_app.cwd` to the corresponding
+   directory in the verified **current** package. Preserve the command, arguments,
+   tool approval settings, environment allowlist and all other TOML values.
+4. Refuse the update if the config changed since the backup/hash check. Read the
+   written TOML back and verify that only the intended field changed. Record the
+   before/after hashes and backup location privately. Do not copy the full example
+   config over an existing one.
+5. Start a fresh native App chat, inspect the actual tool directory and make a
+   read-only App tools call such as `list_projects`. A present tool name alone
+   does not prove the MCP process or App pipe works.
+
+The acceptance run for App 26.1023.6621.0 repaired one such historical registration
+and then obtained the nine projects belonging to the private App profile through
+the native `mcp__codex_app__list_projects` tool. Other MCP settings and model routes
+were unchanged. This is a scoped App tools result, not a pass for browser, Computer
+Use, OAuth, or every plugin. No proprietary plugin code is redistributed in the
+gateway package.
