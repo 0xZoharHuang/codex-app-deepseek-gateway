@@ -9,6 +9,14 @@ from codex_app_deepseek import isolated_app as app
 def fixture(tmp_path, monkeypatch):
     paths = {"home": tmp_path / "home", "frontend": tmp_path / "home/frontend", "launches": tmp_path / "launches", "native_logs": tmp_path / "native-logs"}
     paths["home"].mkdir(); (paths["home"] / "config.toml").write_text('model_provider = "codex_app_deepseek"\n')
+    # The signed-package/backend are mocked in this unit fixture; supply a
+    # correspondingly small original resource tree. Real 827-file/native CLI
+    # and actual App qualification are separate recorded integration gates.
+    from test_native_app_tools import stock_fixture
+    from codex_app_deepseek import native_app_tools as tools
+    inventory = stock_fixture(tmp_path / "package")
+    monkeypatch.setattr(tools, "load_inventory", lambda: inventory)
+    monkeypatch.setattr(tools.ac, "_private", lambda *args, **kwargs: None)
     monkeypatch.setattr(app, "defaults", lambda environment=None: paths)
     directory = tmp_path / "native"; directory.mkdir()
     names = ["codex.exe", "codex-command-runner.exe", "codex-windows-sandbox-setup.exe", "codex-windows-managed-deny-probe.exe"]
@@ -67,7 +75,7 @@ def fixture(tmp_path, monkeypatch):
         def profile_arguments(self, identity): return [arg for arg in self.spawned[-1][1] if arg.startswith("--user-data-dir=")]
         def native_role(self, identity): return "app-server"
         def descendants(self, root): return [root, {**root, "pid": 102, "exe": str(directory / "codex.exe")}]
-        def native_control_plane(self, root, *, executable, expected_sha256, environment):
+        def native_control_plane(self, root, *, executable, expected_sha256, environment, auxiliary_exits=None):
             assert Path(executable) == directory / "codex.exe"
             assert expected_sha256 == manifest["outputs"][0]["sha256"]
             assert environment["CODEX_CLI_PATH"] == str(executable)
@@ -189,7 +197,63 @@ def test_prepare_runtime_copies_only_official_sidecar_and_never_runs(fixture, ex
         prepared = app.prepare_runtime(raw_path, app.sha(raw_path), request["baseline"], backend)
         app.verify_bundle(Path(prepared["manifest"]), prepared["manifest_sha256"], expected)
         assert source.read_bytes() == source_before == original_host.read_bytes()
-        assert app.prepare_runtime(raw_path, app.sha(raw_path), request["baseline"], backend) == prepared
+        resources = prepared["bundled_resources"]
+        assert resources["created_now"] is True and resources["claimed_ownership"] is True
+        resource_root = Path(resources["target"])
+        receipt_path = Path(resources["receipt"])
+        resource_receipt = app.load_json(receipt_path)
+        manifest_bytes = Path(prepared["manifest"]).read_bytes()
+        def permissions(path):
+            import os, stat
+            if os.name != "nt":
+                info = path.stat()
+                return info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)
+            # Compare actual Windows owner/group/DACL, not Windows' synthetic
+            # POSIX uid/mode. This test reads descriptors and never changes ACLs.
+            import ctypes
+            from ctypes import wintypes
+            api, kernel = ctypes.windll.advapi32, ctypes.windll.kernel32
+            api.GetNamedSecurityInfoW.argtypes = [wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD,
+                ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p)]
+            api.GetNamedSecurityInfoW.restype = wintypes.DWORD
+            api.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [ctypes.c_void_p,
+                wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+            api.ConvertSecurityDescriptorToStringSecurityDescriptorW.restype = wintypes.BOOL
+            kernel.LocalFree.argtypes = [ctypes.c_void_p]
+            descriptor, text = ctypes.c_void_p(), ctypes.c_void_p()
+            assert api.GetNamedSecurityInfoW(str(path), 1, 7, None, None, None, None,
+                                             ctypes.byref(descriptor)) == 0
+            try:
+                assert api.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    descriptor, 1, 7, ctypes.byref(text), None)
+                return ctypes.wstring_at(text)
+            finally:
+                if text.value: kernel.LocalFree(text)
+                kernel.LocalFree(descriptor)
+        def tree_identity():
+            result = {}
+            for item in [resource_root, *sorted(resource_root.rglob("*"))]:
+                info = item.stat()
+                result[item.relative_to(resource_root).as_posix()] = (
+                    info.st_dev, info.st_ino, info.st_mtime_ns,
+                    app.sha(item) if item.is_file() else None, permissions(item))
+            return result
+        tree_before = tree_identity()
+        repeated = app.prepare_runtime(raw_path, app.sha(raw_path), request["baseline"], backend)
+        second_resources = repeated["bundled_resources"]
+        assert second_resources["created_now"] is False
+        assert second_resources["claimed_ownership"] is True
+        assert {k: v for k, v in repeated.items() if k != "bundled_resources"} == {
+            k: v for k, v in prepared.items() if k != "bundled_resources"}
+        assert {k: v for k, v in second_resources.items() if k != "created_now"} == {
+            k: v for k, v in resources.items() if k != "created_now"}
+        repeated_receipt = app.load_json(receipt_path)
+        assert {k: v for k, v in repeated_receipt.items() if k != "observed_at"} == {
+            k: v for k, v in resource_receipt.items() if k != "observed_at"}
+        assert tree_identity() == tree_before
+        assert Path(repeated["manifest"]).read_bytes() == manifest_bytes
+        assert source.read_bytes() == source_before == original_host.read_bytes()
         assert state == before
     assert not backend.spawned and not paths["launches"].exists()
 

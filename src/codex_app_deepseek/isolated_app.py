@@ -547,7 +547,7 @@ $signature=Get-AuthenticodeSignature -LiteralPath (Join-Path $p.InstallLocation 
         """Strict full-tree inspection; do not treat sandbox accounts as the App user."""
         return self._descendants(root)
 
-    def native_control_plane(self, root, *, executable, expected_sha256, environment):
+    def native_control_plane(self, root, *, executable, expected_sha256, environment, auxiliary_exits=None):
         """Discover App backends, stopping only at fully bound native main loops.
 
         The native runtime owns its tool/MCP/sandbox workload tree. Its restricted
@@ -611,7 +611,9 @@ $signature=Get-AuthenticodeSignature -LiteralPath (Join-Path $p.InstallLocation 
             boundaries.append(identity)
             return True
 
-        found = self._descendants(root, stop_at=stop_at)
+        require(auxiliary_exits is None or (isinstance(auxiliary_exits, list) and not auxiliary_exits),
+                "invalid auxiliary exit diagnostic collector")
+        found = self._descendants(root, stop_at=stop_at, auxiliary_exits=auxiliary_exits)
         for identity in boundaries:
             verify_boundary(identity)
         require(self.identity(root["pid"]) == root and self.live(root)
@@ -619,64 +621,121 @@ $signature=Get-AuthenticodeSignature -LiteralPath (Join-Path $p.InstallLocation 
                 "owned App changed after control-plane observation")
         return found
 
-    def _descendants(self, root, *, stop_at=None):
+    def _descendants(self, root, *, stop_at=None, auxiliary_exits=None):
         self._require_live(root, "owned App exited; refusing to adopt a replacement")
         found = [root]
         edges = []
         seen = {root["pid"]: root["created"]}
-        for parent in found:
-            self._require_live(parent, "owned App ancestor changed before observation")
-            if stop_at is not None and stop_at(parent):
-                continue
-            process = psutil.Process(parent["pid"])
-            require(process.create_time() == parent["created"], "owned App ancestor PID was reused")
+        native_parents = {}
+        retired = {}
+
+        def retire_auxiliary(identity, error):
+            # Only the explicit control-plane projection may ignore a confirmed
+            # natural auxiliary exit. Generic tree inspection remains strict.
+            if (auxiliary_exits is None or stop_at is None or error.pid != identity["pid"]
+                    or identity["pid"] == root["pid"]
+                    or Path(identity["exe"]).name.casefold() == "codex.exe"):
+                return False
+            require(identity["sid"] == root["sid"] and identity["session"] == root["session"]
+                    and identity.get("elevated") is False,
+                    "exited auxiliary owner/session/elevation is unverified")
             try:
-                children = process.children(recursive=False)
-            except psutil.NoSuchProcess:
-                self._require_live(parent, "owned App ancestor changed during child enumeration")
-                raise
-            self._require_live(parent, "owned App ancestor changed during child enumeration")
-            for child in children:
-                self._require_live(parent, "owned App ancestor changed before child inspection")
-                created = None
-                identity = None
+                self._require_live(identity, "App auxiliary PID was reused")
+            except psutil.NoSuchProcess as confirmed:
+                if confirmed.pid != identity["pid"]:
+                    raise
+                retired[identity["pid"]] = (identity, error)
+                require(len(retired) <= 64, "too many auxiliary exits in one observation")
+                return True
+            # A transient failure or a replacement never authorizes retirement.
+            raise error
+
+        for parent in found:
+            try:
+                self._require_live(parent, "owned App ancestor changed before observation")
+                if stop_at is not None and stop_at(parent):
+                    continue
+                process = psutil.Process(parent["pid"])
+                require(process.create_time() == parent["created"], "owned App ancestor PID was reused")
                 try:
-                    created = child.create_time()
-                    candidate = psutil.Process(child.pid)
-                    require(candidate.create_time() == created, "App child PID changed after enumeration")
-                    ppid = candidate.ppid()
-                    require(ppid == parent["pid"] and created >= parent["created"],
-                            "App child does not have the observed direct parent")
-                    identity = self.identity(child.pid)
-                    require(identity["created"] == created and identity["ppid"] == parent["pid"],
-                            "App child changed during direct edge observation")
-                    require(identity["sid"] == root["sid"] and identity["session"] == root["session"],
-                            "unexpected owner/session in App process tree")
-                    self._require_live(parent, "App parent changed during observation")
-                    self._require_live(identity, "App child changed during observation")
-                except psutil.NoSuchProcess as error:
-                    # Only a still-unadmitted child may disappear. Never turn
-                    # a lost parent or already identified native actor into a
-                    # skipped auxiliary, and recheck birth to reject PID reuse.
-                    if error.pid != child.pid or (identity is not None
-                            and Path(identity["exe"]).name.casefold() == "codex.exe"):
-                        raise
-                    if created is not None:
-                        try: self._require_live({"pid": child.pid, "created": created}, "App child PID was reused")
-                        except psutil.NoSuchProcess: continue
-                    else:
-                        try: psutil.Process(child.pid)
-                        except psutil.NoSuchProcess: continue
-                    raise LaunchError("App child identity could not be established")
-                require(identity["pid"] not in seen, "duplicate or cyclic App descendant")
-                seen[identity["pid"]] = identity["created"]
-                found.append(identity)
-                edges.append((parent, identity))
+                    children = process.children(recursive=False)
+                except psutil.NoSuchProcess:
+                    self._require_live(parent, "owned App ancestor changed during child enumeration")
+                    raise
+                self._require_live(parent, "owned App ancestor changed during child enumeration")
+                for child in children:
+                    self._require_live(parent, "owned App ancestor changed before child inspection")
+                    created = None
+                    identity = None
+                    try:
+                        created = child.create_time()
+                        candidate = psutil.Process(child.pid)
+                        require(candidate.create_time() == created, "App child PID changed after enumeration")
+                        ppid = candidate.ppid()
+                        require(ppid == parent["pid"] and created >= parent["created"],
+                                "App child does not have the observed direct parent")
+                        identity = self.identity(child.pid)
+                        require(identity["created"] == created and identity["ppid"] == parent["pid"],
+                                "App child changed during direct edge observation")
+                        require(identity["sid"] == root["sid"] and identity["session"] == root["session"],
+                                "unexpected owner/session in App process tree")
+                        if Path(identity["exe"]).name.casefold() == "codex.exe":
+                            # Protect this edge before final admission too: losing
+                            # a native candidate's parent must never prune it.
+                            native_parents[identity["pid"]] = parent["pid"]
+                        self._require_live(parent, "App parent changed during observation")
+                        self._require_live(identity, "App child changed during observation")
+                    except psutil.NoSuchProcess as error:
+                        # Only a still-unadmitted child may disappear. Never turn
+                        # a lost parent or already identified native actor into a
+                        # skipped auxiliary, and recheck birth to reject PID reuse.
+                        if error.pid != child.pid or (identity is not None
+                                and Path(identity["exe"]).name.casefold() == "codex.exe"):
+                            raise
+                        if created is not None:
+                            try: self._require_live({"pid": child.pid, "created": created}, "App child PID was reused")
+                            except psutil.NoSuchProcess: continue
+                        else:
+                            try: psutil.Process(child.pid)
+                            except psutil.NoSuchProcess: continue
+                        raise LaunchError("App child identity could not be established")
+                    require(identity["pid"] not in seen, "duplicate or cyclic App descendant")
+                    seen[identity["pid"]] = identity["created"]
+                    found.append(identity)
+                    edges.append((parent, identity))
+            except psutil.NoSuchProcess as error:
+                if not retire_auxiliary(parent, error):
+                    raise
+
+        # Close the cached native ancestry before accepting any provisional
+        # retirement, including native edges observed but not yet admitted.
+        parents = {child["pid"]: parent["pid"] for parent, child in edges}
+        parents.update(native_parents)
+        protected = {root["pid"], *native_parents}
+        for pid in tuple(protected):
+            while pid in parents and parents[pid] not in protected:
+                pid = parents[pid]
+                protected.add(pid)
+        for pid in protected:
+            if pid in retired:
+                raise retired[pid][1]
         for parent, child in edges:
-            self._require_live(parent, "App parent expired before readiness")
-            self._require_live(child, "App child expired before readiness")
+            for identity in (parent, child):
+                if identity["pid"] in retired:
+                    continue
+                try:
+                    self._require_live(identity, "App process expired before readiness")
+                except psutil.NoSuchProcess as error:
+                    if identity["pid"] in protected or not retire_auxiliary(identity, error):
+                        raise
         self._require_live(root, "owned App exited during observation")
-        return found
+        if auxiliary_exits is not None:
+            auxiliary_exits.extend({"pid": identity["pid"], "created": identity["created"],
+                                    "ppid": identity["ppid"], "executable_name": Path(identity["exe"]).name,
+                                    "reason": "natural_exit_outside_native_ancestry"}
+                                   for identity, _ in retired.values())
+        return [identity for identity in found if identity["pid"] not in retired]
+
 
 
 def _profile_path(value):
@@ -848,10 +907,12 @@ def inside_launch(plan_path, expected_sha, backend=None):
             deadline = time.monotonic() + checked["timeout_seconds"]
             while time.monotonic() < deadline:
                 try:
+                    auxiliary_exits = []
                     observed = backend.native_control_plane(identity,
                         executable=checked["environment"]["CODEX_CLI_PATH"],
                         expected_sha256=checked["bundle"]["files"]["codex.exe"]["sha256"],
-                        environment=checked["environment"])
+                        environment=checked["environment"], auxiliary_exits=auxiliary_exits)
+                    record["excluded_auxiliary_processes"] = auxiliary_exits
                     natives = [item for item in observed if Path(item["exe"]).name.lower() == "codex.exe"]
                     for item in natives:
                         require(Path(item["exe"]).resolve() == Path(checked["environment"]["CODEX_CLI_PATH"]).resolve(), "App selected an unexpected native runtime")
@@ -880,7 +941,7 @@ def inside_launch(plan_path, expected_sha, backend=None):
         record.update(status="failed_or_unverified", error_type=type(error).__name__, error=str(error), finished_at=time.time())
         _save_receipt(run / "receipt.json", record); raise
 
-def prepare_runtime(manifest_path, manifest_sha, baseline_path, backend=None):
+def prepare_runtime(manifest_path, manifest_sha, baseline_path, backend=None, *, resources_receipt=None):
     manifest_path = Path(manifest_path); expected = baseline(baseline_path); backend = backend or WindowsBackend()
     current = backend.current()
     with backend.launch_lock(current["sid"]):
@@ -888,6 +949,12 @@ def prepare_runtime(manifest_path, manifest_sha, baseline_path, backend=None):
         require_disjoint_apps(backend, current, paths)
         package = verify_package(backend.package(expected), expected)
         bundle = verify_bundle(manifest_path, manifest_sha, expected, prepared=False)
+        from . import native_app_tools as tools
+        tools.preflight(paths["home"], for_setup=False)
+        receipt = resources_receipt or paths["home"] / ".cadsg-native-tools/resources.json"
+        with backend.home_guard(paths["home"], current["sid"], create=True):
+            resources = tools.bind_resources(package["package"]["location"], paths["home"], receipt,
+                owner_sid=current["sid"], package_full_name=expected["package_full_name"])
         root = manifest_path.parent.resolve(); outputs = list(bundle["files"].values())
         path = root / "app-runtime-manifest.json"
         require(path != manifest_path.resolve(), "raw build manifest must have a separate filename")
@@ -914,12 +981,13 @@ def prepare_runtime(manifest_path, manifest_sha, baseline_path, backend=None):
         if path.exists(): require(load_json(path) == result, "prepared manifest already exists with different inputs")
         else: save(path, result)
         verify_bundle(path, sha(path), expected)
-        return {"manifest": str(path), "manifest_sha256": sha(path), "runtime_executed": False}
+        return {"manifest": str(path), "manifest_sha256": sha(path), "runtime_executed": False,
+                "bundled_resources": resources}
 
 def current_backend_observation(run, plan, receipt, backend):
     """Observe one current generation under the same original App; never adopt a replacement."""
     result = {"status": "unknown", "observed_at": time.time(), "native_processes": [],
-              "excluded_native_processes": [], "app_runtime_acceptance": False,
+              "excluded_native_processes": [], "excluded_auxiliary_processes": [], "app_runtime_acceptance": False,
               "validation_scope": CONTROL_PLANE_SCOPE,
               "native_workload_scope": NATIVE_WORKLOAD_SCOPE}
     stage = "original_launch_unverified"
@@ -971,7 +1039,7 @@ def current_backend_observation(run, plan, receipt, backend):
         stage = "current_control_plane_unverified"
         descendants = backend.native_control_plane(actual,
             executable=native["path"], expected_sha256=native["sha256"],
-            environment=expected)
+            environment=expected, auxiliary_exits=result["excluded_auxiliary_processes"])
         for candidate in descendants:
             if Path(candidate["exe"]).name.casefold() != "codex.exe":
                 continue

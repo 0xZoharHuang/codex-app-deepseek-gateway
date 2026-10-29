@@ -296,7 +296,8 @@ def main(argv=None):
                 return result.get("exit_code", 0)
             except Exception as error:
                 from .isolated_app import LaunchError
-                known = isinstance(error, (delivery.DeliveryError, lifecycle.LifecycleError, LaunchError, ServiceConfigError))
+                from .native_app_tools import NativeToolsError
+                known = isinstance(error, (delivery.DeliveryError, lifecycle.LifecycleError, LaunchError, ServiceConfigError, NativeToolsError))
                 print(json.dumps({"error": type(error).__name__, "detail": str(error) if known else
                                   "Installed App operation failed; inspect its owned local receipts"}), file=sys.stderr)
                 return 2

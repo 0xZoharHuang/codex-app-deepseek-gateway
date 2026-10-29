@@ -15,6 +15,7 @@ from . import lifecycle as lc
 from .app_config import apply, prepare, _atomic_write, _private, _regular_path
 from .atomic_io import target_state
 from . import gateway_policy as gp
+from . import native_app_tools as tools
 
 LAUNCHER_SHA256 = "9a9269f2439aacca2c5b859a82497a1f8ad41a3b1fd111638e5c8701e8025507"
 AUTH_ARGS = ("-I", "-m", "codex_app_deepseek.cli", "auth-token")
@@ -246,7 +247,8 @@ def prepare_runtime(root, manifest, digest, *, backend=None):
     baseline, _ = assets()
     # The native candidate remains an explicit release input. Never select C/D,
     # download a replacement, or redistribute the installed closed App assets.
-    result = app.prepare_runtime(Path(manifest), digest, baseline, backend)
+    result = app.prepare_runtime(Path(manifest), digest, baseline, backend,
+                                 resources_receipt=tools.receipt_paths(installation.data)[0])
     return {"status": "runtime_prepared_not_bound", **result,
             "gateway_release_id": installation.receipt["release_id"]}
 
@@ -317,8 +319,14 @@ def configure(root, catalog, catalog_sha256, *, port=42817, backend=None):
         except app.LaunchError as error:
             raise DeliveryError(str(error)) from error
         value = read_binding(installation, backend, verify_catalog=False)
-        app.verify_package(backend.package(expected), expected)
-        app.verify_bundle(value["native_manifest"], value["native_manifest_sha256"], expected)
+        package = app.verify_package(backend.package(expected), expected)
+        bundle = app.verify_bundle(value["native_manifest"], value["native_manifest_sha256"], expected)
+        inventory = tools.load_inventory()
+        tools.preflight(paths["home"])
+        resources_source = Path(package["package"]["location"]) / inventory["source_relative"]
+        tools.verify_resources(resources_source, inventory)
+        tools.verify_resources(paths["home"] / ".tmp/bundled-marketplaces" / tools.MARKETPLACE,
+                               inventory, source=resources_source, allow_filtered=True)
         with backend.home_guard(paths["home"], owner["sid"], create=True) as home_identity:
             executable = installation.directory / "venv/Scripts/python.exe"
             if not executable.is_file():
@@ -338,25 +346,50 @@ def configure(root, catalog, catalog_sha256, *, port=42817, backend=None):
                 _atomic_write(target, source.read_bytes())
                 if app.sha(target) != catalog_sha256:
                     raise DeliveryError("Catalog changed during copying")
-            planned = prepare(paths["home"] / "config.toml", catalog_path=target,
+            checkpoints = []
+            registered = None
+            checkpoint = None
+            def publish_provider(planned):
+                if not planned.changed:
+                    return None
+                if gp.load_service_config(installation.data).config_sha256 != policy.config_sha256:
+                    raise DeliveryError("Gateway policy changed during App configuration; no App config was applied")
+                checkpoint = apply(planned, backup_dir=installation.data / "config-backups")
+                try:
+                    registration = lc.register_checkpoint(installation.root, checkpoint.manifest_path)
+                except Exception:
+                    raise DeliveryError("Configuration applied but checkpoint registration failed; retain and register "
+                                        + str(checkpoint.manifest_path) + " before rollback/uninstall") from None
+                checkpoints.append(str(checkpoint.manifest_path))
+                return checkpoint, registration
+            # Preserve the original fresh defaults and ensure a registered provider
+            # rollback point exists before the native manager edits configuration.
+            initial = prepare(paths["home"] / "config.toml", catalog_path=target,
                               auth_command=str(executable), auth_args=AUTH_ARGS, port=port)
+            published = publish_provider(initial)
+            if published is not None:
+                checkpoint, registered = published
+            _, native_receipt = tools.receipt_paths(installation.data)
+            native_tools = tools.bootstrap(paths["home"], bundle["files"]["codex.exe"]["path"],
+                bundle["files"]["codex.exe"]["sha256"], inventory, native_receipt,
+                owner_sid=owner["sid"], catalog_path=target, catalog_sha256=catalog_sha256,
+                backup_dir=installation.data / "native-app-tools/policy-backups", source_root=resources_source,
+                native_manifest=value["native_manifest"], native_manifest_sha256=value["native_manifest_sha256"])
+            # Never apply a stale PreparedConfig captured before native CLI edits.
+            final = prepare(paths["home"] / "config.toml", catalog_path=target,
+                            auth_command=str(executable), auth_args=AUTH_ARGS, port=port)
+            published = publish_provider(final)
+            if published is not None:
+                checkpoint, registered = published
             if gp.load_service_config(installation.data).config_sha256 != policy.config_sha256:
-                raise DeliveryError("Gateway policy changed during App configuration; no App config was applied")
-            checkpoint = apply(planned, backup_dir=installation.data / "config-backups")
-            # Preserve the returned checkpoint even if registry update fails. The
-            # existing public register-checkpoint command is the explicit recovery.
-            try:
-                registered = lc.register_checkpoint(installation.root, checkpoint.manifest_path)
-            except Exception:
-                raise DeliveryError("Configuration applied but checkpoint registration failed; retain and register "
-                                    + str(checkpoint.manifest_path) + " before rollback/uninstall") from None
-            if gp.load_service_config(installation.data).config_sha256 != policy.config_sha256:
-                raise DeliveryError("Gateway policy changed after App configuration; retain registered checkpoint "
-                                    + str(checkpoint.manifest_path) + " and explicitly configure again")
+                raise DeliveryError("Gateway policy changed after App configuration; retain registered checkpoints "
+                                    + ", ".join(checkpoints) + " and explicitly configure again")
             value["catalog"] = {"path": str(target), "sha256": catalog_sha256}
             app.save(binding_path(installation), value)
     return {"status": "private_app_configured_not_launched", "config": str(paths["home"] / "config.toml"),
-            "checkpoint": str(checkpoint.manifest_path), "registered_checkpoint": registered,
+            "checkpoint": str(checkpoint.manifest_path) if checkpoint is not None else None,
+            "checkpoints": checkpoints, "registered_checkpoint": registered,
+            "native_app_tools": {"state": native_tools["state"], "plugin_id": tools.PLUGIN_ID},
             "catalog": str(target), "auth_command": str(executable), "auth_args": list(AUTH_ARGS),
             "home_identity": home_identity, "gateway_policy": policy_result, "instruction": "Start or explicitly restart the owned gateway, then run app-check",
             "model_request_performed": False}
@@ -396,6 +429,11 @@ def check(root, *, backend=None, accessibility=False, observation_seconds=60):
     if (auth.get("command") != str(executable) or auth.get("args") != list(AUTH_ARGS)
             or config.get("model_catalog_json") != value["catalog"]["path"]):
         raise DeliveryError("Private App config points outside the selected installed helper/catalog")
+    inventory = tools.load_inventory()
+    _, tools_receipt = tools.receipt_paths(installation.data)
+    native_tools = tools.configured(app.defaults()["home"], checked["bundle"]["files"]["codex.exe"]["path"],
+        checked["bundle"]["files"]["codex.exe"]["sha256"], inventory, tools_receipt,
+        owner_sid=checked["owner"]["sid"])
     gateway = owned_gateway(installation)
     if provider.get("base_url") != f"http://127.0.0.1:{gateway['port']}/v1":
         raise DeliveryError("Private App provider does not address this owned gateway listener")
@@ -412,7 +450,7 @@ def check(root, *, backend=None, accessibility=False, observation_seconds=60):
     return {"status": "validated_not_launched", "gateway_release_id": installation.receipt["release_id"],
             "gateway": gateway, "launch": checked, "request": request,
             "gateway_policy": gp.policy_info(policy), "catalog_models": list(catalog_models),
-            "App_runtime_acceptance": False}
+            "native_app_tools": native_tools, "App_runtime_acceptance": False}
 
 
 def launch(root, *, accessibility=False, observation_seconds=60, wait_seconds=60,
@@ -460,7 +498,7 @@ def launch(root, *, accessibility=False, observation_seconds=60, wait_seconds=60
             value["current_observation"] = observed
         return {"status": "started_expected_backend" if confirmed else "launch_unverified",
                 "exit_code": 0 if confirmed else 3, "launch": value, "replay_allowed": False,
-                "App_runtime_acceptance": False}
+                "native_app_tools": ready.get("native_app_tools"), "App_runtime_acceptance": False}
 
 
 def status(root, *, run_id=None, backend=None):

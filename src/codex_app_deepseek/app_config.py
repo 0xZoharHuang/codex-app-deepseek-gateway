@@ -360,6 +360,7 @@ _MANAGED_GROUPS = {
     "sandbox_mode", "approval_policy", "features.standalone_web_search",
     "features.code_mode", "features.code_mode_only",
     "memories.extract_model", "memories.consolidation_model",
+    "plugins.codex-app-tools@openai-bundled.mcp_servers.codex_app.enabled",
     *(f"model_providers.{PROVIDER_ID}.{key}" for key in
       ("name", "base_url", "wire_api", "supports_websockets", "supports_standalone_web_search", "auth")),
 }

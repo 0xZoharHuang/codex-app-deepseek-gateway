@@ -27,7 +27,7 @@ def build_fixture_wheel(path):
         name + "/WHEEL": "Wheel-Version: 1.0\nGenerator: lifecycle-fixture\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
         name + "/entry_points.txt": "[console_scripts]\ncodex-app-deepseek = codex_app_deepseek.cli:main\n",
     }
-    for module in ("lifecycle.py", "cli.py", "credentials.py", "app_config.py", "gateway_policy.py", "catalog.py", "paths.py", "atomic_io.py", "native_cleanup.py"):
+    for module in ("lifecycle.py", "cli.py", "credentials.py", "app_config.py", "gateway_policy.py", "catalog.py", "paths.py", "atomic_io.py", "native_cleanup.py", "native_app_tools.py"):
         files["codex_app_deepseek/" + module] = (Path(lc.__file__).parent / module).read_text(encoding="utf-8")
     # Carry the real ACL helper and its parser dependency in this synthetic wheel.
     # A stub here would hide failures in the native Windows uninstall path.

@@ -47,7 +47,7 @@ def generation(tmp_path,monkeypatch):
         def descendants(self,item):
             self.descendant_calls+=1
             return [self.identity(pid) for pid in self.descendant_pids]
-        def native_control_plane(self, item, *, executable, expected_sha256, environment):
+        def native_control_plane(self, item, *, executable, expected_sha256, environment, auxiliary_exits=None):
             assert Path(executable) == native and expected_sha256 == row["sha256"]
             assert environment == env
             return self.descendants(item)

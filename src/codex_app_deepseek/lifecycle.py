@@ -1005,6 +1005,9 @@ def register_checkpoint(install_root: Path, checkpoint_path: Path) -> dict:
     if path.name != "checkpoint.json":
         raise LifecycleError("Checkpoint registration requires the owned checkpoint manifest")
     details = _checkpoint_details(path)
+    from .native_app_tools import POLICY_KEY
+    if POLICY_KEY in details["manifest"]["changed_settings"]:
+        raise LifecycleError("Native MCP policy checkpoints are owned by their native installation receipt")
     if details["manifest"]["state"] == "restore_prepared":
         raise LifecycleError("Finish the prepared restore before new registration")
     if details["manifest"]["state"] == "restored":
@@ -1023,12 +1026,25 @@ def register_checkpoint(install_root: Path, checkpoint_path: Path) -> dict:
 
 
 def rollback(install_root: Path) -> dict:
+    from .native_app_tools import rollback_admission
+    root = _home(install_root)
+    _, receipt, _ = _active(root)
+    data = _home(Path(receipt["data_home"]))
+    with rollback_admission(data) as native_rollback:
+        return _rollback_registered(root, native_rollback)
+
+
+def _rollback_registered(install_root: Path, native_rollback) -> dict:
     from . import app_config as ac
     root = _home(install_root)
     _, receipt, _ = _active(root)
     data = _home(Path(receipt["data_home"]))
     registry_path = root / "checkpoints.json"
     if not registry_path.exists():
+        native = native_rollback()
+        if native["status"] != "not_configured":
+            return {"status": "rolled_back", "restored_checkpoints": [], "native_app_tools": native,
+                    "persistent_data_deleted": False, "credentials_deleted": False}
         raise LifecycleError("No registered owned checkpoint; no App configuration was changed")
     registry, details, reconciled = _read_registry(root, data)
     records = registry["checkpoints"]
@@ -1055,6 +1071,9 @@ def rollback(install_root: Path) -> dict:
         else:
             virtual[config] = ac._three_way_bytes(detail["original"], detail["applied"], current,
                                                 detail["manifest"]["changed_settings"])
+    # Native software owns its own fields; remove only unchanged project-created
+    # objects before the existing reverse provider checkpoint chain runs.
+    native_tools = native_rollback()
     restored = []
     try:
         for item in reversed(records):
@@ -1072,7 +1091,7 @@ def rollback(install_root: Path) -> dict:
             raise LifecycleError(f"Rollback stopped after {len(restored)} completed checkpoint(s); reconcile recorded restore states before continuing") from error
         raise
     return {"status": "rolled_back", "restored_checkpoints": restored,
-            "reconciled_completed_restores": reconciled,
+            "native_app_tools": native_tools, "reconciled_completed_restores": reconciled,
             "persistent_data_deleted": False, "credentials_deleted": False}
 
 
@@ -1088,7 +1107,8 @@ def prepare_uninstall(install_root: Path, *, remove_task=True, process_factory=N
         from .native_cleanup import admission, NativeCleanupError
         try:
             with admission(root, directory, receipt, retry_unconfirmed=retry_native_cleanup) as native:
-                if (root / "checkpoints.json").exists():
+                from .native_app_tools import receipt_paths
+                if (root / "checkpoints.json").exists() or receipt_paths(_home(Path(receipt["data_home"])))[1].exists():
                     rollback(root)
                 native_result = native.execute(retry_unconfirmed=retry_native_cleanup)
                 stopped = _stop_locked(root, process_factory=process_factory, remove_task=remove_task)

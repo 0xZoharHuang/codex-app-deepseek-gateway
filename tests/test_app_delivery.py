@@ -12,6 +12,16 @@ from test_isolated_app import fixture as native_fixture
 @pytest.fixture
 def fixture(native_fixture, tmp_path, monkeypatch):
     paths, expected, manifest_path, manifest, request, backend = native_fixture
+    # Provider/delivery tests keep native installation mocked; the native helper
+    # has its own filesystem/CLI tests and recorded real-CLI integration gate.
+    from codex_app_deepseek import native_app_tools as tools
+    import shutil
+    source = Path(backend.package(expected)["package"]["location"]) / "bundled"
+    target = paths["home"] / ".tmp/bundled-marketplaces/openai-bundled"
+    target.parent.mkdir(parents=True)
+    shutil.copytree(source, target)
+    monkeypatch.setattr(tools, "bootstrap", lambda *args, **kwargs: {"state": "configured"})
+    monkeypatch.setattr(tools, "configured", lambda *args, **kwargs: {"status": "unit_mock_configuration"})
     root = tmp_path / "install"; root.mkdir()
     directory = root / "releases" / ("a" * 20)
     executable = directory / "venv/Scripts/codex-app-deepseek.exe"
@@ -637,3 +647,66 @@ def test_cohort_retained_receipt_change_during_verification_cannot_be_backed_up(
         bind(f)
     assert delivery.binding_path(f.installation).read_bytes() == old.raw
     assert not (f.installation.data / "app-binding-backups").exists()
+
+
+def test_fresh_defaults_precede_native_config_and_noop_does_not_duplicate_checkpoints(fixture, monkeypatch):
+    import tomllib, tomlkit
+    from codex_app_deepseek import native_app_tools as tools
+    f = fixture; bind(f)
+    config = f.paths["home"] / "config.toml"
+    config.unlink()
+    registered = []
+    monkeypatch.setattr(delivery.lc, "register_checkpoint", lambda root, path: registered.append(path))
+    def bootstrap(*args, **kwargs):
+        assert len(registered) == 1
+        document = tomlkit.parse(config.read_text())
+        assert document["sandbox_mode"] == "workspace-write"
+        assert document["approval_policy"] == "on-request"
+        document["plugins"] = {tools.PLUGIN_ID: {"enabled": True, "mcp_servers": {tools.SERVER: {"enabled": True}}}}
+        config.write_bytes(tomlkit.dumps(document).encode())
+        return {"state": "configured"}
+    monkeypatch.setattr(tools, "bootstrap", bootstrap)
+    result = delivery.configure(f.installation.root, f.catalog, app.sha(f.catalog), backend=f.backend)
+    assert len(result["checkpoints"]) == len(registered) == 1
+    manifest = json.loads(Path(result["checkpoint"]).read_bytes())
+    assert not manifest["was_present"] and tools.POLICY_KEY not in manifest["changed_settings"]
+    assert tomllib.loads(config.read_text())["plugins"][tools.PLUGIN_ID]["mcp_servers"][tools.SERVER]["enabled"]
+    monkeypatch.setattr(tools, "bootstrap", lambda *args, **kwargs: {"state": "configured"})
+    again = delivery.configure(f.installation.root, f.catalog, app.sha(f.catalog), backend=f.backend)
+    assert again["checkpoint"] is None and again["checkpoints"] == [] and len(registered) == 1
+
+
+def test_provider_is_reprepared_from_native_cli_bytes_before_second_checkpoint(fixture, monkeypatch):
+    import tomlkit
+    from codex_app_deepseek import native_app_tools as tools
+    f = fixture; bind(f)
+    config = f.paths["home"] / "config.toml"
+    registered, captured = [], []
+    monkeypatch.setattr(delivery.lc, "register_checkpoint", lambda root, path: registered.append(path))
+    def bootstrap(*args, **kwargs):
+        assert len(registered) == 1
+        document = tomlkit.parse(config.read_text())
+        document["web_search"] = "disabled"
+        document["plugins"] = {tools.PLUGIN_ID: {"enabled": True}}
+        config.write_bytes(tomlkit.dumps(document).encode())
+        captured.append(app.sha(config))
+        return {"state": "configured"}
+    monkeypatch.setattr(tools, "bootstrap", bootstrap)
+    result = delivery.configure(f.installation.root, f.catalog, app.sha(f.catalog), backend=f.backend)
+    assert len(result["checkpoints"]) == len(registered) == 2
+    second = json.loads(Path(result["checkpoints"][-1]).read_bytes())
+    assert second["before_sha256"] == captured[0] and second["changed_settings"] == ["web_search"]
+    assert tomlkit.parse(config.read_text())["plugins"][tools.PLUGIN_ID]["enabled"]
+
+
+def test_legacy_mcp_conflict_precedes_catalog_policy_and_provider_publication(fixture, monkeypatch):
+    from codex_app_deepseek import native_app_tools as tools
+    f = fixture; bind(f)
+    config = f.paths["home"] / "config.toml"
+    original = config.read_bytes() + b'\n[mcp_servers.codex_app]\ncommand="user-owned"\n'
+    config.write_bytes(original)
+    monkeypatch.setattr(delivery.gp, "ensure_app_policy", lambda *args: pytest.fail("No policy write before conflict check"))
+    monkeypatch.setattr(delivery.lc, "register_checkpoint", lambda *args: pytest.fail("No checkpoint before conflict check"))
+    with pytest.raises(tools.NativeToolsConflict, match="Legacy"):
+        delivery.configure(f.installation.root, f.catalog, app.sha(f.catalog), backend=f.backend)
+    assert config.read_bytes() == original and not (f.installation.data / "app-catalogs").exists()
