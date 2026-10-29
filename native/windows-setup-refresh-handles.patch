@@ -1,0 +1,1348 @@
+--- a/codex-rs/windows-sandbox-rs/src/setup.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup.rs
+@@ -1,5 +1,8 @@
+ #[path = "artifact_read_roots.rs"]
+ pub(crate) mod artifact_read_roots;
++
++#[path = "setup_refresh_launch.rs"]
++mod setup_refresh_launch;
+ 
+ pub use crate::runtime_ownership::SetupRuntime;
+ use serde::Deserialize;
+@@ -440,7 +443,7 @@
+         ),
+         Some(&sbx_dir),
+     );
+-    let status = cmd.status().map_err(|err| {
++    let status = setup_refresh_launch::status(&cmd).map_err(|err| {
+         let message = format!(
+             "setup refresh failed to launch helper: helper={}, cwd={}, log={}, error={err}",
+             exe.display(),
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/setup_refresh_launch.rs
+@@ -0,0 +1,410 @@
++//! Foreground setup refresh must not pass unrelated caller pipes to the helper family.
++//! Only process creation/wait changes; the J helper retains native setup/ACL work.
++use crate::proc_thread_attr::ProcThreadAttributeList;
++use crate::winutil::to_wide;
++use std::cmp::Ordering;
++use std::ffi::{OsStr, OsString};
++use std::fs::OpenOptions;
++use std::io;
++use std::os::windows::ffi::{OsStrExt, OsStringExt};
++use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
++use std::os::windows::process::ExitStatusExt;
++use std::path::{Path, PathBuf};
++use std::process::{Command, ExitStatus};
++use windows_sys::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, WAIT_OBJECT_0};
++use windows_sys::Win32::Storage::FileSystem::{
++    GetFileAttributesW, GetFullPathNameW, INVALID_FILE_ATTRIBUTES,
++};
++use windows_sys::Win32::System::Threading::{
++    CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT,
++    GetCurrentProcess, GetExitCodeProcess, INFINITE, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
++    STARTUPINFOEXW, WaitForSingleObject,
++};
++
++#[link(name = "kernel32")]
++unsafe extern "system" {
++    fn CompareStringOrdinal(
++        a: *const u16,
++        na: i32,
++        b: *const u16,
++        nb: i32,
++        ignore_case: i32,
++    ) -> i32;
++}
++
++fn compare_keys(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> io::Result<Ordering> {
++    let a: Vec<_> = a.encode_wide().collect();
++    let b: Vec<_> = b.encode_wide().collect();
++    let na = i32::try_from(a.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
++    let nb = i32::try_from(b.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
++    // SAFETY: Both counted UTF-16 slices are valid throughout this call.
++    match unsafe { CompareStringOrdinal(a.as_ptr(), na, b.as_ptr(), nb, 1) } {
++        1 => Ok(Ordering::Less),
++        2 => Ok(Ordering::Equal),
++        3 => Ok(Ordering::Greater),
++        _ => Err(io::Error::last_os_error()),
++    }
++}
++
++fn environment_with_payload_overrides(command: &Command) -> io::Result<Vec<u16>> {
++    // configure_command only adds/removes its invocation-scoped payload keys.
++    // Preserve every other inherited value as UTF-16, including non-UTF-8 values.
++    let mut entries: Vec<(OsString, OsString)> = std::env::vars_os().collect();
++    for (key, value) in command.get_envs() {
++        if !crate::environment_transport::is_key(key) {
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidInput,
++                "setup helper may only override launch-payload environment keys",
++            ));
++        }
++        let mut kept = Vec::with_capacity(entries.len() + 1);
++        for (old_key, old_value) in entries {
++            if compare_keys(&old_key, key)? != Ordering::Equal {
++                kept.push((old_key, old_value));
++            }
++        }
++        if let Some(value) = value {
++            kept.push((key.to_os_string(), value.to_os_string()));
++        }
++        entries = kept;
++    }
++    let mut error = None;
++    entries.sort_by(|a, b| match compare_keys(&a.0, &b.0) {
++        Ok(order) => order,
++        Err(value) => {
++            error = Some(value);
++            Ordering::Equal
++        }
++    });
++    if let Some(error) = error {
++        return Err(error);
++    }
++    let mut block = Vec::new();
++    for (key, value) in entries {
++        block.extend(key.encode_wide());
++        block.push(b'=' as u16);
++        block.extend(value.encode_wide());
++        block.push(0);
++    }
++    if block.is_empty() {
++        block.push(0);
++    }
++    block.push(0);
++    Ok(block)
++}
++
++// Mirror the existing CRT quoting rules over UTF-16 code units so a valid
++// Windows OsStr (including unpaired surrogates) never passes through UTF-8.
++fn command_line(command: &Command) -> io::Result<Vec<u16>> {
++    let mut line = Vec::new();
++    for (index, value) in std::iter::once(command.get_program())
++        .chain(command.get_args())
++        .enumerate()
++    {
++        let value: Vec<u16> = value.encode_wide().collect();
++        if value.contains(&0) {
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidInput,
++                "NUL in setup argument",
++            ));
++        }
++        if index > 0 {
++            line.push(b' ' as u16);
++        }
++        let quoted = value.is_empty() || value.iter().any(|x| matches!(*x, 9 | 10 | 13 | 32 | 34));
++        if !quoted {
++            line.extend(value);
++            continue;
++        }
++        line.push(b'"' as u16);
++        let mut slashes = 0;
++        for unit in value {
++            if unit == b'\\' as u16 {
++                slashes += 1;
++                continue;
++            }
++            if unit == b'"' as u16 {
++                line.extend(std::iter::repeat_n(b'\\' as u16, slashes * 2 + 1));
++            } else {
++                line.extend(std::iter::repeat_n(b'\\' as u16, slashes));
++            }
++            line.push(unit);
++            slashes = 0;
++        }
++        line.extend(std::iter::repeat_n(b'\\' as u16, slashes * 2));
++        line.push(b'"' as u16);
++    }
++    line.push(0);
++    Ok(line)
++}
++
++fn spawn_with_null_stdio(command: &Command) -> io::Result<OwnedHandle> {
++    let program = resolve_program(command.get_program())?;
++    let mut command_line = command_line(command)?;
++    let environment = environment_with_payload_overrides(command)?;
++    let cwd = command.get_current_dir().map(to_wide);
++    let null = OpenOptions::new().read(true).write(true).open("NUL")?;
++    let mut inherited = std::ptr::null_mut();
++    // SAFETY: Duplicate only the newly opened NUL handle, never caller stdio.
++    if unsafe {
++        DuplicateHandle(
++            GetCurrentProcess(),
++            null.as_raw_handle(),
++            GetCurrentProcess(),
++            &mut inherited,
++            0,
++            1,
++            DUPLICATE_SAME_ACCESS,
++        )
++    } == 0
++    {
++        return Err(io::Error::last_os_error());
++    }
++    // SAFETY: A successful DuplicateHandle returned a uniquely owned handle.
++    let inherited = unsafe { OwnedHandle::from_raw_handle(inherited) };
++    let mut attributes = ProcThreadAttributeList::new(1)?;
++    attributes.set_handle_list(vec![inherited.as_raw_handle()])?;
++    let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
++    startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
++    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
++    startup.StartupInfo.hStdInput = inherited.as_raw_handle();
++    startup.StartupInfo.hStdOutput = inherited.as_raw_handle();
++    startup.StartupInfo.hStdError = inherited.as_raw_handle();
++    startup.lpAttributeList = attributes.as_mut_ptr();
++    let mut child: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
++    // SAFETY: All strings, environment, allowed handle and attributes outlive creation.
++    // bInheritHandles must be TRUE for the explicit HANDLE_LIST, which excludes all
++    // other handles. The caller waits on the exact returned process handle.
++    if unsafe {
++        CreateProcessW(
++            program.as_ptr(),
++            command_line.as_mut_ptr(),
++            std::ptr::null(),
++            std::ptr::null(),
++            1,
++            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
++            environment.as_ptr().cast(),
++            cwd.as_ref().map_or(std::ptr::null(), |x| x.as_ptr()),
++            &startup.StartupInfo,
++            &mut child,
++        )
++    } == 0
++    {
++        return Err(io::Error::last_os_error());
++    }
++    // SAFETY: Successful CreateProcessW returns these two uniquely owned handles.
++    let _thread = unsafe { OwnedHandle::from_raw_handle(child.hThread) };
++    Ok(unsafe { OwnedHandle::from_raw_handle(child.hProcess) })
++}
++
++// Fixed-helper resolution and Windows path conversion are a narrow port of Rust
++// 1.99.1, commit 58cf8f9c35b355199727627d07ae34a4e2846d67:
++// library/std/src/sys/process/windows.rs:468-600,
++// library/std/src/sys/args/windows.rs:351-409,
++// library/std/src/sys/path/windows.rs:94-181.
++// Copyright The Rust Project Developers; used under the Apache-2.0 option.
++// Only find_setup_exe's absolute *.exe or its one fixed bare name is accepted.
++// configure_command never overrides PATH; unsupported overrides fail before launch.
++#[link(name = "kernel32")]
++unsafe extern "system" {
++    #[link_name = "GetSystemDirectoryW"]
++    fn get_system_directory(buffer: *mut u16, size: u32) -> u32;
++    #[link_name = "GetWindowsDirectoryW"]
++    fn get_windows_directory(buffer: *mut u16, size: u32) -> u32;
++}
++
++fn query_utf16(mut query: impl FnMut(*mut u16, u32) -> u32) -> io::Result<Vec<u16>> {
++    let mut buffer = vec![0; 512];
++    loop {
++        let size = u32::try_from(buffer.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
++        let count = query(buffer.as_mut_ptr(), size);
++        if count == 0 {
++            return Err(io::Error::last_os_error());
++        }
++        if count < size {
++            buffer.truncate(count as usize);
++            return Ok(buffer);
++        }
++        buffer.resize(count as usize + 1, 0);
++    }
++}
++
++fn full_path(path: &[u16]) -> io::Result<Vec<u16>> {
++    query_utf16(|buffer, size| unsafe {
++        GetFullPathNameW(path.as_ptr(), size, buffer, std::ptr::null_mut())
++    })
++}
++
++fn terminated_path(path: &Path) -> io::Result<Vec<u16>> {
++    let mut wide: Vec<_> = path.as_os_str().encode_wide().collect();
++    if wide.contains(&0) {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidInput,
++            "file name contains NUL",
++        ));
++    }
++    wide.push(0);
++    Ok(wide)
++}
++
++fn long_user_path(mut path: Vec<u16>) -> io::Result<Vec<u16>> {
++    const SEP: u16 = b'\\' as u16;
++    const ALT: u16 = b'/' as u16;
++    const QUERY: u16 = b'?' as u16;
++    const COLON: u16 = b':' as u16;
++    const DOT: u16 = b'.' as u16;
++    const VERBATIM: &[u16] = &[SEP, SEP, QUERY, SEP];
++    const NT: &[u16] = &[SEP, QUERY, QUERY, SEP];
++    const UNC: &[u16] = &[
++        SEP,
++        SEP,
++        QUERY,
++        SEP,
++        b'U' as u16,
++        b'N' as u16,
++        b'C' as u16,
++        SEP,
++    ];
++    if path.starts_with(VERBATIM) || path.starts_with(NT) || path == [0] {
++        return Ok(path);
++    }
++    if path.len() < 248 {
++        match path.as_slice() {
++            [drive, COLON, 0] | [drive, COLON, SEP | ALT, ..] if *drive != SEP && *drive != ALT => {
++                return Ok(path);
++            }
++            [SEP | ALT, SEP | ALT, ..] => return Ok(path),
++            _ => {}
++        }
++    }
++    let absolute = full_path(&path)?;
++    let mut tail = absolute.as_slice();
++    path.clear();
++    if absolute.len() + 1 >= 248 {
++        let prefix = match tail {
++            [_, COLON, SEP, ..] => VERBATIM,
++            [SEP, SEP, DOT, SEP, ..] => {
++                tail = &tail[4..];
++                VERBATIM
++            }
++            [SEP, SEP, QUERY, SEP, ..] | [SEP, QUERY, QUERY, SEP, ..] => &[],
++            [SEP, SEP, ..] => {
++                tail = &tail[2..];
++                UNC
++            }
++            _ => &[],
++        };
++        path.extend_from_slice(prefix);
++    }
++    path.extend_from_slice(tail);
++    path.push(0);
++    Ok(path)
++}
++
++fn user_path(path: &Path) -> io::Result<Vec<u16>> {
++    const SEP: u16 = b'\\' as u16;
++    const QUERY: u16 = b'?' as u16;
++    const COLON: u16 = b':' as u16;
++    let mut wide = terminated_path(path)?;
++    if wide.len() > 260 {
++        return Ok(wide);
++    }
++    match wide.as_slice() {
++        [SEP, SEP, QUERY, SEP, _, COLON, SEP, ..] => {
++            let full = full_path(&wide[4..])?;
++            if full == wide[4..wide.len() - 1] {
++                let mut full = full;
++                full.push(0);
++                Ok(full)
++            } else {
++                Ok(wide)
++            }
++        }
++        [SEP, SEP, QUERY, SEP, 85, 78, 67, SEP, ..] => {
++            wide[6] = SEP;
++            let full = full_path(&wide[6..])?;
++            if full == wide[6..wide.len() - 1] {
++                let mut full = full;
++                full.push(0);
++                Ok(full)
++            } else {
++                wide[6] = b'C' as u16;
++                Ok(wide)
++            }
++        }
++        _ => long_user_path(wide),
++    }
++}
++
++fn find_in_directories(file: &OsStr, directories: &[PathBuf]) -> Option<Vec<u16>> {
++    for directory in directories {
++        if let Ok(candidate) = user_path(&directory.join(file))
++            && unsafe { GetFileAttributesW(candidate.as_ptr()) } != INVALID_FILE_ATTRIBUTES
++        {
++            return Some(candidate);
++        }
++    }
++    None
++}
++
++fn search_directories(
++    application: Option<PathBuf>,
++    system: Option<PathBuf>,
++    windows: Option<PathBuf>,
++    parent_path: Option<OsString>,
++) -> Vec<PathBuf> {
++    let mut directories = Vec::new();
++    directories.extend(application);
++    directories.extend(system);
++    directories.extend(windows);
++    if let Some(paths) = parent_path {
++        directories
++            .extend(std::env::split_paths(&paths).filter(|path| !path.as_os_str().is_empty()));
++    }
++    directories
++}
++
++fn resolve_program(program: &OsStr) -> io::Result<Vec<u16>> {
++    let path = Path::new(program);
++    if path.is_absolute() {
++        return user_path(path);
++    }
++    if program != OsStr::new(super::SETUP_EXE_FILENAME) {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidInput,
++            "unsupported setup executable form",
++        ));
++    }
++    let application = std::env::current_exe()
++        .ok()
++        .and_then(|exe| exe.parent().map(Path::to_path_buf));
++    let system = query_utf16(|buffer, size| unsafe { get_system_directory(buffer, size) })
++        .ok()
++        .map(|wide| PathBuf::from(OsString::from_wide(&wide)));
++    let windows = query_utf16(|buffer, size| unsafe { get_windows_directory(buffer, size) })
++        .ok()
++        .map(|wide| PathBuf::from(OsString::from_wide(&wide)));
++    let directories = search_directories(application, system, windows, std::env::var_os("PATH"));
++    find_in_directories(program, &directories)
++        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "program not found"))
++}
++
++fn wait_process(process: &OwnedHandle) -> io::Result<ExitStatus> {
++    if unsafe { WaitForSingleObject(process.as_raw_handle(), INFINITE) } != WAIT_OBJECT_0 {
++        return Err(io::Error::last_os_error());
++    }
++    let mut code = 0;
++    if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) } == 0 {
++        return Err(io::Error::last_os_error());
++    }
++    Ok(ExitStatus::from_raw(code))
++}
++
++pub(super) fn status(command: &Command) -> io::Result<ExitStatus> {
++    let process = spawn_with_null_stdio(command)?;
++    wait_process(&process)
++}
++
++#[cfg(test)]
++#[path = "setup_refresh_launch_tests.rs"]
++mod tests;
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/setup_refresh_launch_tests.rs
+@@ -0,0 +1,912 @@
++//! Three-generation foreground-handle boundary component. No product helper or setup/SAM work.
++use anyhow::{Context, Result, bail, ensure};
++use base64::Engine;
++use base64::engine::general_purpose::STANDARD as BASE64;
++use serde::{Deserialize, Serialize};
++use std::ffi::{OsStr, OsString};
++use std::fs;
++use std::io::{Read, Write};
++use std::os::windows::ffi::{OsStrExt, OsStringExt};
++use std::os::windows::fs::MetadataExt;
++use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
++use std::os::windows::process::CommandExt;
++use std::path::{Path, PathBuf};
++use std::process::{Child, Command, Stdio};
++use std::ptr::null_mut;
++use std::thread;
++use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
++use windows_sys::Win32::Foundation::{
++    ERROR_BROKEN_PIPE, FILETIME, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, LocalFree,
++    SetHandleInformation, WAIT_OBJECT_0,
++};
++use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
++use windows_sys::Win32::Security::{
++    GetTokenInformation, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenElevationType,
++    TokenUser,
++};
++use windows_sys::Win32::System::Console::{
++    GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
++};
++use windows_sys::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
++use windows_sys::Win32::System::Threading::{
++    GetCurrentProcess, GetExitCodeProcess, GetProcessId, GetProcessTimes, OpenProcess,
++    OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, TerminateProcess, WaitForSingleObject,
++};
++
++const ROLE_TEST: &str = "setup::setup_refresh_launch::tests::component_role";
++const PREFIX: &str = "cag-foreground-boundary-";
++const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
++const STILL_RUNNING: u32 = 259;
++
++#[derive(Clone, Serialize, Deserialize)]
++struct Payload {
++    root: PathBuf,
++    nonce: String,
++    role: String,
++    padding: String,
++    exit_code: u32,
++}
++
++#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
++struct TokenIdentity {
++    sid: String,
++    elevation_type: u32,
++}
++
++#[derive(Serialize, Deserialize, Debug)]
++struct Ready {
++    nonce: String,
++    role: String,
++    pid: u32,
++    creation_time: u64,
++    token: TokenIdentity,
++    cwd: PathBuf,
++    stdio_valid: bool,
++    read_eof: bool,
++    writes_succeeded: bool,
++    environment_transport: bool,
++    unrelated_utf16_preserved: Option<bool>,
++}
++
++#[derive(Serialize, Deserialize, Debug)]
++struct Foreground {
++    own: Ready,
++    grandchild_pid: Option<u32>,
++    grandchild_birth: Option<u64>,
++}
++
++fn current_token_identity() -> Result<TokenIdentity> {
++    let mut raw = null_mut();
++    ensure!(
++        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) } != 0,
++        "query own token"
++    );
++    let token = unsafe { OwnedHandle::from_raw_handle(raw) };
++    let mut needed = 0;
++    unsafe { GetTokenInformation(token.as_raw_handle(), TokenUser, null_mut(), 0, &mut needed) };
++    ensure!(needed != 0, "missing token user size");
++    let mut buffer = vec![0usize; (needed as usize).div_ceil(size_of::<usize>())];
++    ensure!(
++        unsafe {
++            GetTokenInformation(
++                token.as_raw_handle(),
++                TokenUser,
++                buffer.as_mut_ptr().cast(),
++                needed,
++                &mut needed,
++            )
++        } != 0,
++        "query token user"
++    );
++    let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
++    let mut text = null_mut();
++    ensure!(
++        unsafe { ConvertSidToStringSidW(user.User.Sid, &mut text) } != 0,
++        "format own SID"
++    );
++    let sid = unsafe {
++        let mut length = 0;
++        while *text.add(length) != 0 {
++            length += 1;
++        }
++        let result = String::from_utf16(std::slice::from_raw_parts(text, length));
++        LocalFree(text.cast());
++        result?
++    };
++    let mut elevation_type = 0u32;
++    ensure!(
++        unsafe {
++            GetTokenInformation(
++                token.as_raw_handle(),
++                TokenElevationType,
++                (&mut elevation_type as *mut u32).cast(),
++                4,
++                &mut needed,
++            )
++        } != 0,
++        "query token elevation type"
++    );
++    Ok(TokenIdentity {
++        sid,
++        elevation_type,
++    })
++}
++
++fn process_birth(handle: HANDLE) -> Result<u64> {
++    let mut creation: FILETIME = unsafe { std::mem::zeroed() };
++    let mut exit: FILETIME = unsafe { std::mem::zeroed() };
++    let mut kernel: FILETIME = unsafe { std::mem::zeroed() };
++    let mut user: FILETIME = unsafe { std::mem::zeroed() };
++    ensure!(
++        unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) } != 0,
++        "query own child creation time: {}",
++        std::io::Error::last_os_error()
++    );
++    Ok((u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime))
++}
++
++fn child_running(handle: HANDLE) -> Result<bool> {
++    let mut code = 0;
++    ensure!(
++        unsafe { GetExitCodeProcess(handle, &mut code) } != 0,
++        "query own child exit state: {}",
++        std::io::Error::last_os_error()
++    );
++    Ok(code == STILL_RUNNING)
++}
++
++fn own_pipe() -> Result<(OwnedHandle, OwnedHandle)> {
++    let attributes = SECURITY_ATTRIBUTES {
++        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
++        lpSecurityDescriptor: null_mut(),
++        bInheritHandle: 1,
++    };
++    let mut read = null_mut();
++    let mut write = null_mut();
++    ensure!(
++        unsafe { CreatePipe(&mut read, &mut write, &attributes, 0) } != 0,
++        "create isolated anonymous pipe: {}",
++        std::io::Error::last_os_error()
++    );
++    // SAFETY: CreatePipe returned two distinct, uniquely owned handles.
++    let read = unsafe { OwnedHandle::from_raw_handle(read) };
++    let write = unsafe { OwnedHandle::from_raw_handle(write) };
++    ensure!(
++        unsafe { SetHandleInformation(read.as_raw_handle(), HANDLE_FLAG_INHERIT, 0) } != 0,
++        "make own pipe reader non-inheritable: {}",
++        std::io::Error::last_os_error()
++    );
++    Ok((read, write))
++}
++
++fn pipe_eof(read: &OwnedHandle) -> Result<bool> {
++    let mut available = 0;
++    let ok = unsafe {
++        PeekNamedPipe(
++            read.as_raw_handle(),
++            null_mut(),
++            0,
++            null_mut(),
++            &mut available,
++            null_mut(),
++        )
++    };
++    if ok != 0 {
++        ensure!(
++            available == 0,
++            "unrelated fixture pipe unexpectedly carried data"
++        );
++        return Ok(false);
++    }
++    let error = unsafe { GetLastError() };
++    if error == ERROR_BROKEN_PIPE {
++        return Ok(true);
++    }
++    bail!(
++        "inspect isolated fixture pipe: {}",
++        std::io::Error::from_raw_os_error(error as i32)
++    )
++}
++
++fn wait_eof(read: &OwnedHandle, bound: Duration) -> Result<bool> {
++    let deadline = Instant::now() + bound;
++    loop {
++        if pipe_eof(read)? {
++            return Ok(true);
++        }
++        if Instant::now() >= deadline {
++            return Ok(false);
++        }
++        thread::sleep(Duration::from_millis(5));
++    }
++}
++
++enum ForegroundOwned {
++    Native(OwnedHandle),
++    Original(Child),
++}
++
++impl ForegroundOwned {
++    fn as_raw_handle(&self) -> HANDLE {
++        match self {
++            Self::Native(process) => process.as_raw_handle(),
++            Self::Original(child) => child.as_raw_handle(),
++        }
++    }
++}
++
++struct ReleaseGate {
++    release: PathBuf,
++    nonce: String,
++    foreground: Option<ForegroundOwned>,
++    foreground_identity: Option<(u32, u64)>,
++    process: Option<OwnedHandle>,
++    finished: bool,
++}
++
++impl ReleaseGate {
++    fn new(root: &Path, nonce: &str) -> Self {
++        Self {
++            release: root.join("release"),
++            nonce: nonce.into(),
++            foreground: None,
++            foreground_identity: None,
++            process: None,
++            finished: false,
++        }
++    }
++
++    fn adopt_foreground(&mut self, process: OwnedHandle) -> Result<()> {
++        self.foreground = Some(ForegroundOwned::Native(process));
++        let handle = self
++            .foreground
++            .as_ref()
++            .context("missing foreground handle")?
++            .as_raw_handle();
++        let pid = unsafe { GetProcessId(handle) };
++        let birth = process_birth(handle)?;
++        ensure!(pid != 0, "foreground process identifier missing");
++        self.foreground_identity = Some((pid, birth));
++        Ok(())
++    }
++
++    fn adopt_original_foreground(&mut self, child: Child) -> Result<()> {
++        self.foreground = Some(ForegroundOwned::Original(child));
++        let handle = self
++            .foreground
++            .as_ref()
++            .context("missing original foreground")?
++            .as_raw_handle();
++        let pid = unsafe { GetProcessId(handle) };
++        let birth = process_birth(handle)?;
++        ensure!(pid != 0, "original foreground process identifier missing");
++        self.foreground_identity = Some((pid, birth));
++        Ok(())
++    }
++
++    fn observe_grandchild(&mut self) -> Result<()> {
++        if self.process.is_some() {
++            return Ok(());
++        }
++        let path = self
++            .release
++            .parent()
++            .context("missing fixture root")?
++            .join("foreground.json");
++        let raw = match fs::read(path) {
++            Ok(raw) => raw,
++            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
++            Err(error) => return Err(error.into()),
++        };
++        let family: Foreground = serde_json::from_slice(&raw)?;
++        ensure!(
++            family.own.nonce == self.nonce
++                && family.own.role == "foreground"
++                && Some((family.own.pid, family.own.creation_time)) == self.foreground_identity,
++            "foreground receipt does not identify our returned process"
++        );
++        if let (Some(pid), Some(birth)) = (family.grandchild_pid, family.grandchild_birth) {
++            self.process = Some(open_own_process(pid, birth)?);
++        }
++        Ok(())
++    }
++
++    fn finish(&mut self) -> Result<()> {
++        fs::write(&self.release, b"release")?;
++        let process = self
++            .process
++            .as_ref()
++            .context("own child was not admitted")?;
++        ensure!(
++            unsafe { WaitForSingleObject(process.as_raw_handle(), 3_000) } == WAIT_OBJECT_0,
++            "own child did not finish after its release gate"
++        );
++        let mut code = 0;
++        ensure!(
++            unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) } != 0 && code == 0,
++            "own gated child did not exit successfully; code={code}"
++        );
++        self.finished = true;
++        Ok(())
++    }
++}
++
++impl Drop for ReleaseGate {
++    fn drop(&mut self) {
++        if !self.finished {
++            let _ = fs::write(&self.release, b"release");
++            let _ = self.observe_grandchild();
++            for (role, process) in [
++                (
++                    "foreground",
++                    self.foreground.as_ref().map(ForegroundOwned::as_raw_handle),
++                ),
++                (
++                    "grandchild",
++                    self.process.as_ref().map(AsRawHandle::as_raw_handle),
++                ),
++            ] {
++                if let Some(process) = process {
++                    if unsafe { WaitForSingleObject(process, 3_000) } != WAIT_OBJECT_0 {
++                        let pid = unsafe { GetProcessId(process) };
++                        let birth = process_birth(process).ok();
++                        // Every handle is owned from the actual spawn or exact verified birth.
++                        unsafe {
++                            TerminateProcess(process, 0xee);
++                            WaitForSingleObject(process, 3_000);
++                        }
++                        eprintln!("failed fixture exact {role} cleanup pid={pid} birth={birth:?}");
++                    }
++                }
++            }
++        }
++    }
++}
++
++fn role_command(payload: &Payload) -> Result<Command> {
++    let mut command = Command::new(std::env::current_exe()?);
++    command.args([
++        "--ignored",
++        "--exact",
++        ROLE_TEST,
++        "--nocapture",
++        "--test-threads",
++        "1",
++        "--",
++    ]);
++    command.current_dir(&payload.root);
++    crate::launch_environment::configure_command(
++        &mut command,
++        &BASE64.encode(serde_json::to_vec(payload)?),
++    )?;
++    Ok(command)
++}
++
++fn open_own_process(pid: u32, birth: u64) -> Result<OwnedHandle> {
++    let handle = unsafe {
++        OpenProcess(
++            PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE_ACCESS | 1,
++            0,
++            pid,
++        )
++    };
++    ensure!(!handle.is_null(), "open own process");
++    let process = unsafe { OwnedHandle::from_raw_handle(handle) };
++    ensure!(
++        process_birth(process.as_raw_handle())? == birth,
++        "PID was reused"
++    );
++    Ok(process)
++}
++
++fn bounded_foreground_wait(release: &mut ReleaseGate) -> Result<std::process::ExitStatus> {
++    let deadline = Instant::now() + Duration::from_secs(4);
++    loop {
++        release.observe_grandchild()?;
++        let handle = release
++            .foreground
++            .as_ref()
++            .context("foreground was not adopted immediately")?
++            .as_raw_handle();
++        let wait = unsafe { WaitForSingleObject(handle, 20) };
++        if wait == WAIT_OBJECT_0 {
++            release.observe_grandchild()?;
++            return match release
++                .foreground
++                .as_mut()
++                .context("foreground handle lost")?
++            {
++                ForegroundOwned::Native(process) => {
++                    super::wait_process(process).map_err(Into::into)
++                }
++                ForegroundOwned::Original(child) => child.wait().map_err(Into::into),
++            };
++        }
++        ensure!(
++            wait == 0x102,
++            "foreground wait failed: {}",
++            std::io::Error::last_os_error()
++        );
++        ensure!(
++            Instant::now() < deadline,
++            "owned foreground exceeded fixture deadline pid={} birth={}; cleanup owns the exact handle",
++            unsafe { GetProcessId(handle) },
++            process_birth(handle)?
++        );
++    }
++}
++
++fn publish(path: &Path, value: &impl Serialize) -> Result<()> {
++    let temporary = path.with_extension("tmp");
++    fs::write(&temporary, serde_json::to_vec(value)?)?;
++    fs::rename(temporary, path)?;
++    Ok(())
++}
++
++fn load_ready(root: &Path, nonce: &str) -> Result<Ready> {
++    let deadline = Instant::now() + Duration::from_secs(3);
++    loop {
++        if let Ok(raw) = fs::read(root.join("grandchild.json")) {
++            let ready: Ready = serde_json::from_slice(&raw)?;
++            ensure!(
++                ready.nonce == nonce && ready.role == "grandchild",
++                "grandchild nonce or role mismatch"
++            );
++            return Ok(ready);
++        }
++        ensure!(Instant::now() < deadline, "grandchild readiness missing");
++        thread::sleep(Duration::from_millis(5));
++    }
++}
++
++fn run_family_case(original_foreground: bool, large_payload: bool) -> Result<()> {
++    let root = tempfile::Builder::new().prefix(PREFIX).tempdir()?;
++    let nonce = format!(
++        "{}-{}",
++        std::process::id(),
++        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
++    );
++    let payload = Payload {
++        root: root.path().to_path_buf(),
++        nonce,
++        role: "foreground".into(),
++        padding: if large_payload {
++            "payload-中文-".repeat(4_000)
++        } else {
++            String::new()
++        },
++        exit_code: 0,
++    };
++    let parent_token = current_token_identity()?;
++    let before_parent = std::env::var_os("CODEX_SANDBOX_LAUNCH_COUNT");
++    let parent_utf16 = std::env::var_os("CAG_COMPONENT_NONUNICODE")
++        .map(|value| value.encode_wide().collect::<Vec<_>>() == [0xd800]);
++    ensure!(
++        parent_utf16 != Some(false),
++        "optional UTF16 fixture marker contains an unexpected value"
++    );
++    let (read, write) = own_pipe()?;
++    let mut release = ReleaseGate::new(root.path(), &payload.nonce);
++    let mut command = role_command(&payload)?;
++    if original_foreground {
++        // Old status() is exactly this std::Command spawn followed by Child::wait.
++        release.adopt_original_foreground(
++            command
++                .stdin(Stdio::null())
++                .stdout(Stdio::null())
++                .stderr(Stdio::null())
++                .creation_flags(0x0800_0000)
++                .spawn()?,
++        )?;
++    } else {
++        release.adopt_foreground(super::spawn_with_null_stdio(&command)?)?;
++    }
++    let (foreground_pid, foreground_birth) = release
++        .foreground_identity
++        .context("missing owned foreground identity")?;
++    drop(write);
++    let status = bounded_foreground_wait(&mut release)?;
++    ensure!(status.success(), "foreground status was {status}");
++    let family: Foreground =
++        serde_json::from_slice(&fs::read(root.path().join("foreground.json"))?)?;
++    ensure!(
++        family.own.pid == foreground_pid && family.own.creation_time == foreground_birth,
++        "foreground receipt differs from returned handle"
++    );
++    let grandchild = load_ready(root.path(), &payload.nonce)?;
++    ensure!(
++        family.grandchild_pid == Some(grandchild.pid)
++            && family.grandchild_birth == Some(grandchild.creation_time),
++        "grandchild chain identity mismatch"
++    );
++    let observed_grandchild = release
++        .process
++        .as_ref()
++        .context("grandchild was not adopted when first observed")?;
++    ensure!(
++        unsafe { GetProcessId(observed_grandchild.as_raw_handle()) } == grandchild.pid
++            && process_birth(observed_grandchild.as_raw_handle())? == grandchild.creation_time,
++        "observed grandchild identity differs from readiness"
++    );
++    for ready in [&family.own, &grandchild] {
++        ensure!(
++            ready.token == parent_token && ready.cwd == root.path().canonicalize()?,
++            "caller token/elevation/cwd changed"
++        );
++        ensure!(
++            ready.stdio_valid && ready.read_eof && ready.writes_succeeded,
++            "NUL standard stream contract failed"
++        );
++        ensure!(
++            ready.environment_transport == large_payload
++                && ready.unrelated_utf16_preserved == parent_utf16,
++            "payload/environment contract failed"
++        );
++    }
++    ensure!(
++        std::env::var_os("CODEX_SANDBOX_LAUNCH_COUNT") == before_parent,
++        "parent transport environment changed"
++    );
++    let eof = wait_eof(&read, Duration::from_millis(500))?;
++    ensure!(
++        child_running(
++            release
++                .process
++                .as_ref()
++                .context("missing grandchild")?
++                .as_raw_handle()
++        )?,
++        "grandchild not alive at EOF observation"
++    );
++    ensure!(
++        eof != original_foreground,
++        "unexpected caller pipe EOF while grandchild alive"
++    );
++    println!(
++        "family foreground={:?} grandchild={:?} original_foreground={original_foreground} caller_pipe_EOF={eof}",
++        family.own, grandchild
++    );
++    release.finish()?;
++    ensure!(
++        wait_eof(&read, Duration::from_millis(500))?,
++        "caller pipe not released after grandchild natural exit"
++    );
++    Ok(())
++}
++
++#[test]
++fn fixed_foreground_blocks_caller_pipe_before_unchanged_grandchild() -> Result<()> {
++    run_family_case(false, false)
++}
++
++#[test]
++fn old_foreground_control_retains_caller_pipe_in_grandchild() -> Result<()> {
++    run_family_case(true, false)
++}
++
++#[test]
++fn fixed_foreground_large_payload_preserves_three_generation_context() -> Result<()> {
++    run_family_case(false, true)
++}
++
++#[test]
++fn foreground_exit_and_launch_errors_are_not_success() -> Result<()> {
++    for exit_code in [7, 259] {
++        let root = tempfile::Builder::new().prefix(PREFIX).tempdir()?;
++        let payload = Payload {
++            root: root.path().to_path_buf(),
++            nonce: format!("exit-{exit_code}"),
++            role: "foreground".into(),
++            padding: String::new(),
++            exit_code,
++        };
++        let command = role_command(&payload)?;
++        let mut release = ReleaseGate::new(root.path(), &payload.nonce);
++        release.adopt_foreground(super::spawn_with_null_stdio(&command)?)?;
++        let (pid, birth) = release
++            .foreground_identity
++            .context("missing owned error-role identity")?;
++        let status = bounded_foreground_wait(&mut release)?;
++        ensure!(
++            !status.success() && status.code() == Some(exit_code as i32),
++            "exit status silently changed"
++        );
++        let recorded: Foreground =
++            serde_json::from_slice(&fs::read(root.path().join("foreground.json"))?)?;
++        ensure!(
++            recorded.own.pid == pid
++                && recorded.own.creation_time == birth
++                && recorded.grandchild_pid.is_none(),
++            "error role receipt mismatch"
++        );
++        println!(
++            "error_foreground pid={pid} birth={birth} actual_exit={}",
++            status.code().unwrap()
++        );
++        release.finished = true;
++    }
++    let root = tempfile::Builder::new().prefix(PREFIX).tempdir()?;
++    let absent = Command::new(root.path().join("nonexistent-fixture.exe"));
++    let error = super::status(&absent).expect_err("missing executable must fail");
++    ensure!(
++        error.raw_os_error() == Some(2),
++        "absolute missing executable error changed: {error}"
++    );
++    let mut forbidden = Command::new(std::env::current_exe()?);
++    forbidden.env("PATH", "not-an-allowed-payload-override");
++    ensure!(
++        super::status(&forbidden)
++            .expect_err("PATH override unsupported by caller")
++            .kind()
++            == std::io::ErrorKind::InvalidInput
++    );
++    Ok(())
++}
++
++#[test]
++fn fixed_helper_resolution_preserves_order_and_excludes_implicit_cwd() -> Result<()> {
++    let root = tempfile::tempdir()?;
++    let application = root.path().join("app");
++    let system = root.path().join("system");
++    let windows = root.path().join("windows");
++    let path1 = root.path().join("path one");
++    let path2 = root.path().join("path two");
++    let cwd_only = root.path().join("cwd-only");
++    for directory in [&application, &system, &windows, &path1, &path2, &cwd_only] {
++        fs::create_dir(directory)?;
++    }
++    let name = OsStr::new("owned-helper-resolution-fixture.exe");
++    let parent_path = std::env::join_paths([&path1, &path2])?;
++    let directories = super::search_directories(
++        Some(application.clone()),
++        Some(system.clone()),
++        Some(windows.clone()),
++        Some(parent_path),
++    );
++    ensure!(
++        directories
++            == [
++                application.clone(),
++                system.clone(),
++                windows.clone(),
++                path1.clone(),
++                path2.clone()
++            ],
++        "native Rust search precedence changed"
++    );
++    fs::write(cwd_only.join(name), b"metadata fixture, never executed")?;
++    ensure!(
++        super::find_in_directories(name, &directories).is_none(),
++        "implicit cwd was searched"
++    );
++    for directory in directories.iter().rev() {
++        fs::write(directory.join(name), b"metadata fixture, never executed")?;
++        let selected =
++            super::find_in_directories(name, &directories).context("own fake helper not found")?;
++        ensure!(
++            selected == super::user_path(&directory.join(name))?,
++            "earlier directory was bypassed"
++        );
++    }
++    for directory in &directories {
++        fs::remove_file(directory.join(name))?;
++    }
++    fs::write(path2.join(name), b"PATH-only metadata fixture")?;
++    ensure!(
++        super::find_in_directories(name, &directories)
++            == Some(super::user_path(&path2.join(name))?),
++        "PATH-only helper not found"
++    );
++    let invalid = PathBuf::from(OsString::from_wide(&[0]));
++    ensure!(
++        super::find_in_directories(name, &[invalid, path2.clone()])
++            == Some(super::user_path(&path2.join(name))?),
++        "invalid path candidate must not suppress a later valid path"
++    );
++    fs::remove_file(path2.join(name))?;
++    ensure!(
++        super::find_in_directories(name, &directories).is_none(),
++        "absent helper unexpectedly resolved"
++    );
++    Ok(())
++}
++
++#[test]
++#[ignore = "Own component helper/grandchild role; never a product setup entrypoint"]
++fn component_role() -> Result<()> {
++    let argument = std::env::args()
++        .last()
++        .context("component payload absent")?;
++    let environment_transport = argument == crate::launch_environment::ARG;
++    let encoded = if environment_transport {
++        crate::environment_transport::decode(std::env::vars_os())?
++    } else {
++        ensure!(
++            !std::env::vars_os().any(|(key, _)| crate::environment_transport::is_key(&key)),
++            "stale launcher keys leaked"
++        );
++        argument
++    };
++    let payload: Payload = serde_json::from_slice(&BASE64.decode(encoded)?)?;
++    ensure!(
++        payload.padding
++            == if environment_transport {
++                "payload-中文-".repeat(4_000)
++            } else {
++                String::new()
++            },
++        "payload content changed"
++    );
++    let root = payload.root.canonicalize()?;
++    ensure!(
++        root.parent() == Some(std::env::temp_dir().canonicalize()?.as_path())
++            && root
++                .file_name()
++                .is_some_and(|n| n.to_string_lossy().starts_with(PREFIX))
++            && fs::symlink_metadata(&payload.root)?.file_attributes() & 0x400 == 0,
++        "fixture root is redirected or outside own temp"
++    );
++    let handles = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
++        .map(|which| unsafe { GetStdHandle(which) });
++    let stdio_valid = handles
++        .iter()
++        .all(|handle| !handle.is_null() && *handle != -1isize as HANDLE);
++    ensure!(stdio_valid, "NUL stdio handles absent");
++    let mut input = [0u8; 1];
++    let read_eof = std::io::stdin().read(&mut input)? == 0;
++    std::io::stdout().write_all(b"ignored component output")?;
++    std::io::stderr().write_all(b"ignored component error")?;
++    std::io::stdout().flush()?;
++    std::io::stderr().flush()?;
++    let unrelated_utf16_preserved = std::env::var_os("CAG_COMPONENT_NONUNICODE")
++        .map(|v| v.encode_wide().collect::<Vec<_>>() == [0xd800]);
++    let own = Ready {
++        nonce: payload.nonce.clone(),
++        role: payload.role.clone(),
++        pid: std::process::id(),
++        creation_time: process_birth(unsafe { GetCurrentProcess() })?,
++        token: current_token_identity()?,
++        cwd: std::env::current_dir()?.canonicalize()?,
++        stdio_valid,
++        read_eof,
++        writes_succeeded: true,
++        environment_transport,
++        unrelated_utf16_preserved,
++    };
++    match payload.role.as_str() {
++        "foreground" => {
++            if payload.exit_code != 0 {
++                publish(
++                    &root.join("foreground.json"),
++                    &Foreground {
++                        own,
++                        grandchild_pid: None,
++                        grandchild_birth: None,
++                    },
++                )?;
++                std::process::exit(payload.exit_code as i32);
++            }
++            let mut next = payload.clone();
++            next.role = "grandchild".into();
++            // Unchanged J17 spawning primitive: std::Command/null stdio/no-window.
++            let child = role_command(&next)?
++                .stdin(Stdio::null())
++                .stdout(Stdio::null())
++                .stderr(Stdio::null())
++                .creation_flags(0x0800_0000)
++                .spawn()?;
++            let grandchild_pid = child.id();
++            let grandchild_birth = process_birth(child.as_raw_handle())?;
++            publish(
++                &root.join("foreground.json"),
++                &Foreground {
++                    own,
++                    grandchild_pid: Some(grandchild_pid),
++                    grandchild_birth: Some(grandchild_birth),
++                },
++            )?;
++            drop(child); // Closing a process handle does not terminate native background work.
++        }
++        "grandchild" => {
++            publish(&root.join("grandchild.json"), &own)?;
++            let deadline = Instant::now() + Duration::from_secs(8);
++            while !root.join("release").exists() {
++                ensure!(
++                    Instant::now() < deadline,
++                    "owned grandchild release deadline exceeded"
++                );
++                thread::sleep(Duration::from_millis(5));
++            }
++        }
++        _ => bail!("unknown component role"),
++    }
++    Ok(())
++}
++
++#[test]
++#[ignore = "Requires the component controller's own prepared CWD; selected in two isolated processes"]
++fn resolver_excludes_default_cwd_but_honors_explicit_relative_path() -> Result<()> {
++    let cwd = std::env::current_dir()?;
++    ensure!(
++        cwd.file_name()
++            .is_some_and(|name| name.to_string_lossy().starts_with("cag-foreground-cwd-")),
++        "CWD fixture is not owned"
++    );
++    let name = OsStr::new(super::super::SETUP_EXE_FILENAME);
++    ensure!(
++        fs::read(cwd.join(name))? == b"metadata-only CWD fixture, never executed",
++        "CWD control file differs"
++    );
++    let app = std::env::current_exe()?
++        .parent()
++        .context("component parent missing")?
++        .to_path_buf();
++    let system = PathBuf::from(OsString::from_wide(&super::query_utf16(
++        |buffer, size| unsafe { super::get_system_directory(buffer, size) },
++    )?));
++    let windows = PathBuf::from(OsString::from_wide(&super::query_utf16(
++        |buffer, size| unsafe { super::get_windows_directory(buffer, size) },
++    )?));
++    for directory in [&app, &system, &windows] {
++        let candidate = super::user_path(&directory.join(name))?;
++        ensure!(
++            unsafe { super::GetFileAttributesW(candidate.as_ptr()) }
++                == super::INVALID_FILE_ATTRIBUTES,
++            "fixed helper exists outside owned CWD; fixture admission rejected"
++        );
++    }
++    let mode = std::env::var("CAG_RESOLVER_CWD_PATH_MODE")?;
++    let parent_path = std::env::var_os("PATH");
++    match mode.as_str() {
++        "excluded" => {
++            ensure!(
++                parent_path.as_ref().is_none_or(|value| value.is_empty()),
++                "excluded CWD process did not have an empty PATH"
++            );
++            let error =
++                super::resolve_program(name).expect_err("actual resolver searched default CWD");
++            ensure!(
++                error.kind() == std::io::ErrorKind::NotFound,
++                "actual resolver error changed"
++            );
++        }
++        "explicit" => {
++            ensure!(
++                parent_path == Some(OsString::from(".")),
++                "explicit CWD process did not inherit PATH dot"
++            );
++            let found = super::resolve_program(name)?;
++            ensure!(
++                found == super::user_path(&PathBuf::from(".").join(name))?,
++                "actual resolver lost explicit relative PATH"
++            );
++        }
++        _ => bail!("unknown isolated CWD fixture mode"),
++    }
++    println!(
++        "actual_resolver_CWD mode={mode} application={} system={} windows={}",
++        app.display(),
++        system.display(),
++        windows.display()
++    );
++    Ok(())
++}
++
++#[test]
++fn resolver_preserves_nonunicode_existing_names_and_rejects_nul() -> Result<()> {
++    let root = tempfile::tempdir()?;
++    let name = OsString::from_wide(&[111, 119, 110, 101, 100, 45, 0xd800, 46, 101, 120, 101]);
++    let target = root.path().join(&name);
++    fs::write(&target, b"metadata-only UTF16 fixture, never executed")?;
++    let selected = super::find_in_directories(&name, &[root.path().to_path_buf()])
++        .context("non-Unicode fake path not found")?;
++    ensure!(selected == super::user_path(&target)?, "UTF16 name changed");
++    let invalid = PathBuf::from(OsString::from_wide(&[0]));
++    ensure!(
++        super::user_path(&invalid)
++            .expect_err("NUL path accepted")
++            .kind()
++            == std::io::ErrorKind::InvalidInput
++    );
++    Ok(())
++}

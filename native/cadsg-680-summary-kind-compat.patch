@@ -1,0 +1,19 @@
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -1144,6 +1144,7 @@
+     selected: usize,
+ ) -> Option<usize> {
+     let items = history.annotated_items();
++    let summary_kind = CompactionSummary::new("").content_kind();
+     // The previous native summary and retained context are the starting context,
+     // not a new legacy chunk. A partial retry must include useful input after it
+     // instead of repeatedly summarizing only an already summarized window prefix.
+@@ -1156,7 +1157,7 @@
+                     internal_chat_message_metadata_passthrough: Some(metadata),
+                     ..
+                 } if metadata.content_item_kinds.as_ref().is_some_and(|kinds| {
+-                    kinds.iter().any(|kind| kind.0 == CompactionSummary::KIND)
++                    kinds.contains(&summary_kind)
+                 })
+             )
+         })

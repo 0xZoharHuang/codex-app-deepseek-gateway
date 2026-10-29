@@ -1,0 +1,319 @@
+--- a/codex-rs/core/src/session/request_capacity.rs
++++ b/codex-rs/core/src/session/request_capacity.rs
+@@ -14,7 +14,8 @@
+ 
+ const SCHEMA_VERSION: u32 = 1;
+ const MAX_METADATA_BYTES: usize = 16 * 1024;
+-const HASH_DOMAIN: &[u8] = b"codex.native.request-capacity.replay.envelope.v2\0";
++const HASH_DOMAIN: &[u8] = b"codex.native.request-capacity.replay.envelope.v3\0";
++const LEGACY_HASH_DOMAIN: &[u8] = b"codex.native.request-capacity.replay.envelope.v2\0";
+ const CACHE_NAME: &str = "request-capacity-v1";
+ // This thread UUID is never reused. Keep its deletion fence in the already
+ // retained lock inode so late admitted writers cannot recreate a checkpoint.
+@@ -113,7 +114,15 @@
+         if self.prefix_len > items.len() {
+             return Ok(false);
+         }
+-        Ok(prefix_hash(&items[..self.prefix_len])? == self.prefix_hash)
++        let prefix = &items[..self.prefix_len];
++        // Native compaction materializes absent metadata as exact Default. Accept
++        // only these two fixed v2 representations; never guess individual slots
++        // or rewrite history/checkpoints while checking eligibility.
++        Ok(prefix_hash(prefix)? == self.prefix_hash
++            || prefix_hash_with_metadata(prefix, MetadataHashMode::LegacyExact)?
++                == self.prefix_hash
++            || prefix_hash_with_metadata(prefix, MetadataHashMode::LegacyDefaultAsNone)?
++                == self.prefix_hash)
+     }
+ 
+     fn validate(&self) -> Result<()> {
+@@ -181,13 +190,28 @@
+     format!("sha256-v1:{:x}", hash.finalize())
+ }
+ 
++#[derive(Clone, Copy)]
++enum MetadataHashMode {
++    ReplayV3,
++    LegacyExact,
++    LegacyDefaultAsNone,
++}
++
+ /// Hash native replayable envelope content and persistent metadata in sequence.
+ /// The native deserializer discards warehouse-only execution annotations. Apply
+ /// its existing clear helper only to an affected item's temporary hash projection;
+-/// never mutate history or restore those annotations as trusted input. This v2
+-/// semantic domain still preserves roles, tool IDs, media details/bytes, ordering
+-/// and all replayed metadata. Only the digest is persisted.
++/// never mutate history or restore those annotations as trusted input. The v3
++/// domain also treats absent harness metadata as the exact native Default used
++/// by CompactedItem's parallel metadata serialization. All present nondefault
++/// metadata, roles, tool IDs, media details/bytes and ordering remain exact.
+ pub(super) fn prefix_hash(items: &[ResponseItemEnvelope]) -> Result<String> {
++    prefix_hash_with_metadata(items, MetadataHashMode::ReplayV3)
++}
++
++fn prefix_hash_with_metadata(
++    items: &[ResponseItemEnvelope],
++    metadata_mode: MetadataHashMode,
++) -> Result<String> {
+     fn canonical(value: serde_json::Value) -> serde_json::Value {
+         match value {
+             serde_json::Value::Object(map) => {
+@@ -213,8 +237,12 @@
+             Ok(())
+         }
+     }
++    let default_metadata = codex_history::CodexHarnessMetadata::default();
+     let mut writer = HashWriter(Sha256::new());
+-    writer.write_all(HASH_DOMAIN)?;
++    writer.write_all(match metadata_mode {
++        MetadataHashMode::ReplayV3 => HASH_DOMAIN,
++        MetadataHashMode::LegacyExact | MetadataHashMode::LegacyDefaultAsNone => LEGACY_HASH_DOMAIN,
++    })?;
+     writer.write_all(b"[")?;
+     for (index, envelope) in items.iter().enumerate() {
+         if index > 0 {
+@@ -239,7 +267,17 @@
+         } else {
+             std::borrow::Cow::Borrowed(&envelope.item)
+         };
+-        let value = canonical(serde_json::to_value((item.as_ref(), &envelope.metadata))?);
++        let metadata = match metadata_mode {
++            MetadataHashMode::ReplayV3 => {
++                Some(envelope.metadata.as_ref().unwrap_or(&default_metadata))
++            }
++            MetadataHashMode::LegacyExact => envelope.metadata.as_ref(),
++            MetadataHashMode::LegacyDefaultAsNone => envelope
++                .metadata
++                .as_ref()
++                .filter(|metadata| **metadata != default_metadata),
++        };
++        let value = canonical(serde_json::to_value((item.as_ref(), metadata))?);
+         serde_json::to_writer(&mut writer, &value)?;
+     }
+     writer.write_all(b"]")?;
+@@ -1893,6 +1931,224 @@
+         Ok(())
+     }
+ 
++    fn compacted_metadata_fixture() -> Result<Vec<ResponseItemEnvelope>> {
++        let mut items = vec![
++            envelope("first absent metadata")?,
++            envelope("second absent metadata")?,
++            envelope("client-authored input")?,
++            envelope("bounded ordered input")?,
++        ];
++        items[2].metadata = Some(codex_history::CodexHarnessMetadata {
++            client_authored: true,
++            ..Default::default()
++        });
++        items[3].metadata = Some(codex_history::CodexHarnessMetadata {
++            history_truncation_token_limit: Some(1200),
++            user_input_order: Some(7),
++            ..Default::default()
++        });
++        items.push(ResponseItemEnvelope::new(serde_json::from_value(
++            serde_json::json!({
++                "type":"function_call_output", "call_id":"native-call",
++                "output":[
++                    {"type":"input_text","text":"original output"},
++                    {"type":"input_image","image_url":"data:image/png;base64,AA==","detail":"low"}
++                ],
++                "internal_chat_message_metadata_passthrough":{
++                    "turn_id":"018f3405-e835-71af-914a-7efb76abfa72",
++                    "content_item_kinds":["tool.text","tool.image"]
++                }
++            }),
++        )?));
++        Ok(items)
++    }
++
++    fn replay_compacted_metadata(
++        items: &[ResponseItemEnvelope],
++    ) -> Result<Vec<ResponseItemEnvelope>> {
++        // Exercise the native CompactedItem parallel metadata wire format, not
++        // independent ResponseItem lines (which preserve Option presence).
++        let mut compacted: codex_history::CompactedItem =
++            serde_json::from_value(serde_json::json!({"message":"native summary"}))?;
++        compacted.replacement_history = Some(items.to_vec());
++        let wire = serde_json::to_vec(&codex_history::RolloutItem::Compacted(compacted))?;
++        match serde_json::from_slice::<codex_history::RolloutItem>(&wire)? {
++            codex_history::RolloutItem::Compacted(compacted) => compacted
++                .replacement_history
++                .context("native compaction lost replacement history"),
++            _ => anyhow::bail!("native rollout changed compacted item type"),
++        }
++    }
++
++    #[test]
++    fn native_compacted_parallel_metadata_replay_hash_is_stable_and_strict() -> Result<()> {
++        let mut warm = compacted_metadata_fixture()?;
++        warm[1].metadata = Some(Default::default());
++        let before = warm.clone();
++        let cold = replay_compacted_metadata(&warm)?;
++        assert!(warm[0].metadata.is_none());
++        assert_eq!(cold[0].metadata, Some(Default::default()));
++        assert_eq!(cold[1].metadata, warm[1].metadata);
++        assert_eq!(cold[2].metadata, warm[2].metadata);
++        assert_eq!(cold[3].metadata, warm[3].metadata);
++        assert_ne!(
++            warm, cold,
++            "fixture must expose native Option materialization"
++        );
++        let expected = prefix_hash(&warm)?;
++        assert_eq!(prefix_hash(&cold)?, expected);
++        assert_eq!(warm, before, "hash projection mutated live history");
++        let home = tempfile::tempdir()?;
++        let mut record = checkpoint(home.path());
++        record.prefix_len = warm.len();
++        record.prefix_hash = expected;
++        let mut tampered = Vec::new();
++        let mut changed = cold.clone();
++        changed[0].item = envelope("different payload")?.item;
++        tampered.push(changed);
++        let mut changed = cold.clone();
++        changed.swap(0, 1);
++        tampered.push(changed);
++        let mut changed = cold.clone();
++        changed[2].metadata.as_mut().unwrap().client_authored = false;
++        tampered.push(changed);
++        let mut changed = cold.clone();
++        changed[3]
++            .metadata
++            .as_mut()
++            .unwrap()
++            .history_truncation_token_limit = Some(1201);
++        tampered.push(changed);
++        let mut changed = cold.clone();
++        changed[3].metadata.as_mut().unwrap().user_input_order = Some(8);
++        tampered.push(changed);
++        for (field, value) in [
++            ("turn_id", serde_json::json!("different-opaque-turn")),
++            (
++                "content_item_kinds",
++                serde_json::json!(["different.kind", "tool.image"]),
++            ),
++        ] {
++            let mut changed = cold.clone();
++            let mut payload = serde_json::to_value(&changed[4].item)?;
++            payload["internal_chat_message_metadata_passthrough"][field] = value;
++            changed[4].item = serde_json::from_value(payload)?;
++            tampered.push(changed);
++        }
++        let mut changed = cold.clone();
++        let mut payload = serde_json::to_value(&changed[4].item)?;
++        payload["output"][1]["image_url"] = serde_json::json!("data:image/png;base64,AQ==");
++        changed[4].item = serde_json::from_value(payload)?;
++        tampered.push(changed);
++        for changed in tampered {
++            assert!(
++                !record.matches_prefix(&changed)?,
++                "nondefault/payload/order mutation passed"
++            );
++        }
++        assert_eq!(warm, before);
++        Ok(())
++    }
++
++    #[test]
++    fn legacy_metadata_accepts_only_two_fixed_v2_forms_without_mutation() -> Result<()> {
++        let warm = compacted_metadata_fixture()?;
++        let cold = replay_compacted_metadata(&warm)?;
++        let before = cold.clone();
++        let home = tempfile::tempdir()?;
++        let mut record = checkpoint(home.path());
++        record.prefix_len = warm.len();
++        // Cold exact form: old checkpoint authored after replay already had all Some.
++        record.prefix_hash = prefix_hash_with_metadata(&cold, MetadataHashMode::LegacyExact)?;
++        assert_ne!(record.prefix_hash, prefix_hash(&cold)?);
++        assert!(record.matches_prefix(&cold)?);
++        // Pre-replay form: every exact-Default slot was absent in live input.
++        record.prefix_hash = prefix_hash_with_metadata(&warm, MetadataHashMode::LegacyExact)?;
++        assert_eq!(
++            record.prefix_hash,
++            prefix_hash_with_metadata(&cold, MetadataHashMode::LegacyDefaultAsNone)?
++        );
++        let original_record = record.clone();
++        assert!(record.matches_prefix(&cold)?);
++        assert_eq!(record, original_record);
++        assert_eq!(cold, before);
++        let mut changed = cold.clone();
++        changed[0].item = envelope("changed legacy payload")?.item;
++        assert!(!record.matches_prefix(&changed)?);
++        let mut changed = cold.clone();
++        changed.swap(0, 1);
++        assert!(!record.matches_prefix(&changed)?);
++        let mut changed = cold.clone();
++        let mut payload = serde_json::to_value(&changed[4].item)?;
++        payload["internal_chat_message_metadata_passthrough"]["turn_id"] =
++            serde_json::json!("changed-legacy-opaque-turn");
++        changed[4].item = serde_json::from_value(payload)?;
++        assert!(!record.matches_prefix(&changed)?);
++        let mut changed = cold.clone();
++        changed[2].metadata.as_mut().unwrap().client_authored = false;
++        assert!(!record.matches_prefix(&changed)?);
++        let mut changed = cold.clone();
++        changed[3]
++            .metadata
++            .as_mut()
++            .unwrap()
++            .history_truncation_token_limit = Some(1201);
++        assert!(!record.matches_prefix(&changed)?);
++        let mut mixed_old = warm.clone();
++        mixed_old[1].metadata = Some(Default::default());
++        record.prefix_hash = prefix_hash_with_metadata(&mixed_old, MetadataHashMode::LegacyExact)?;
++        assert!(record.matches_prefix(&mixed_old)?);
++        assert!(
++            !record.matches_prefix(&cold)?,
++            "must not guess mixed legacy Option slots"
++        );
++        record.prefix_hash = format!("sha256-v1:{}", "0".repeat(64));
++        assert!(!record.matches_prefix(&cold)?);
++        record.prefix_len = cold.len() + 1;
++        assert!(!record.matches_prefix(&cold)?);
++        assert_eq!(cold, before);
++        Ok(())
++    }
++
++    #[test]
++    fn unmatched_legacy_checkpoint_lineage_can_advance_to_ordinary_v3() -> Result<()> {
++        let mut warm = compacted_metadata_fixture()?;
++        warm[1].metadata = Some(Default::default());
++        let cold = replay_compacted_metadata(&warm)?;
++        let home = tempfile::tempdir()?;
++        let mut old = checkpoint(home.path());
++        old.prefix_len = warm.len();
++        old.prefix_hash = prefix_hash_with_metadata(&warm, MetadataHashMode::LegacyExact)?;
++        old.completed_epoch = 7;
++        save(home.path(), &old)?;
++        let old = fence(home.path(), &old, "018f3405-e835-71af-914a-7efb76abfa72")?;
++        assert!(
++            !load(home.path(), &old.binding)?
++                .unwrap()
++                .matches_prefix(&cold)?
++        );
++        assert_eq!(previous_epoch(home.path(), &old.binding)?, 7);
++        // Mirror the existing ordinary-completion storage transition; no prefix
++        // eligibility is inferred from lineage, and only completion rearms it.
++        let mut completed = old.clone();
++        completed.completed_epoch = previous_epoch(home.path(), &old.binding)? + 1;
++        completed.prefix_hash = prefix_hash(&cold)?;
++        completed.response_id = "new-real-ordinary-completion".into();
++        completed.origin = Origin::OrdinaryCompleted;
++        completed.recovery_turn_id = None;
++        assert_ne!(completed.prefix_hash, old.prefix_hash);
++        assert_ne!(
++            completed.prefix_hash,
++            prefix_hash_with_metadata(&cold, MetadataHashMode::LegacyExact)?
++        );
++        save(home.path(), &completed)?;
++        let loaded = load(home.path(), &completed.binding)?.unwrap();
++        assert_eq!(loaded, completed);
++        assert_eq!(loaded.completed_epoch, 8);
++        assert!(loaded.matches_prefix(&cold)?);
++        Ok(())
++    }
++
+     #[test]
+     fn checkpoint_never_contains_body_images_or_credentials() -> Result<()> {
+         let home = tempfile::tempdir()?;

@@ -9,7 +9,7 @@ g = importlib.util.module_from_spec(spec); sys.modules[spec.name] = g; spec.load
 core = g.core
 ROOT = HERE.parents[2]
 FROZEN = [HERE / "guardian_negative.py", HERE / "guardian_negative_selftest.py",
-          HERE / "fault_server.py", HERE / "selftest.py",
+          HERE / "fault_server.py", HERE / "synthetic_reasoning.py", HERE / "selftest.py",
           ROOT / "src/codex_app_deepseek/bridge.py", ROOT / "src/codex_app_deepseek/protocol_state.py"]
 def hashes():
     return {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in FROZEN}
@@ -237,8 +237,12 @@ async def main():
             status, events = await call(good)
             assert status == 200 and events[-1]["type"] == "response.completed"
             items = [e["item"] for e in events if e["type"] == "response.output_item.done"]
-            assert len(items) == 1
-            item = items[0]
+            calls = [item for item in items if item["type"] == "custom_tool_call"]
+            reasoning_items = [item for item in items if item["type"] == "reasoning"]
+            assert len(items) == 2 and len(calls) == 1 and len(reasoning_items) == 1
+            assert reasoning_items[0]["content"] == [
+                {"type": "reasoning_text", "text": g.SYNTHETIC_REASONING_TEXT}]
+            item = calls[0]
             assert item["type"] == "custom_tool_call" and item["namespace"] == "functions" and item["name"] == "exec"
             assert item["input"] == g.code(g.delete_args(home, value))
             assert g.load(home)["call_id"] == item["call_id"]

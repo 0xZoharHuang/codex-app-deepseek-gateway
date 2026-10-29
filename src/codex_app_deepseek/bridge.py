@@ -26,6 +26,14 @@ from .image_transport import ImageTransportError, PayloadBudgetExceeded, FileOpe
 from .image_maintenance import ImageMaintenance
 
 OPENROUTER_RESPONSES = "https://openrouter.ai/api/v1/responses"
+# Exact endpoint tag/display-name pairs from OpenRouter's fixed-model endpoint
+# catalog (2026-10-26). These classify only identity fields actually returned;
+# missing provider metadata stays unknown and is never inferred from the route.
+_OBSERVED_PROVIDERS = {
+    PROVIDER: frozenset({PROVIDER, "DeepSeek"}),
+    STRUCTURED_PROVIDER: frozenset({STRUCTURED_PROVIDER, "Morph"}),
+    SERIAL_PROVIDER: frozenset({SERIAL_PROVIDER, "PrimeIntellect"}),
+}
 _ALLOWED_ROUTES = {PROVIDER, SERIAL_PROVIDER, STRUCTURED_PROVIDER}
 # Exact aliases verified by OpenRouter GET /model/{MODEL}, 2026-10-22.
 # Canonical date identity is evidence-backed; no prefix/date wildcard is accepted.
@@ -508,7 +516,17 @@ def create_app(
         from .web_backend import WebBackendError
         try:
             body = await request.json(loads=strict_json_loads)
-            result = await web_backend.handle(body)
+            metadata_headers = request.headers.getall("x-codex-turn-metadata", [])
+            if len(metadata_headers) > 1:
+                raise ProtocolError("Native turn metadata header must be unique")
+            metadata_header = metadata_headers[0] if metadata_headers else None
+            if metadata_header is None:
+                result = await web_backend.handle(body)
+            else:
+                metadata = strict_json_loads(metadata_header)
+                if not isinstance(metadata, dict):
+                    raise ProtocolError("Native turn metadata must be an object")
+                result = await web_backend.handle(body, native_metadata=metadata)
             return web.json_response(result, headers={"Cache-Control": "no-store"})
         except WebBackendError as error:
             return web.json_response({"error": {"type": "web_backend_error", "code": error.code,
@@ -554,7 +572,6 @@ def create_app(
         events = Events(registry)
         upstream_status = None
         key = None
-        observed = {}
         image_stack = AsyncExitStack()
         image_prepared = None
         image_refs = False
@@ -578,9 +595,8 @@ def create_app(
             for name, item in incoming.items():
                 if name == "model" and item not in _OBSERVED_MODELS:
                     raise ProtocolError("Upstream returned an incompatible model: " + item)
-                if name in observed and observed[name] != item:
-                    raise ProtocolError("Upstream changed its observed " + name + " within one response")
-                observed[name] = item
+                if name == "provider" and item not in _OBSERVED_PROVIDERS[provider]:
+                    raise ProtocolError("Upstream returned a provider incompatible with the selected route: " + item)
 
         async def record_image_terminal(value, expected=None):
             nonlocal image_terminal

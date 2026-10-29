@@ -1,6 +1,6 @@
 """Bounded, opt-in App fault fixture. Does not own an App or native runtime."""
 from __future__ import annotations
-import argparse, asyncio, contextvars, hashlib, json, os, re, secrets, sqlite3, sys, time, uuid
+import argparse, asyncio, contextvars, importlib.util, hashlib, json, os, re, secrets, sqlite3, sys, time, uuid
 from contextlib import ExitStack, AsyncExitStack
 from urllib.parse import urlsplit
 import psutil
@@ -11,17 +11,30 @@ import aiohttp
 from aiohttp import web
 
 ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(ROOT / "src"))
+if not sys.flags.isolated:
+    sys.path.insert(0, str(ROOT / "src"))
 from codex_app_deepseek.app_config import _atomic_write, _private
 from codex_app_deepseek.bridge import BridgeSettings, create_app, sse_events, OPENROUTER_RESPONSES
 from codex_app_deepseek.protocol_state import ProtocolState
 from codex_deepseek.protocol import MODEL, encode_sse
 
 MARKER = "CDAG_FAULT_COUNTER_V1"
-KINDS = {"http_429", "http_503", "http_401", "text_cut", "tool_incomplete_cut",
+KINDS = {"http_429", "http_503", "http_401", "http_413", "text_cut", "tool_incomplete_cut",
          "tool_done_cut", "after_effect_503", "live_tool_incomplete_cut", "live_tool_done_cut",
          "synthetic_success", "passthrough"}
 MAX_BODY = 2 * 1024 * 1024
+_SYNTHETIC_SOURCE = Path(__file__).with_name("synthetic_reasoning.py")
+_SYNTHETIC_SHA = "1f0b8181b6feebdaed0c9d482dc72746b5d94bd76606e03277c1e35ad78c0b6e"
+if hashlib.sha256(_SYNTHETIC_SOURCE.read_bytes()).hexdigest() != _SYNTHETIC_SHA:
+    raise ValueError("Synthetic QA history scaffold differs from its reviewed source")
+_synthetic_spec = importlib.util.spec_from_file_location("cdag_qa_synthetic_reasoning", _SYNTHETIC_SOURCE)
+_synthetic = importlib.util.module_from_spec(_synthetic_spec)
+sys.modules[_synthetic_spec.name] = _synthetic
+_synthetic_spec.loader.exec_module(_synthetic)
+synthetic_reasoning_item = _synthetic.reasoning_item
+synthetic_reasoning_prefix = _synthetic.prefix_events
+SYNTHETIC_REASONING_TEXT = _synthetic.SYNTHETIC_REASONING_TEXT
+
 _NATIVE_CONTEXT = contextvars.ContextVar("cdag_qa_native_identity", default=None)
 
 def valid_identity(value):
@@ -334,6 +347,18 @@ class FaultHarness:
             self.inflight-=1
 
     async def synthetic(self, request,payload,p):
+        if p.kind=="http_413":
+            # HTTP rejection precedes any StreamResponse/SSE preparation.
+            # Native derives known_rejected from transport status, never this body.
+            request_id="fixture-http-413-"+uuid.uuid4().hex
+            response=web.json_response({"error":{"type":"request_too_large","code":"request_too_large",
+                "message":"Synthetic request-byte rejection; no model contacted"}},
+                status=413,headers={"X-Request-Id":request_id})
+            self.event("pre_response_http_rejection",status=413,sse_prepared=False,
+                thread_sha256=digest(p.thread_id),case_sha256=digest(p.case_id),
+                request_id_sha256=digest(request_id),response_body_sha256=hashlib.sha256(response.body).hexdigest(),
+                response_body_bytes=len(response.body),model_contacted=False,tool_executed=False)
+            return response
         if p.kind.startswith("http_") or p.kind=="after_effect_503":
             status=503 if p.kind=="after_effect_503" else int(p.kind[5:])
             return web.json_response({"error":{"type":"synthetic_fixture_fault","message":"Synthetic upstream fault"}},
@@ -342,27 +367,30 @@ class FaultHarness:
         response=web.StreamResponse(headers={"Content-Type":"text/event-stream","X-Fixture-Mode":"synthetic"})
         await response.prepare(request)
         await response.write(encode_sse({"type":"response.created","response":{"id":rid,"status":"in_progress","output":[]}}))
+        # Prefix only scripted output; real provider streams remain untouched.
+        for event in synthetic_reasoning_prefix(rid):
+            await response.write(encode_sse(event))
         if p.kind=="synthetic_success":
             message={"id":"fixture-message","type":"message","role":"assistant","status":"completed",
                      "content":[{"type":"output_text","text":"Synthetic fixture recovery only.","annotations":[]}]}
-            await response.write(encode_sse({"type":"response.completed","response":{"id":rid,"status":"completed","output":[message]}}))
+            await response.write(encode_sse({"type":"response.completed","response":{"id":rid,"status":"completed","output":[synthetic_reasoning_item(rid),message]}}))
         elif p.kind=="text_cut":
-            await response.write(encode_sse({"type":"response.output_item.added","output_index":0,
+            await response.write(encode_sse({"type":"response.output_item.added","output_index":1,
                 "item":{"id":"fixture-message","type":"message","role":"assistant","status":"in_progress","content":[]}}))
-            await response.write(encode_sse({"type":"response.content_part.added","output_index":0,
+            await response.write(encode_sse({"type":"response.content_part.added","output_index":1,
                 "item_id":"fixture-message","content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}))
             await response.write(encode_sse({"type":"response.output_text.delta","item_id":"fixture-message",
-                "output_index":0,"content_index":0,"delta":"Synthetic partial output"}))
+                "output_index":1,"content_index":0,"delta":"Synthetic partial output"}))
         else:
             name=next(iter(self.counter_names(payload)))
             arguments=json.dumps({"case_id":p.case_id})
             item={"id":"fixture-call-item-"+uuid.uuid4().hex,"type":"function_call","call_id":"fixture-call-"+uuid.uuid4().hex,
                   "name":name,"arguments":"","status":"in_progress"}
-            await response.write(encode_sse({"type":"response.output_item.added","output_index":0,"item":item}))
+            await response.write(encode_sse({"type":"response.output_item.added","output_index":1,"item":item}))
             await response.write(encode_sse({"type":"response.function_call_arguments.delta","item_id":item["id"],"delta":arguments}))
             if p.kind=="tool_done_cut":
                 done={**item,"arguments":arguments,"status":"completed"}
-                await response.write(encode_sse({"type":"response.output_item.done","output_index":0,"item":done}))
+                await response.write(encode_sse({"type":"response.output_item.done","output_index":1,"item":done}))
                 self.event("complete_tool_item_exposed",call_id_sha256=digest(item["call_id"]))
                 await asyncio.sleep(.2)
         # Intentional EOF: no response terminal in cut cases, never synthesized success.

@@ -739,3 +739,396 @@ def test_implicit_native_mode_is_explicit_default_and_rollback_removes_added_key
     saved = apply(plan, backup_dir=backups)
     restore(saved.manifest_path)
     assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize('original', [None, b'', b'# original comment\n', b'user_value = 4\n'],
+                         ids=['absent', 'empty', 'comments', 'unmanaged'])
+@pytest.mark.parametrize('current_state', ['deleted', 'empty', 'applied'])
+@pytest.mark.parametrize('hash_kind', ['none', 'current'])
+def test_restored_checkpoint_proof_preserves_original_file_existence(paths, original, current_state, hash_kind):
+    import hashlib
+    config, _, _, backups = paths
+    if original is not None:
+        config.write_bytes(original)
+    checkpoint = apply(prepared(paths), backup_dir=backups)
+    if current_state == 'deleted':
+        config.unlink()
+    elif current_state == 'empty':
+        config.write_bytes(b'')
+    current = config.read_bytes() if config.exists() else None
+    manifest = json.loads(checkpoint.manifest_path.read_text(encoding='utf8'))
+    manifest.update(state='restored', restored_sha256=(
+        hashlib.sha256(current).hexdigest() if hash_kind == 'current' and current is not None else None))
+    checkpoint.manifest_path.write_text(json.dumps(manifest), encoding='utf8')
+    prior = checkpoint.manifest_path.read_bytes(), current
+    # Existence is part of B: an existing original cannot be restored as a missing file.
+    # An existing empty C can be a valid fixed point when B existed; retain later user removals.
+    valid = ((current is None and original is None) or
+             (current == b'' and original is not None and hash_kind == 'current'))
+    if valid:
+        result = restore(checkpoint.manifest_path)
+        assert result.removed_created_config is (current is None)
+    else:
+        with pytest.raises(ConfigurationError):
+            restore(checkpoint.manifest_path)
+    assert checkpoint.manifest_path.read_bytes() == prior[0]
+    assert (config.read_bytes() if config.exists() else None) == prior[1]
+
+
+@pytest.mark.parametrize('original', [b'', b'# original comment\n', b'user_value = 4\n'],
+                         ids=['empty', 'comments', 'unmanaged'])
+def test_applied_checkpoint_refuses_removed_original_without_owned_leaves(paths, original):
+    config, _, _, backups = paths
+    config.write_bytes(original)
+    checkpoint = apply(prepared(paths), backup_dir=backups)
+    config.unlink()
+    prior = checkpoint.manifest_path.read_bytes()
+    with pytest.raises(ConfigurationConflict, match='removed after apply'):
+        restore(checkpoint.manifest_path)
+    assert not config.exists()
+    assert checkpoint.manifest_path.read_bytes() == prior
+
+
+@pytest.mark.parametrize('original', [None, b'', b'# original comment\n', b'user_value = 4\n'],
+                         ids=['absent', 'empty', 'comments', 'unmanaged'])
+def test_restore_without_original_owned_leaves_is_byte_exact_and_idempotent(paths, original):
+    config, _, _, backups = paths
+    if original is not None:
+        config.write_bytes(original)
+    checkpoint = apply(prepared(paths), backup_dir=backups)
+    result = restore(checkpoint.manifest_path)
+    assert (config.read_bytes() if config.exists() else None) == original
+    assert result.removed_created_config is (original is None)
+    assert restore(checkpoint.manifest_path) == result
+    assert (config.read_bytes() if config.exists() else None) == original
+
+
+@pytest.mark.parametrize('state', ['restore_prepared', 'restored'])
+@pytest.mark.parametrize('original', [b'', b'# original comment\n', b'user_value = 4\n'],
+                         ids=['empty', 'comments', 'unmanaged'])
+def test_restore_evidence_cannot_certify_missing_original_file(paths, state, original):
+    config, _, _, backups = paths
+    config.write_bytes(original)
+    checkpoint = apply(prepared(paths), backup_dir=backups)
+    config.unlink()
+    manifest = json.loads(checkpoint.manifest_path.read_text(encoding='utf8'))
+    manifest.update(state=state, restore_input_file=None, restore_input_sha256=None,
+                    restored_file=None, restored_sha256=None, restore_prepared_at='2026-10-26T00:00:00Z')
+    checkpoint.manifest_path.write_text(json.dumps(manifest), encoding='utf8')
+    prior = checkpoint.manifest_path.read_bytes()
+    with pytest.raises(ConfigurationConflict, match='removed after apply'):
+        restore(checkpoint.manifest_path)
+    assert not config.exists()
+    assert checkpoint.manifest_path.read_bytes() == prior
+
+
+@pytest.mark.parametrize('snapshot', ['original', 'applied'])
+@pytest.mark.parametrize('corruption', ['missing', 'changed'])
+def test_missing_file_restored_checkpoint_still_requires_verified_snapshots(paths, snapshot, corruption):
+    config, _, _, backups = paths
+    config.write_bytes(b'')
+    checkpoint = apply(prepared(paths), backup_dir=backups)
+    config.unlink()
+    manifest = json.loads(checkpoint.manifest_path.read_text(encoding='utf8'))
+    manifest.update(state='restored', restored_sha256=None)
+    checkpoint.manifest_path.write_text(json.dumps(manifest), encoding='utf8')
+    proof = checkpoint.manifest_path.parent / (snapshot + '.toml')
+    if corruption == 'missing':
+        proof.unlink()
+    else:
+        proof.write_bytes(proof.read_bytes() + b'\n# changed proof\n')
+    prior = checkpoint.manifest_path.read_bytes()
+    with pytest.raises(ConfigurationError):
+        restore(checkpoint.manifest_path)
+    assert not config.exists()
+    assert checkpoint.manifest_path.read_bytes() == prior
+
+
+@pytest.mark.parametrize("original", [None, b"", b"# original file comment\n"])
+@pytest.mark.parametrize("annotation", ["scalar", "array", "provider", "header"])
+def test_later_owned_comments_survive_restore_without_changing_the_owned_value(paths, original, annotation):
+    config, _, _, backups = paths
+    if original is not None:
+        config.write_bytes(original)
+    checkpoint = apply(prepared(paths), backup_dir=backups)
+    current = config.read_text(encoding="utf-8")
+    note = "# later owned comment"
+    if annotation == "scalar":
+        lines = current.splitlines(keepends=True)
+        index = next(i for i, line in enumerate(lines) if line.startswith("model = "))
+        lines[index] = lines[index].rstrip("\r\n") + " " + note + "\n"
+        current = "".join(lines)
+    elif annotation == "array":
+        assert 'args = ["auth-token"]' in current
+        current = current.replace('args = ["auth-token"]',
+            'args = [\n  "auth-token", # later owned comment\n  # later array comment\n]', 1)
+    elif annotation == "provider":
+        assert 'name = "Codex App DeepSeek Gateway"' in current
+        current = current.replace('name = "Codex App DeepSeek Gateway"',
+            'name = "Codex App DeepSeek Gateway" ' + note, 1)
+    else:
+        current = current.replace("[features]", "[features] ## later owned comment", 1)
+    # The comment is the only later edit; every TOML setting is exactly the applied value.
+    assert tomllib.loads(current) == tomllib.loads(checkpoint.config_path.read_text(encoding="utf-8"))
+    config.write_text(current, encoding="utf-8")
+    restore(checkpoint.manifest_path)
+    assert config.is_file(), "Rollback removed the user's later comment with the created file"
+    restored = config.read_text(encoding="utf-8")
+    assert tomllib.loads(restored) == (tomllib.loads(original.decode()) if original is not None else {})
+    assert "later owned comment" in restored
+    if annotation == "header":
+        assert "## later owned comment" in restored
+    if annotation == "array":
+        assert "# later array comment" in restored
+    if original:
+        assert "# original file comment" in restored
+    once = config.read_bytes()
+    restore(checkpoint.manifest_path)
+    assert config.read_bytes() == once
+
+
+def test_later_owned_duplicate_comments_keep_multiplicity(paths):
+    config, _, _, backups = paths
+    checkpoint = apply(prepared(paths), backup_dir=backups)
+    text = config.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    index = next(i for i, line in enumerate(lines) if line.startswith("model = "))
+    lines[index] = lines[index].rstrip("\r\n") + " # duplicate annotation\n"
+    config.write_text("".join(lines) + "\n# duplicate annotation\n", encoding="utf-8")
+    restore(checkpoint.manifest_path)
+    assert config.is_file()
+    text = config.read_text(encoding="utf-8")
+    assert text.count("# duplicate annotation") == 2
+    assert tomllib.loads(text) == {}
+
+
+def test_later_owned_hash_in_a_string_does_not_become_a_comment(paths):
+    config, catalog, helper, backups = paths
+    hash_helper = helper.with_name("auth # helper.exe")
+    hash_helper.write_bytes(helper.read_bytes())
+    checkpoint = apply(prepare(config, catalog_path=catalog, auth_command=hash_helper, port=18765),
+                       backup_dir=backups)
+    # A whitespace-only later edit leaves no user comment or setting to retain.
+    config.write_bytes(config.read_bytes() + b"\n")
+    restore(checkpoint.manifest_path)
+    assert not config.exists()
+
+
+@pytest.mark.parametrize("layout", ["provider", "features", "created_proxy"])
+def test_peer_partial_restore_noncontiguous_owned_tables(paths, layout):
+    import re
+    import tomlkit
+    from tomlkit.container import OutOfOrderTableProxy
+
+    config, _, _, backups = paths
+    originals = {
+        "provider": b'''[model_providers.codex_app_deepseek.auth]
+command = "previous-helper.exe"
+args = ["previous"]
+timeout_ms = 100
+refresh_interval_ms = 100
+[model_providers.keep]
+name = "unrelated"
+[model_providers.codex_app_deepseek]
+name = "Previous"
+base_url = "https://previous.invalid/v1"
+wire_api = "responses"
+supports_websockets = false
+supports_standalone_web_search = true
+''',
+        "features": b'''[features.child]
+keep = true
+[other]
+keep = true
+[features]
+code_mode = false
+code_mode_only = false
+standalone_web_search = false
+''',
+    }
+    original = originals.get(layout)
+    if original is not None:
+        config.write_bytes(original)
+    checkpoint = apply(prepared(paths), backup_dir=backups)
+    text = config.read_text(encoding="utf-8")
+    expected = tomllib.loads(original.decode()) if original is not None else {}
+    if layout == "created_proxy":
+        pattern = r"(?ms)^\[model_providers\.codex_app_deepseek\]\r?\n.*?(?=^\[|\Z)"
+        block = re.search(pattern, text).group(0)
+        text = text.replace(block, "", 1)
+        text += ('\n[model_providers.keep]\nname = "unrelated"\n' +
+                 block + "# annotation in the removed owned fragment\n")
+        expected = {"model_providers": {"keep": {"name": "unrelated"}}}
+    else:
+        text += "\n# independent later annotation\n"
+        if layout == "features":
+            text = text.replace("standalone_web_search = true",
+                                "standalone_web_search = true # later boolean annotation", 1)
+    parsed = tomlkit.parse(text)
+    target = parsed["features"] if layout == "features" else parsed["model_providers"][PROVIDER_ID]
+    assert isinstance(target, OutOfOrderTableProxy)
+    config.write_text(text, encoding="utf-8")
+    restore(checkpoint.manifest_path)
+    restored = config.read_text(encoding="utf-8")
+    assert tomllib.loads(restored) == expected
+    note = "annotation in the removed owned fragment" if layout == "created_proxy" else "independent later annotation"
+    assert restored.count(note) == 1
+    if layout == "features":
+        assert restored.count("later boolean annotation") == 1
+    once = config.read_bytes()
+    restore(checkpoint.manifest_path)
+    assert config.read_bytes() == once
+
+
+@pytest.mark.parametrize("current_array_annotation", [False, True])
+def test_peer_restore_original_array_syntax_and_current_annotations(paths, current_array_annotation):
+    config, _, _, backups = paths
+    original = b'''[model_providers.codex_app_deepseek.auth]
+command = "previous-helper.exe"
+args = [
+  "previous#literal", ## original B array annotation
+  # repeated B annotation
+  # repeated B annotation
+]
+'''
+    config.write_bytes(original)
+    checkpoint = apply(prepared(paths), backup_dir=backups)
+    current = config.read_text(encoding="utf-8")
+    if current_array_annotation:
+        current = current.replace('args = ["auth-token"]',
+            'args = [\n "auth-token", # later C array annotation\n # repeated B annotation\n]', 1)
+    current += "\n# independent later annotation\n"
+    config.write_text(current, encoding="utf-8")
+    restore(checkpoint.manifest_path)
+    restored = config.read_text(encoding="utf-8")
+    assert tomllib.loads(restored) == tomllib.loads(original.decode())
+    assert restored.count("## original B array annotation") == 1
+    assert restored.count("# repeated B annotation") == 2
+    assert restored.count("# independent later annotation") == 1
+    assert '"previous#literal"' in restored
+    assert restored.count("# later C array annotation") == int(current_array_annotation)
+    once = config.read_bytes()
+    restore(checkpoint.manifest_path)
+    assert config.read_bytes() == once
+
+
+@pytest.mark.parametrize("later_comment", ["# current outer annotation", ""])
+def test_peer_current_outer_annotation_edits_are_not_reverted(paths, later_comment):
+    config, _, _, backups = paths
+    original = b'model = "previous" # original outer annotation\n'
+    config.write_bytes(original)
+    checkpoint = apply(prepared(paths), backup_dir=backups)
+    current = config.read_text(encoding="utf-8").replace("# original outer annotation", later_comment, 1)
+    config.write_text(current, encoding="utf-8")
+    restore(checkpoint.manifest_path)
+    restored = config.read_text(encoding="utf-8")
+    assert tomllib.loads(restored) == {"model": "previous"}
+    assert "# original outer annotation" not in restored
+    assert restored.count("# current outer annotation") == int(bool(later_comment))
+    once = config.read_bytes()
+    restore(checkpoint.manifest_path)
+    assert config.read_bytes() == once
+
+
+def test_peer_prepare_same_auth_arguments_preserves_array_annotations(paths):
+    config, _, _, backups = paths
+    original = b'''[model_providers.codex_app_deepseek.auth]
+args = [
+ "auth-token", # original same-value annotation
+]
+'''
+    config.write_bytes(original)
+    planned = prepared(paths)
+    assert "# original same-value annotation" in planned.rendered_text
+    checkpoint = apply(planned, backup_dir=backups)
+    assert "# original same-value annotation" in config.read_text(encoding="utf-8")
+    config.write_text(config.read_text(encoding="utf-8") + "\n# later note\n", encoding="utf-8")
+    restore(checkpoint.manifest_path)
+    text = config.read_text(encoding="utf-8")
+    assert tomllib.loads(text) == tomllib.loads(original.decode())
+    assert text.count("# original same-value annotation") == 1
+    assert text.count("# later note") == 1
+
+
+@pytest.mark.parametrize("kind", ["scalar", "array"])
+def test_peer_old_valid_restore_evidence_keeps_original_producer_quote_format(paths, kind):
+    import hashlib
+    config, _, _, backups = paths
+    if kind == "scalar":
+        original = b"model = 'previous'\n"
+        restored = b'model = "previous"\n\n# later independent annotation\n'
+    else:
+        original = b"[model_providers.codex_app_deepseek.auth]\nargs = ['previous']\n"
+        restored = (b'\n[model_providers.codex_app_deepseek]\n\n'
+                    b'[model_providers.codex_app_deepseek.auth]\n'
+                    b'args = ["previous"]\n\n# later independent annotation\n')
+    config.write_bytes(original)
+    checkpoint = apply(prepared(paths), backup_dir=backups)
+    captured = config.read_bytes() + b"\n# later independent annotation\n"
+    # Golden R byte layouts were independently produced by the preceding version.
+    # Preserve its strict captured-input/output proof, rather than equating TOML values.
+    directory = checkpoint.manifest_path.parent
+    (directory / "restore-input.toml").write_bytes(captured)
+    (directory / "restored.toml").write_bytes(restored)
+    data = json.loads(checkpoint.manifest_path.read_text(encoding="utf-8"))
+    data.update(state="restored", restore_input_file="restore-input.toml",
+                restore_input_sha256=hashlib.sha256(captured).hexdigest(),
+                restored_file="restored.toml",
+                restored_sha256=hashlib.sha256(restored).hexdigest(),
+                restore_prepared_at="2000-01-01T00:00:00+00:00")
+    checkpoint.manifest_path.write_text(json.dumps(data), encoding="utf-8")
+    config.write_bytes(restored)
+    manifest_before = checkpoint.manifest_path.read_bytes()
+    restore(checkpoint.manifest_path)
+    assert config.read_bytes() == restored
+    assert checkpoint.manifest_path.read_bytes() == manifest_before
+
+
+def test_peer_original_array_annotations_do_not_mask_unrelated_duplicate_comments(paths):
+    config, _, _, backups = paths
+    original = (b'[model_providers.codex_app_deepseek.auth]\nargs = [\n'
+                b' "previous", # identical annotation\n'
+                b' # identical annotation\n]\n')
+    config.write_bytes(original)
+    checkpoint = apply(prepared(paths), backup_dir=backups)
+    config.write_bytes(config.read_bytes() +
+                       b'\n[user_table]\nvalue = true\n# identical annotation\n# identical annotation\n')
+    restore(checkpoint.manifest_path)
+    text = config.read_text(encoding="utf-8")
+    assert text.count("# identical annotation") == 4
+    expected = tomllib.loads(original.decode())
+    expected["user_table"] = {"value": True}
+    assert tomllib.loads(text) == expected
+    once = config.read_bytes()
+    restore(checkpoint.manifest_path)
+    assert config.read_bytes() == once
+
+
+@pytest.mark.parametrize("annotation, rendered_annotation",
+                         [("# header annotation", "# header annotation"),
+                          ("#compact-header", "# compact-header")])
+def test_peer_old_valid_header_restore_evidence_keeps_parent_table_rendering(paths, annotation, rendered_annotation):
+    import hashlib
+    config, _, _, backups = paths
+    original = b'[model_providers.keep]\nname = "unrelated"\n'
+    config.write_bytes(original)
+    checkpoint = apply(prepared(paths), backup_dir=backups)
+    captured = config.read_bytes().replace(b"[model_providers.codex_app_deepseek]",
+        b"[model_providers.codex_app_deepseek] " + annotation.encode(), 1)
+    # Exact output from the preceding deployed producer, including the parent header.
+    restored = (b'\n[model_providers]\n[model_providers.keep]\nname = "unrelated"\n\n' +
+                rendered_annotation.encode() + b'\n')
+    directory = checkpoint.manifest_path.parent
+    (directory / "restore-input.toml").write_bytes(captured)
+    (directory / "restored.toml").write_bytes(restored)
+    data = json.loads(checkpoint.manifest_path.read_text(encoding="utf-8"))
+    data.update(state="restored", restore_input_file="restore-input.toml",
+                restore_input_sha256=hashlib.sha256(captured).hexdigest(),
+                restored_file="restored.toml", restored_sha256=hashlib.sha256(restored).hexdigest(),
+                restore_prepared_at="2000-01-01T00:00:00+00:00")
+    checkpoint.manifest_path.write_text(json.dumps(data), encoding="utf-8")
+    config.write_bytes(restored)
+    manifest_before = checkpoint.manifest_path.read_bytes()
+    restore(checkpoint.manifest_path)
+    assert config.read_bytes() == restored
+    assert checkpoint.manifest_path.read_bytes() == manifest_before

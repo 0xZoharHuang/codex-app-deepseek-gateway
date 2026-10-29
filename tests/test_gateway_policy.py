@@ -111,3 +111,22 @@ async def test_real_health_retains_startup_policy_fingerprint(tmp_path):
         assert health["accepted_models"] == list(gp.REQUEST_MODEL_IDS)
         assert set(health["allowed_providers"]) == set(gp.DEFAULT_PROVIDERS)
         assert calls == [] and state.list_receipts() == []
+
+@pytest.mark.parametrize("old_commit", [
+    "4f24af36f62c538ba35817ad48aa49d4308220b5",
+    "c68e065935c7a11f92be05c2e43e8716f739540f",
+], ids=["published-historical", "private-development"])
+def test_old_pinned_origin_requires_explicit_operator_transition_without_rewrite(tmp_path, old_commit):
+    home = tmp_path / "gateway"; home.mkdir()
+    value = gp.default_app_policy()
+    value["policy_origin"]["protocol_commit"] = old_commit
+    value["upstream_proxy"] = "http://127.0.0.1:3128"
+    value["web_search_backend"] = "firecrawl"
+    raw = (json.dumps(value, indent=4) + "\n").encode()
+    path = home / "gateway.json"; path.write_bytes(raw)
+    state = home / "state-preserved.bin"; state.write_bytes(b"unchanged fixture state")
+    with pytest.raises(gp.ServiceConfigError, match="unrecognized policy_origin"):
+        gp.ensure_app_policy(home)
+    assert path.read_bytes() == raw
+    assert state.read_bytes() == b"unchanged fixture state"
+    assert sorted(item.name for item in home.iterdir()) == ["gateway.json", "state-preserved.bin"]

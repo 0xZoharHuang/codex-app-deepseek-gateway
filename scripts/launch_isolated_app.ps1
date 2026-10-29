@@ -30,6 +30,17 @@ function Invoke-Launcher([string]$Operation,$Value){
  if($LASTEXITCODE -ne 0){throw "Isolated App $Operation failed; no automatic retry"}
  return ($text -join [Environment]::NewLine)|ConvertFrom-Json
 }
+function Read-OwnedReceipt([string]$Path){
+ # Release the file before JSON parsing or downstream pipeline work. The former
+ # Get-Content pipeline kept its handle open during ConvertFrom-Json.
+ $share=[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+ $stream=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,$share)
+ try{
+  $reader=[IO.StreamReader]::new($stream,[Text.Encoding]::UTF8,$true)
+  try{$text=$reader.ReadToEnd()}finally{$reader.Dispose()}
+ }finally{$stream.Dispose()}
+ return $text|ConvertFrom-Json
+}
 function Write-OwnedReceipt([string]$Path,$Value){
  [IO.File]::WriteAllText($Path,($Value|ConvertTo-Json -Depth 12),[Text.UTF8Encoding]::new($false))
 }
@@ -67,7 +78,7 @@ $deadline=[DateTime]::UtcNow.AddSeconds($WaitSeconds)
 while([DateTime]::UtcNow -lt $deadline){
  $path=Join-Path $plan.run_dir 'receipt.json'
  if(Test-Path -LiteralPath $path){
-  $result=Get-Content -LiteralPath $path -Raw|ConvertFrom-Json
+  $result=Read-OwnedReceipt $path
   if($result.status -eq 'started_expected_backend'){
    @{run_dir=$plan.run_dir;receipt=$result}|ConvertTo-Json -Depth 15
    exit 0

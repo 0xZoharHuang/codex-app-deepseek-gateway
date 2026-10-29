@@ -1,0 +1,724 @@
+diff --git a/codex-rs/windows-sandbox-rs/src/bin/command_runner/win.rs b/codex-rs/windows-sandbox-rs/src/bin/command_runner/win.rs
+--- a/codex-rs/windows-sandbox-rs/src/bin/command_runner/win.rs
++++ b/codex-rs/windows-sandbox-rs/src/bin/command_runner/win.rs
+@@ -68,13 +68,13 @@
+ use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
+ use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_WRITE;
+ use windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING;
++use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
+ use windows_sys::Win32::System::Console::COORD;
+ use windows_sys::Win32::System::Console::HPCON;
+ use windows_sys::Win32::System::Console::ResizePseudoConsole;
+ use windows_sys::Win32::System::Threading::GetExitCodeProcess;
+ use windows_sys::Win32::System::Threading::GetProcessId;
+ use windows_sys::Win32::System::Threading::INFINITE;
+-use windows_sys::Win32::System::Threading::MUTEX_ALL_ACCESS;
+ use windows_sys::Win32::System::Threading::OpenMutexW;
+ use windows_sys::Win32::System::Threading::PROCESS_INFORMATION;
+ use windows_sys::Win32::System::Threading::TerminateProcess;
+@@ -203,11 +203,9 @@
+     }
+ }
+ 
+-fn read_acl_mutex_exists(codex_home: &Path) -> Result<bool> {
+-    let name = to_wide(codex_windows_sandbox::sandbox_read_acl_mutex_name(
+-        codex_home,
+-    )?);
+-    let handle = unsafe { OpenMutexW(MUTEX_ALL_ACCESS, 0, name.as_ptr()) };
++fn read_acl_mutex_exists(mutex_name: &str) -> Result<bool> {
++    let name = to_wide(mutex_name);
++    let handle = unsafe { OpenMutexW(READ_CONTROL, 0, name.as_ptr()) };
+     if handle.is_null() {
+         let err = unsafe { GetLastError() };
+         if err == ERROR_FILE_NOT_FOUND {
+@@ -222,12 +220,13 @@
+ }
+ 
+ /// Pick an effective CWD, using a junction if the ACL helper is active.
+-fn effective_cwd(req_cwd: &Path, log_dir: Option<&Path>) -> PathBuf {
+-    let state = log_dir
+-        .ok_or_else(|| anyhow::anyhow!("runner has no sandbox home"))
+-        .and_then(read_acl_mutex_exists);
++fn effective_cwd(req_cwd: &Path, mutex_name: &str, log_dir: Option<&Path>) -> PathBuf {
++    let state = read_acl_mutex_exists(mutex_name);
+     let use_junction = match state {
+-        Ok(exists) => exists,
++        Ok(exists) => {
++            log_note(&format!("read-ACL coordination: active={exists}"), log_dir);
++            exists
++        }
+         Err(err) => {
+             log_note(
+                 &format!(
+@@ -281,6 +280,11 @@
+         .map(LocalSid::as_ptr)
+         .collect();
+     let base = OwnedWinHandle::new(unsafe { get_current_token_for_restriction()? });
++    // Namespace authority comes from this actual logon token, before child restriction.
++    // Missing/ambiguous membership is an admission error, not the CWD fallback path.
++    let read_acl_mutex_name =
++        unsafe { codex_windows_sandbox::sandbox_read_acl_mutex_name_for_token(base.raw()) }
++            .context("validate runner namespace coordination identity")?;
+     let h_token = unsafe {
+         match token_mode {
+             WindowsSandboxTokenMode::ReadOnlyCapability => {
+@@ -310,7 +314,7 @@
+         }
+     }
+ 
+-    let effective_cwd = effective_cwd(&req.cwd, Some(log_dir.as_path()));
++    let effective_cwd = effective_cwd(&req.cwd, &read_acl_mutex_name, Some(log_dir.as_path()));
+     let desktop = LaunchDesktop::open_private(
+         req.private_desktop_name
+             .as_deref()
+diff --git a/codex-rs/windows-sandbox-rs/src/lib.rs b/codex-rs/windows-sandbox-rs/src/lib.rs
+--- a/codex-rs/windows-sandbox-rs/src/lib.rs
++++ b/codex-rs/windows-sandbox-rs/src/lib.rs
+@@ -1094,7 +1094,9 @@
+ 
+ #[cfg(windows)]
+ mod namespace;
++#[cfg(windows)]
++mod namespace_coordination;
+ #[cfg(any(windows, test))]
+ mod namespace_key;
+ #[cfg(windows)]
+-pub use namespace::sandbox_read_acl_mutex_name;
++pub use namespace_coordination::sandbox_read_acl_mutex_name_for_token;
+diff --git a/codex-rs/windows-sandbox-rs/src/namespace.rs b/codex-rs/windows-sandbox-rs/src/namespace.rs
+--- a/codex-rs/windows-sandbox-rs/src/namespace.rs
++++ b/codex-rs/windows-sandbox-rs/src/namespace.rs
+@@ -153,18 +153,6 @@
+         Ok(())
+     }
+ }
+-/// The authenticated runner cannot resolve the real owner's token. It uses the protected marker
+-/// committed by the setup helper solely to select the read-ACL coordination object.
+-pub fn sandbox_read_acl_mutex_name(home: &Path) -> Result<String> {
+-    let value: serde_json::Value =
+-        serde_json::from_slice(&std::fs::read(crate::setup::setup_marker_path(home))?)?;
+-    let id = value
+-        .get("namespace")
+-        .and_then(|v| v.as_str())
+-        .context("sandbox marker has no namespace")?;
+-    crate::namespace_key::read_acl_mutex_for_id(id).context("sandbox marker namespace is invalid")
+-}
+-
+ pub(crate) fn local_group_exists(name: &str) -> Result<bool> {
+     use windows_sys::Win32::NetworkManagement::NetManagement as net;
+     let mut data = std::ptr::null_mut();
+diff --git a/codex-rs/windows-sandbox-rs/src/namespace_coordination.rs b/codex-rs/windows-sandbox-rs/src/namespace_coordination.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/namespace_coordination.rs
+@@ -0,0 +1,258 @@
++//! Read-only namespace identity from the runner's actual Windows token.
++//! No private-home reads, inherited environment values, or unauthenticated IPC identity.
++use crate::namespace_key::NamespaceKey;
++use crate::token::{token_groups, token_user_sid};
++use crate::winutil::to_wide;
++use anyhow::{Context, Result, ensure};
++use std::ptr::{null, null_mut};
++use windows_sys::Win32::Foundation::{ERROR_NON_DOMAIN_SID, GetLastError, HANDLE};
++use windows_sys::Win32::NetworkManagement::NetManagement::{
++    NERR_Success, NetApiBufferFree, NetUserGetInfo, USER_INFO_23,
++};
++use windows_sys::Win32::Security::{
++    CopySid, EqualDomainSid, EqualSid, GetLengthSid, IsValidSid, LookupAccountSidW, SidTypeAlias,
++    SidTypeUser,
++};
++use windows_sys::Win32::System::SystemServices::{SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY};
++
++#[derive(Debug)]
++struct GroupObservation {
++    name: String,
++    kind: i32,
++    attributes: u32,
++    local_domain: bool,
++}
++
++fn enabled(attributes: u32) -> bool {
++    attributes & (SE_GROUP_ENABLED as u32) != 0
++        && attributes & (SE_GROUP_USE_FOR_DENY_ONLY as u32) == 0
++}
++
++fn select_namespace(user_name: &str, groups: &[GroupObservation]) -> Result<NamespaceKey> {
++    let mut selected = None;
++    for group in groups {
++        if !enabled(group.attributes)
++            || !group.local_domain
++            || !NamespaceKey::claims_group_name(&group.name)
++        {
++            continue;
++        }
++        ensure!(
++            group.kind == SidTypeAlias,
++            "runner namespace membership is not a local alias"
++        );
++        let key = NamespaceKey::from_group_name(&group.name)
++            .context("runner namespace group name is invalid")?;
++        ensure!(
++            user_name.eq_ignore_ascii_case(&key.offline())
++                || user_name.eq_ignore_ascii_case(&key.online()),
++            "runner token user does not match namespace account"
++        );
++        ensure!(
++            selected.is_none(),
++            "runner token has ambiguous namespace memberships"
++        );
++        selected = Some(key);
++    }
++    selected.context("runner token has no enabled local namespace alias")
++}
++
++fn account_name(sid: &[u8]) -> Result<(String, i32)> {
++    let mut name_len = 0;
++    let mut domain_len = 0;
++    let mut kind = 0;
++    unsafe {
++        LookupAccountSidW(
++            null(),
++            sid.as_ptr() as _,
++            null_mut(),
++            &mut name_len,
++            null_mut(),
++            &mut domain_len,
++            &mut kind,
++        )
++    };
++    ensure!(
++        name_len > 0 && name_len <= 32_768 && domain_len <= 32_768,
++        "cannot resolve runner token SID: {}",
++        unsafe { GetLastError() }
++    );
++    let mut name = vec![0; name_len as usize];
++    let mut domain = vec![0; domain_len.max(1) as usize];
++    ensure!(
++        unsafe {
++            LookupAccountSidW(
++                null(),
++                sid.as_ptr() as _,
++                name.as_mut_ptr(),
++                &mut name_len,
++                domain.as_mut_ptr(),
++                &mut domain_len,
++                &mut kind,
++            )
++        } != 0,
++        "LookupAccountSidW for runner failed: {}",
++        unsafe { GetLastError() }
++    );
++    ensure!(
++        name_len as usize <= name.len(),
++        "invalid runner account name size"
++    );
++    let name = String::from_utf16(&name[..name_len as usize])
++        .context("runner account name is not Unicode")?;
++    Ok((name.trim_end_matches('\0').to_string(), kind))
++}
++
++fn local_user_sid(name: &str) -> Result<Vec<u8>> {
++    let mut data = null_mut();
++    // NULL server binds this lookup to the local SAM, not a similarly named domain user.
++    let status = unsafe { NetUserGetInfo(null(), to_wide(name).as_ptr(), 23, &mut data) };
++    if status != NERR_Success {
++        if !data.is_null() {
++            unsafe { NetApiBufferFree(data as _) };
++        }
++        anyhow::bail!("resolve local runner user SID failed: {status}");
++    }
++    let result = (|| {
++        ensure!(
++            !data.is_null(),
++            "local runner user query returned no record"
++        );
++        let sid = unsafe { (*(data as *const USER_INFO_23)).usri23_user_sid };
++        ensure!(
++            !sid.is_null() && unsafe { IsValidSid(sid) } != 0,
++            "local runner user has invalid SID"
++        );
++        let length = unsafe { GetLengthSid(sid) };
++        ensure!(
++            length >= 8 && length <= 68,
++            "local runner user SID size is invalid"
++        );
++        let mut owned = vec![0; length as usize];
++        ensure!(
++            unsafe { CopySid(length, owned.as_mut_ptr().cast(), sid) } != 0,
++            "copy local runner SID failed"
++        );
++        Ok(owned)
++    })();
++    unsafe { NetApiBufferFree(data as _) };
++    result
++}
++
++fn same_domain(user: &[u8], group: &[u8]) -> Result<bool> {
++    let mut equal = 0;
++    if unsafe { EqualDomainSid(user.as_ptr() as _, group.as_ptr() as _, &mut equal) } != 0 {
++        return Ok(equal != 0);
++    }
++    let error = unsafe { GetLastError() };
++    // Builtin, logon-session and capability SIDs are not account-domain memberships.
++    if error == ERROR_NON_DOMAIN_SID {
++        return Ok(false);
++    }
++    anyhow::bail!("compare runner token account domains failed: {error}")
++}
++
++/// Derives only a coordination name, after binding the actual user and local alias.
++///
++/// # Safety
++/// The caller retains a valid token HANDLE with TOKEN_QUERY rights for this call.
++pub unsafe fn sandbox_read_acl_mutex_name_for_token(token: HANDLE) -> Result<String> {
++    let user = unsafe { token_user_sid(token) }?;
++    let (name, kind) = account_name(&user)?;
++    ensure!(
++        kind == SidTypeUser,
++        "runner token user is not a user account"
++    );
++    let local_user = local_user_sid(&name)?;
++    ensure!(
++        unsafe { EqualSid(user.as_ptr() as _, local_user.as_ptr() as _) } != 0,
++        "runner token user is not the local SAM account"
++    );
++    let mut observations = Vec::new();
++    for group in unsafe { token_groups(token, 1_048_576) }? {
++        if !enabled(group.attributes) || !same_domain(&local_user, &group.sid)? {
++            continue;
++        }
++        let (name, kind) = account_name(&group.sid)?;
++        observations.push(GroupObservation {
++            name,
++            kind,
++            attributes: group.attributes,
++            local_domain: true,
++        });
++    }
++    Ok(select_namespace(&name, &observations)?.read_acl_mutex())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn key() -> NamespaceKey {
++        NamespaceKey::new(r"c:\qa-home", "S-1-5-21-1-1001")
++    }
++    fn group() -> GroupObservation {
++        GroupObservation {
++            name: key().group(),
++            kind: SidTypeAlias,
++            attributes: SE_GROUP_ENABLED as u32,
++            local_domain: true,
++        }
++    }
++    #[test]
++    fn namespace_coordination_reuses_account_and_mutex_factories() {
++        for user in [key().offline(), key().online().to_uppercase()] {
++            assert_eq!(select_namespace(&user, &[group()]).unwrap(), key());
++        }
++        assert_eq!(NamespaceKey::from_group_name(&key().group()), Some(key()));
++    }
++    #[test]
++    fn namespace_coordination_rejects_missing_ambiguous_or_wrong_user() {
++        assert!(select_namespace(&key().offline(), &[]).is_err());
++        assert!(select_namespace(&key().offline(), &[group(), group()]).is_err());
++        assert!(select_namespace("admin", &[group()]).is_err());
++    }
++    #[test]
++    fn namespace_coordination_rejects_disabled_deny_only_foreign_or_wrong_type() {
++        let mut value = group();
++        value.attributes = 0;
++        assert!(select_namespace(&key().offline(), &[value]).is_err());
++        let mut value = group();
++        value.attributes |= SE_GROUP_USE_FOR_DENY_ONLY as u32;
++        assert!(select_namespace(&key().offline(), &[value]).is_err());
++        let mut value = group();
++        value.local_domain = false;
++        assert!(select_namespace(&key().offline(), &[value]).is_err());
++        let mut value = group();
++        value.kind = SidTypeUser;
++        assert!(select_namespace(&key().offline(), &[value]).is_err());
++    }
++    #[test]
++    fn namespace_coordination_handles_non_account_domain_sids() {
++        fn sid(authority: u8, parts: &[u32]) -> Vec<u8> {
++            let mut value = vec![1, parts.len() as u8, 0, 0, 0, 0, 0, authority];
++            for part in parts {
++                value.extend_from_slice(&part.to_le_bytes());
++            }
++            value
++        }
++        let user = sid(5, &[21, 1, 2, 3, 1001]);
++        assert!(same_domain(&user, &sid(5, &[21, 1, 2, 3, 1014])).unwrap());
++        assert!(!same_domain(&user, &sid(5, &[21, 1, 2, 4, 1014])).unwrap());
++        for other in [sid(5, &[32, 545]), sid(5, &[5, 1, 2]), sid(15, &[3, 1])] {
++            assert!(!same_domain(&user, &other).unwrap());
++        }
++    }
++    #[test]
++    fn namespace_coordination_rejects_malformed_or_cross_namespace_labels() {
++        for name in [
++            "CodexAppDeepSeek-short".to_string(),
++            format!("CodexAppDeepSeek-{}", "A".repeat(64)),
++            key().group().to_uppercase(),
++            NamespaceKey::new("other", "owner").group(),
++        ] {
++            let mut value = group();
++            value.name = name;
++            assert!(select_namespace(&key().offline(), &[value]).is_err());
++        }
++    }
++}
+diff --git a/codex-rs/windows-sandbox-rs/src/namespace_key.rs b/codex-rs/windows-sandbox-rs/src/namespace_key.rs
+--- a/codex-rs/windows-sandbox-rs/src/namespace_key.rs
++++ b/codex-rs/windows-sandbox-rs/src/namespace_key.rs
+@@ -1,11 +1,28 @@
+ //! Pure resource identity derivation. No Windows calls, filesystem writes, or process state.
+ use sha2::{Digest, Sha256};
++
++const GROUP_PREFIX: &str = "CodexAppDeepSeek-";
+ 
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub(crate) struct NamespaceKey {
+     digest: [u8; 32],
+ }
+ impl NamespaceKey {
++    pub(crate) fn claims_group_name(name: &str) -> bool {
++        name.get(..GROUP_PREFIX.len())
++            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(GROUP_PREFIX))
++    }
++    pub(crate) fn from_group_name(name: &str) -> Option<Self> {
++        let id = name.strip_prefix(GROUP_PREFIX)?;
++        if !is_namespace_id(id) {
++            return None;
++        }
++        let mut digest = [0; 32];
++        for (index, byte) in digest.iter_mut().enumerate() {
++            *byte = u8::from_str_radix(&id[index * 2..index * 2 + 2], 16).ok()?;
++        }
++        Some(Self { digest })
++    }
+     pub(crate) fn new(canonical_home: &str, owner_sid: &str) -> Self {
+         let mut hash = Sha256::new();
+         hash.update(b"codex-app-deepseek/windows-sandbox/v1\0");
+@@ -62,7 +79,7 @@
+         format!("Cdx{}n", self.account_id())
+     }
+     pub(crate) fn group(&self) -> String {
+-        format!("CodexAppDeepSeek-{}", self.id())
++        format!("{GROUP_PREFIX}{}", self.id())
+     }
+     pub(crate) fn read_acl_mutex(&self) -> String {
+         read_acl_mutex_for_id(&self.id()).expect("digest is hex")
+@@ -82,12 +99,14 @@
+         u128::from_be_bytes(uuid)
+     }
+ }
+-pub(crate) fn read_acl_mutex_for_id(id: &str) -> Option<String> {
+-    (id.len() == 64
++fn is_namespace_id(id: &str) -> bool {
++    id.len() == 64
+         && id
+             .bytes()
+-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+-    .then(|| format!(r"Local\CodexAppDeepSeekReadAcl-{id}"))
++            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
++}
++pub(crate) fn read_acl_mutex_for_id(id: &str) -> Option<String> {
++    is_namespace_id(id).then(|| format!(r"Local\CodexAppDeepSeekReadAcl-{id}"))
+ }
+ 
+ #[cfg(test)]
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/read_acl_mutex.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning/read_acl_mutex.rs
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning/read_acl_mutex.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning/read_acl_mutex.rs
+@@ -6,6 +6,9 @@
+ use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
+ use windows_sys::Win32::Foundation::GetLastError;
+ use windows_sys::Win32::Foundation::HANDLE;
++use windows_sys::Win32::Foundation::{HLOCAL, LocalFree};
++use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
++use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+ use windows_sys::Win32::System::Threading::CreateMutexW;
+ use windows_sys::Win32::System::Threading::MUTEX_ALL_ACCESS;
+ use windows_sys::Win32::System::Threading::OpenMutexW;
+@@ -40,16 +43,60 @@
+     Ok(true)
+ }
+ 
+-pub(super) fn acquire_read_acl_mutex(mutex_name: &str) -> Result<Option<ReadAclMutexGuard>> {
++struct MutexSecurity(*mut std::ffi::c_void);
++impl Drop for MutexSecurity {
++    fn drop(&mut self) {
++        unsafe {
++            LocalFree(self.0 as HLOCAL);
++        }
++    }
++}
++fn read_acl_mutex_security(owner_sid: &str, sandbox_group_sid: &str) -> Result<MutexSecurity> {
++    // Validate both identities before interpolation. These come from the validated
++    // namespace and local SAM lookup, never directly from caller-controlled strings.
++    let _owner = crate::token::LocalSid::from_string(owner_sid)?;
++    let _group = crate::token::LocalSid::from_string(sandbox_group_sid)?;
++    let descriptor_text = to_wide(OsStr::new(&format!(
++        "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{owner_sid})(A;;RC;;;{sandbox_group_sid})"
++    )));
++    let mut descriptor = std::ptr::null_mut();
++    if unsafe {
++        ConvertStringSecurityDescriptorToSecurityDescriptorW(
++            descriptor_text.as_ptr(),
++            1,
++            &mut descriptor,
++            std::ptr::null_mut(),
++        )
++    } == 0
++    {
++        anyhow::bail!("create read-ACL mutex security failed: {}", unsafe {
++            GetLastError()
++        });
++    }
++    Ok(MutexSecurity(descriptor))
++}
++
++pub(super) fn acquire_read_acl_mutex(
++    mutex_name: &str,
++    owner_sid: &str,
++    sandbox_group_sid: &str,
++) -> Result<Option<ReadAclMutexGuard>> {
++    let descriptor = read_acl_mutex_security(owner_sid, sandbox_group_sid)?;
++    let security = SECURITY_ATTRIBUTES {
++        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
++        lpSecurityDescriptor: descriptor.0,
++        bInheritHandle: 0,
++    };
+     let name = to_wide(OsStr::new(mutex_name));
+-    let handle = unsafe { CreateMutexW(std::ptr::null_mut(), 1, name.as_ptr()) };
++    // Set the namespace's query-only grant atomically at object creation. An existing
++    // object's DACL is never rewritten: that branch still means an active helper.
++    let handle = unsafe { CreateMutexW(&security, 1, name.as_ptr()) };
++    let create_error = unsafe { GetLastError() };
++    drop(descriptor);
+     if handle.is_null() {
+-        return Err(anyhow::anyhow!("CreateMutexW failed: {}", unsafe {
+-            GetLastError()
+-        }));
++        return Err(anyhow::anyhow!("CreateMutexW failed: {create_error}"));
+     }
+-    let err = unsafe { GetLastError() };
+-    if err == ERROR_ALREADY_EXISTS {
++    if create_error == ERROR_ALREADY_EXISTS {
+         unsafe {
+             CloseHandle(handle);
+         }
+@@ -57,3 +104,49 @@
+     }
+     Ok(Some(ReadAclMutexGuard { handle }))
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use windows_sys::Win32::Security::{
++        ACCESS_ALLOWED_ACE, ACL, EqualSid, GetAce, GetSecurityDescriptorDacl,
++    };
++    use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
++    #[test]
++    fn read_acl_mutex_security_grants_group_query_only_and_preserves_owner() {
++        let owner = crate::token::LocalSid::from_string("S-1-5-21-1-2-3-1001").unwrap();
++        let group = crate::token::LocalSid::from_string("S-1-5-21-1-2-3-1002").unwrap();
++        let descriptor =
++            read_acl_mutex_security("S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1002").unwrap();
++        let mut present = 0;
++        let mut defaulted = 0;
++        let mut acl: *mut ACL = std::ptr::null_mut();
++        assert_ne!(
++            unsafe {
++                GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut acl, &mut defaulted)
++            },
++            0
++        );
++        assert_eq!(present, 1);
++        assert!(!acl.is_null());
++        let mut owner_masks = Vec::new();
++        let mut group_masks = Vec::new();
++        for index in 0..unsafe { (*acl).AceCount } {
++            let mut entry = std::ptr::null_mut();
++            assert_ne!(unsafe { GetAce(acl, u32::from(index), &mut entry) }, 0);
++            let entry = unsafe { &*(entry as *const ACCESS_ALLOWED_ACE) };
++            assert_eq!(entry.Header.AceType, 0);
++            assert_eq!(entry.Header.AceFlags, 0);
++            let sid = &entry.SidStart as *const u32 as *mut std::ffi::c_void;
++            if unsafe { EqualSid(sid, group.as_ptr()) } != 0 {
++                group_masks.push(entry.Mask);
++            }
++            if unsafe { EqualSid(sid, owner.as_ptr()) } != 0 {
++                owner_masks.push(entry.Mask);
++            }
++        }
++        assert_eq!(group_masks, [READ_CONTROL]);
++        assert_eq!(owner_masks, [0x1000_0000]);
++        assert_eq!(unsafe { (*acl).AceCount }, 4);
++    }
++}
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+@@ -637,17 +637,22 @@
+ }
+ 
+ fn run_read_acl_only(payload: &Payload, log: &mut dyn Write) -> Result<()> {
+-    let _read_acl_guard =
+-        match acquire_read_acl_mutex(&validate_payload_namespace(payload)?.key.read_acl_mutex())? {
+-            Some(guard) => guard,
+-            None => {
+-                log_line(log, "read ACL helper already running; skipping")?;
+-                return Ok(());
+-            }
+-        };
++    let namespace = validate_payload_namespace(payload)?;
++    let sandbox_group_sid = resolve_sandbox_users_group_sid(&namespace.key.group())?;
++    let group_sid_string =
++        crate::winutil::string_from_sid_bytes(&sandbox_group_sid).map_err(anyhow::Error::msg)?;
++    let _read_acl_guard = match acquire_read_acl_mutex(
++        &namespace.key.read_acl_mutex(),
++        &namespace.owner_sid,
++        &group_sid_string,
++    )? {
++        Some(guard) => guard,
++        None => {
++            log_line(log, "read ACL helper already running; skipping")?;
++            return Ok(());
++        }
++    };
+     log_line(log, "read-acl-only mode: applying read ACLs")?;
+-    let sandbox_group_sid =
+-        resolve_sandbox_users_group_sid(&validate_payload_namespace(payload)?.key.group())?;
+     let sandbox_group_psid = sid_bytes_to_psid(&sandbox_group_sid)?;
+     let mut refresh_errors: Vec<String> = Vec::new();
+     if !payload.read_roots.is_empty() {
+diff --git a/codex-rs/windows-sandbox-rs/src/token.rs b/codex-rs/windows-sandbox-rs/src/token.rs
+--- a/codex-rs/windows-sandbox-rs/src/token.rs
++++ b/codex-rs/windows-sandbox-rs/src/token.rs
+@@ -283,6 +283,66 @@
+     Ok(groups)
+ }
+ 
++/// Copies the actual TokenUser SID; never consults environment/account-name selectors.
++///
++/// # Safety
++/// `token` must remain valid with TOKEN_QUERY access during this call.
++pub(crate) unsafe fn token_user_sid(token: HANDLE) -> Result<Vec<u8>> {
++    use windows_sys::Win32::Security::TokenUser;
++    let mut needed = 0;
++    unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed) };
++    ensure!(needed > 0 && needed <= 65_536, "invalid token user size");
++    let mut buffer = vec![0u8; needed as usize];
++    ensure!(
++        unsafe {
++            GetTokenInformation(
++                token,
++                TokenUser,
++                buffer.as_mut_ptr().cast(),
++                needed,
++                &mut needed,
++            )
++        } != 0,
++        "GetTokenInformation(TokenUser) failed: {}",
++        unsafe { GetLastError() }
++    );
++    ensure!(
++        needed as usize <= buffer.len(),
++        "invalid token user result size"
++    );
++    decode_token_user(&buffer[..needed as usize])
++}
++
++fn decode_token_user(buffer: &[u8]) -> Result<Vec<u8>> {
++    use windows_sys::Win32::Security::TOKEN_USER;
++    ensure!(
++        buffer.len() >= std::mem::size_of::<TOKEN_USER>(),
++        "truncated token user header"
++    );
++    let user = unsafe { std::ptr::read_unaligned(buffer.as_ptr().cast::<TOKEN_USER>()) };
++    let offset = (user.User.Sid as usize).wrapping_sub(buffer.as_ptr() as usize);
++    ensure!(
++        offset <= buffer.len().saturating_sub(8),
++        "invalid token user SID pointer"
++    );
++    ensure!(buffer[offset] == 1, "invalid token user SID revision");
++    let length = 8 + usize::from(buffer[offset + 1]) * 4;
++    ensure!(
++        length <= 68 && length <= buffer.len() - offset,
++        "invalid token user SID size"
++    );
++    ensure!(
++        unsafe { IsValidSid(user.User.Sid) } != 0,
++        "invalid token user SID"
++    );
++    let mut sid = vec![0; length];
++    ensure!(
++        unsafe { CopySid(length as u32, sid.as_mut_ptr().cast(), user.User.Sid) } != 0,
++        "copy token user SID failed"
++    );
++    Ok(sid)
++}
++
+ pub unsafe fn get_logon_sid_bytes(h_token: HANDLE) -> Result<Vec<u8>> {
+     unsafe fn scan_token_groups_for_logon(h: HANDLE) -> Option<Vec<u8>> {
+         token_groups(h, u32::MAX)
+@@ -531,3 +591,54 @@
+ #[cfg(test)]
+ #[path = "token_groups_tests.rs"]
+ mod token_groups_tests;
++
++#[cfg(test)]
++mod namespace_token_user_metadata_tests {
++    use super::*;
++    use windows_sys::Win32::Security::TOKEN_USER;
++    fn fixture() -> (Vec<u8>, Vec<u8>) {
++        let mut sid = vec![1, 5, 0, 0, 0, 0, 0, 5];
++        for value in [21u32, 100, 200, 300, 1001] {
++            sid.extend_from_slice(&value.to_le_bytes());
++        }
++        let header = std::mem::size_of::<TOKEN_USER>();
++        let mut buffer = vec![0; header + sid.len()];
++        buffer[header..].copy_from_slice(&sid);
++        let value = TOKEN_USER {
++            User: SID_AND_ATTRIBUTES {
++                Sid: unsafe { buffer.as_mut_ptr().add(header).cast() },
++                Attributes: 0,
++            },
++        };
++        unsafe {
++            std::ptr::write_unaligned(buffer.as_mut_ptr().cast::<TOKEN_USER>(), value);
++        }
++        (buffer, sid)
++    }
++    #[test]
++    fn namespace_token_user_metadata_copies_owned_sid() {
++        let (buffer, sid) = fixture();
++        assert_eq!(decode_token_user(&buffer).unwrap(), sid);
++    }
++    #[test]
++    fn namespace_token_user_metadata_rejects_short_or_external_pointer() {
++        assert!(decode_token_user(&[]).is_err());
++        let (mut buffer, _) = fixture();
++        let mut user = unsafe { std::ptr::read_unaligned(buffer.as_ptr().cast::<TOKEN_USER>()) };
++        user.User.Sid = std::ptr::null_mut();
++        unsafe {
++            std::ptr::write_unaligned(buffer.as_mut_ptr().cast::<TOKEN_USER>(), user);
++        }
++        assert!(decode_token_user(&buffer).is_err());
++    }
++    #[test]
++    fn namespace_token_user_metadata_rejects_invalid_sid_lengths_and_revision() {
++        let (mut buffer, _) = fixture();
++        let offset = std::mem::size_of::<TOKEN_USER>();
++        buffer[offset + 1] = 255;
++        assert!(decode_token_user(&buffer).is_err());
++        buffer[offset + 1] = 5;
++        buffer[offset] = 2;
++        assert!(decode_token_user(&buffer).is_err());
++    }
++}

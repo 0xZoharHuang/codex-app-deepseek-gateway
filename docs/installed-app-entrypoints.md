@@ -61,6 +61,42 @@ The dedicated App home is %LOCALAPPDATA%\codex-app-deepseek-app. The default .co
 profile is not selected. Low-level configure-app now has the same private default
 and retains its explicit --config argument. Prefer app-configure for managed installs.
 
+
+### Explicit native agent version
+
+The default remains native V2. To exercise the original native V1 close/resume
+mechanisms with the same fixed DeepSeek model, build a separate catalog from the
+qualified native binary's bundled metadata. Use the fresh installed candidate's
+Python, not a source checkout or an older development environment:
+
+    $native = '<qualified bound codex.exe>'
+    $python = '<fresh installed candidate venv/Scripts/python.exe>'
+    $bundled = '<new bundled-models.json>'
+    $catalog = '<new DeepSeek-native-v1.json>'
+    $nativeVersion = (& $native --version).Trim()
+    & $python -I -c "import subprocess,sys; from pathlib import Path; raw=subprocess.run([sys.argv[1],'debug','models','--bundled'],check=True,stdout=subprocess.PIPE).stdout; Path(sys.argv[2]).open('xb').write(raw)" $native $bundled
+    & $python -I -c "import json,sys; from pathlib import Path; from codex_app_deepseek.catalog import build_catalog; source=json.loads(Path(sys.argv[1]).read_text(encoding='utf-8-sig')); result=build_catalog(source,native_version=sys.argv[3],multi_agent_version='v1'); Path(sys.argv[2]).open('x',encoding='utf-8',newline='\n').write(json.dumps(result,ensure_ascii=False,indent=2)+'\n')" $bundled $catalog $nativeVersion
+    $catalogSha = (Get-FileHash -LiteralPath $catalog -Algorithm SHA256).Hash.ToLowerInvariant()
+
+Review and retain that exact SHA as the trusted catalog input, then configure
+through the existing immutable-copy/checkpoint path:
+
+    & $cdag app-configure --catalog $catalog --catalog-sha256 $catalogSha --multi-agent-version v1
+
+Both `app-configure` and low-level `configure-app` accept
+`--multi-agent-version {v1,v2}`, defaulting to `v2`. The requested version must
+match the supplied catalog's unique visible pinned model. Configuration validates
+those bytes; it does not rewrite the trusted catalog or silently select another
+mode. The generator changes only that main entry's `multi_agent_version`;
+inference model ID, role, security/instruction data, tool mode and all hidden
+auxiliary metadata remain unchanged. No new routing alias or gateway policy is
+needed. Generate with `multi_agent_version='v2'` (or omit it) to retain the default.
+
+**Start a fresh chat for the selected version.** Existing chats retain their
+recorded native agent version; changing their catalog is not a migration.
+V2 interruption/reuse and V1 durable close/resume require separate actual-App
+qualification. Generating or configuring a catalog alone proves neither.
+
 If configuration applies but registry writing fails, the command reports an error
 and the actual checkpoint path. Preserve and register that checkpoint through the
 existing register-checkpoint lifecycle entrypoint before rollback/uninstall. Partial
@@ -110,3 +146,24 @@ These entrypoint checks do not establish full runtime parity. Protocol fixtures,
 real upstream routing, native mechanisms and actual GUI tasks retain separate gates.
 
 Binding changes and configuration serialize through the existing installation and per-user launch locks. Configuration reads the current binding only after acquiring those locks, so a completed concurrent bind cannot be silently replaced by stale state. The installed launch command requires its checked configuration SHA; older low-level developer calls may omit that extra field and retain their existing per-plan recheck.
+
+
+## Bounded observation on a slow Windows cold start
+
+The normal launch entry has separate bounded observation and caller-wait
+settings. Both default to 60 seconds; both accept an explicit value up to
+120 seconds. On the qualified Windows host, one cold H launch created the
+correct App immediately but its first verified backend appeared after about
+69 seconds. The original launch observation timeout was preserved, and a
+separate normal status read verified that same instance. No second App was
+started to hide the timeout.
+
+For a Windows cold start on a host with this observed startup delay, use:
+
+    & $cdag app-launch --observation-seconds 120 --wait-seconds 120
+
+These settings extend only the bounded observation window. They do not retry
+App creation, authentication, model requests or tools. If observation expires,
+retain the original receipt and use app-status to reconcile the recorded
+instance before deciding whether another launch is necessary. Do not change
+old plan/receipt hashes or terminate a process by executable name.

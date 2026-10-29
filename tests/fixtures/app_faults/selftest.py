@@ -11,7 +11,7 @@ spec=importlib.util.spec_from_file_location("cdag_fault_fixture",HERE/"fault_ser
 f=importlib.util.module_from_spec(spec);sys.modules[spec.name]=f;spec.loader.exec_module(f)
 ROOT=HERE.parents[2]
 TARGET="target-thread"
-FROZEN=[HERE/"fault_server.py",HERE/"selftest.py",ROOT/"src/codex_app_deepseek/bridge.py",
+FROZEN=[HERE/"fault_server.py",HERE/"synthetic_reasoning.py",HERE/"selftest.py",ROOT/"src/codex_app_deepseek/bridge.py",
         ROOT/"src/codex_app_deepseek/protocol_state.py"]
 def hashes():return {str(p.relative_to(ROOT)):hashlib.sha256(p.read_bytes()).hexdigest() for p in FROZEN}
 def frames(text):return [json.loads(line[6:]) for line in text.splitlines() if line.startswith("data: ") and line[6:]!="[DONE]"]

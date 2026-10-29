@@ -77,7 +77,10 @@ async def test_lossless_order_detail_namespace_and_duplicate_identity(tmp_path):
         assert value.image_occurrences==4 and value.uploads==2
         after=value.payload
         assert [p['detail'] for p in after['input'][0]['content'][1:]]==['low','original','high']
-        assert after['input'][0]['content'][1]['file_id']==after['input'][0]['content'][3]['file_id']
+        assert after['input'][0]['content'][1]==before['input'][0]['content'][1]
+        assert 'file_id' not in after['input'][0]['content'][1]
+        assert after['input'][0]['content'][3]['file_id'] in backend.files
+        assert value.converted_occurrences==3
         assert after['input'][1]['call_id']=='call-actual'
         assert after['input'][1]['output'][0]['file_id']==after['input'][0]['content'][2]['file_id']
         assert after['input'][2]==original['input'][2] and after['tools']==original['tools']

@@ -1,0 +1,409 @@
+"""Assemble the raw Windows native distribution; never compile or execute it.
+
+Notice collection follows the build-time CDS collector at published d2edfa2,
+under Apache-2.0. SPDX data retain their own exact upstream commit and hashes.
+No CDS runtime, launcher, supervisor or tool execution module is imported.
+"""
+from __future__ import annotations
+import argparse
+import copy
+import gzip
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import shutil
+import subprocess
+import tarfile
+
+REPO = Path(__file__).resolve().parents[1]
+BINARIES = frozenset({"codex.exe", "codex-command-runner.exe",
+                     "codex-windows-sandbox-setup.exe", "codex-windows-managed-deny-probe.exe"})
+TARGET = "x86_64-pc-windows-msvc"
+
+
+def require(ok, message):
+    if not ok:
+        raise ValueError(message)
+
+
+def sha(path):
+    h = hashlib.sha256()
+    with Path(path).open("rb") as f:
+        for part in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(part)
+    return h.hexdigest()
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def load(path):
+    return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+
+
+def write(path, value):
+    path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("xb") as f:
+        f.write(json.dumps(value, sort_keys=True, indent=2, ensure_ascii=False).encode() + b"\n")
+
+
+def plain(path):
+    path = Path(path)
+    require(not any(p.is_symlink() or (hasattr(p, "is_junction") and p.is_junction())
+                    for p in (path, *path.parents)), "Input path is redirected")
+    require(path.is_file(), "Input file is missing")
+    return path
+
+
+def copy_bytes(source, destination, expected=None):
+    source = plain(source); destination = Path(destination)
+    before = source.stat(); digest = expected or sha(source)
+    require(sha(source) == digest, "Input checksum differs")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with source.open("rb") as src, destination.open("xb") as dst:
+        shutil.copyfileobj(src, dst, 1024 * 1024)
+    after = source.stat()
+    require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_nlink) ==
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_nlink),
+            "Input changed during independent copy")
+    require(not source.samefile(destination) and destination.stat().st_nlink == 1
+            and sha(source) == digest == sha(destination), "Independent copy verification failed")
+    return {"sha256": digest, "size": destination.stat().st_size}
+
+
+def raw_outputs(manifest):
+    require(manifest.get("schema_version") == 1 and
+            manifest.get("status") in {"passed", "built-not-app-qualified"},
+            "Only an unprepared raw native manifest is distributable")
+    outputs = manifest.get("outputs", manifest.get("binaries"))
+    require(isinstance(outputs, list), "Raw binary list is missing")
+    names = [row.get("name", row.get("file")) for row in outputs]
+    require(len(names) == len(BINARIES) and set(names) == BINARIES,
+            "Raw distribution must contain exactly the four self-built native binaries")
+    for row, name in zip(outputs, names):
+        require("path" not in row and "source" not in row, "Raw output cannot import a prepared/App path")
+        require(type(row.get("size")) is int and row["size"] > 0
+                and re.fullmatch("[0-9a-f]{64}", row.get("sha256", "")), "Invalid raw binary identity")
+    return dict(zip(names, outputs))
+
+
+def indexed_sources(raw, index, index_digest, references_digest, n_lock, j_lock):
+    """The bundle's source hash identifies a mixed-producer index, not N alone."""
+    require(raw["source_sha256"] == raw["source_index"]["sha256"] == index_digest
+            and index.get("kind") == "per_binary_native_source_index",
+            "Raw source index identity differs")
+    require(index["producer_references"]["file"] == "producer-references.json"
+            and index["producer_references"]["sha256"] == references_digest,
+            "Source-index producer reference differs")
+    require(index["producer_sources"]["N-CLI"]["source_sha256"] == n_lock["prepared_source_sha256"]
+            and index["producer_sources"]["J17"]["source_sha256"] == j_lock["prepared_source_sha256"],
+            "Indexed per-binary source producers differ")
+    fields = ("name", "size", "sha256", "producer_id")
+    expected = sorted(({k:row[k] for k in fields} for row in raw["outputs"]), key=lambda r:r["name"])
+    actual = sorted(({k:row[k] for k in fields} for row in index["binary_producers"]), key=lambda r:r["name"])
+    require(actual == expected and all(row["producer_id"] == ("N-CLI" if row["name"] == "codex.exe" else "J17")
+                                      for row in actual), "Indexed binary producers differ")
+
+def source_index_location(raw_path, raw):
+    relative = PurePosixPath(raw["source_index"]["file"])
+    require(not relative.is_absolute() and ".." not in relative.parts
+            and "\\" not in str(relative) and ":" not in str(relative)
+            and relative.name == "native-source-index.json",
+            "Unsafe source-index location")
+    path = plain(Path(raw_path).parent.joinpath(*relative.parts))
+    require(path.resolve().is_relative_to(Path(raw_path).parent.resolve()), "Source index escapes raw input")
+    return path
+
+def shared_graph(n_lock, j_lock, native_dir):
+    require(n_lock["target"] == j_lock["target"] == TARGET, "Native targets differ")
+    for name in ("upstream_commit", "archive_sha256", "native_version", "rust_version", "cargo_lock_sha256"):
+        require(n_lock[name] == j_lock[name], "N/J dependency input differs: " + name)
+    require(n_lock["patches"][:len(j_lock["patches"])] == j_lock["patches"],
+            "Retained J patch prefix differs")
+    extra = n_lock["patches"][len(j_lock["patches"]):]
+    require(extra, "No separately attested N overlay")
+    allowed = {"codex-rs/windows-sandbox-rs/src/setup.rs",
+               "codex-rs/windows-sandbox-rs/src/setup_refresh_launch.rs",
+               "codex-rs/windows-sandbox-rs/src/setup_refresh_launch_tests.rs",
+               "codex-rs/core/src/session/request_capacity.rs"}
+    touched = []
+    for row in n_lock["patches"]:
+        require(sha(plain(native_dir / row["file"])) == row["sha256"], "Native patch checksum differs")
+    for row in extra:
+        lines = (native_dir / row["file"]).read_text(encoding="utf-8").splitlines()
+        paths = [line[6:] for line in lines if line.startswith("+++ b/")]
+        require(paths and all(path in allowed for path in paths),
+                "Additional N patch changes unreviewed dependency/build inputs")
+        touched.extend(paths)
+    return {"method": "Identical fixed upstream + exact J patch prefix; N-only overlays touch only the listed Rust files, not any Cargo manifest/config/lock. Thus the same target workspace dependency graph is a shared external-dependency superset.",
+            "Cargo_lock_sha256": n_lock["cargo_lock_sha256"], "N_only_changed_paths": sorted(set(touched)),
+            "producer_sources_remain_separate": True}
+
+
+def collect_licenses(metadata, output, allowed_roots, *, repo=REPO):
+    """Retain original bytes and attribution; reject missing/unknown declarations."""
+    output = Path(output); output.mkdir(parents=True, exist_ok=False)
+    roots = [Path(p).resolve() for p in allowed_roots]
+    def admitted(path):
+        path = plain(Path(path))
+        require(any(path.resolve().is_relative_to(root) for root in roots), "Crate notice escapes declared source/cache")
+        require(path.stat().st_size <= 16 * 1024 * 1024, "Crate notice exceeds the bounded file size")
+        return path
+    data = load(repo / "native/license-data.json")
+    ids = {row["id"] for row in data["texts"]}
+    for row in data["texts"]:
+        path = plain(repo / "native/licenses/spdx" / (row["id"] + ".txt"))
+        copy_bytes(path, output / "spdx" / path.name, row["sha256"])
+    entries = []
+    for package in sorted(metadata["packages"], key=lambda p: p["id"]):
+        if not package.get("source"):
+            continue
+        manifest = admitted(package["manifest_path"]); source = manifest.parent
+        expression = package.get("license")
+        require(isinstance(expression, str) and expression, "External crate has no declared license")
+        symbols = set(re.findall(r"[A-Za-z0-9.+-]+", expression)) - {"AND", "OR", "WITH"}
+        require(symbols <= ids, "Unpinned license identifier in crate " + package["name"])
+        key = package["name"] + "-" + package["version"] + "-" + hashlib.sha256(package["id"].encode()).hexdigest()[:8]
+        require(PurePosixPath(key).name == key and "\\" not in key, "Unsafe crate identity")
+        target = output / "crates" / key
+        candidates = {p for p in source.iterdir() if p.is_file()
+                      and any(part in p.name.upper() for part in ("LICENSE", "NOTICE", "COPYING", "COPYRIGHT"))}
+        if package.get("license_file"):
+            p = Path(package["license_file"])
+            candidates.add(p if p.is_absolute() else source / p)
+        for directory in ("licenses", "LICENSES", "third_party/licenses", "third-party/licenses"):
+            folder = source / directory
+            if folder.is_dir():
+                candidates.update(p for p in folder.rglob("*") if p.is_file())
+        fallback = not candidates
+        if fallback:
+            candidates.update(source.glob("README*"))
+        notices = []
+        for index, path in enumerate(sorted(candidates)):
+            path = admitted(path)
+            # Source notice files may have arbitrary extensions; identify unwanted
+            # binary container magic instead of assuming every executable suffix is proprietary.
+            with path.open("rb") as f:
+                magic = f.read(4)
+            require(magic[:2] != b"MZ" and magic not in (b"\x7fELF", b"PK\x03\x04"),
+                    "Compiled/container bytes are not a native source notice")
+            name = str(index) + "-" + path.name
+            dest = target / name; record = copy_bytes(path, dest)
+            notices.append({"file": dest.relative_to(output).as_posix(), **record})
+        require(notices or expression, "Crate has neither notice nor declaration")
+        item = {"name": package["name"], "version": package["version"], "source": package["source"],
+                "repository": package.get("repository"), "authors": package.get("authors", []),
+                "declared_license": expression, "manifest_sha256": sha(manifest),
+                "upstream_notice_files": notices, "README_fallback": fallback}
+        write(target / "attribution.json", item); entries.append(item)
+    index = {"schema_version": 1, "scope": "External dependency superset of the fixed Windows native workspace; includes build/test and unused workspace dependencies, not a claim all were linked.",
+             "spdx_source": data, "packages": entries}
+    write(output / "index.json", index)
+    return index
+
+
+def validate_tree(root):
+    root = Path(root); inventory = {}
+    for p in sorted(root.rglob("*")):
+        require(not p.is_symlink() and not (hasattr(p, "is_junction") and p.is_junction()),
+                "Release staging contains a redirected entry")
+        if not p.is_file():
+            continue
+        name = p.relative_to(root).as_posix()
+        metadata_names = {"producer-references.json", "original-raw-manifest.json",
+                          "N-original-build-lock.json", "J17-original-build-lock.json",
+                          "M-original-baseline-lock.json", "native-source-index.json",
+                          "dependency-graph.json", "source.json", "Cargo.lock",
+                          "distribution-inventory.json"}
+        provenance = name.startswith("provenance/") and name[len("provenance/"):] in metadata_names
+        patch = name.startswith("provenance/patches/") and name[len("provenance/patches/"):] in {
+            row["file"] for row in load(REPO / "native/build-lock.json")["patches"]}
+        require(name == "manifest.json" or name in BINARIES or name in {"LICENSE", "NOTICE"}
+                or name.startswith("licenses/") or provenance or patch, "Unexpected public native file")
+        if name not in BINARIES:
+            with p.open("rb") as f:
+                magic = f.read(4)
+            require(magic[:2] != b"MZ" and magic not in (b"\x7fELF", b"PK\x03\x04"),
+                    "Extra executable/container in native release metadata")
+        inventory[name] = {"sha256": sha(p), "size": p.stat().st_size}
+    require(set(BINARIES) <= inventory.keys(), "A native output is missing")
+    for name, row in raw_outputs(load(root / "manifest.json")).items():
+        require(inventory[name] == {k:row[k] for k in ("sha256", "size")}, "Staged native identity differs from manifest")
+    require({"LICENSE", "NOTICE", "licenses/codex-LICENSE", "licenses/codex-NOTICE",
+             "licenses/rust/index.json", "provenance/producer-references.json"} <= inventory.keys(),
+            "Native licenses or producer receipts are missing")
+    return inventory
+
+
+def make_archive(root, archive, epoch):
+    """Exact file allowlist; never archive the input/prepared runtime directory."""
+    root, archive = Path(root), Path(archive)
+    require(not archive.exists() and not archive.is_relative_to(root), "Archive must be new and outside staging")
+    inventory = validate_tree(root)
+    with archive.open("xb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", filename="", mtime=epoch) as compressed:
+        with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as stream:
+            for name, record in sorted(inventory.items()):
+                info = tarfile.TarInfo(name); info.size = record["size"]; info.mtime = epoch
+                info.mode = 0o755 if name in BINARIES else 0o644
+                with (root / name).open("rb") as f:
+                    stream.addfile(info, f)
+    with tarfile.open(archive) as stream:
+        members = stream.getmembers()
+        require(len(members) == len(inventory) and {m.name for m in members} == inventory.keys(),
+                "Archive file set differs")
+        for member in members:
+            require(member.isfile() and member.size == inventory[member.name]["size"], "Archive contains a nonregular or wrong-size member")
+            h = hashlib.sha256()
+            with stream.extractfile(member) as f:
+                for part in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(part)
+            require(h.hexdigest() == inventory[member.name]["sha256"], "Archive member checksum differs")
+    return {"sha256": sha(archive), "size": archive.stat().st_size, "members": len(inventory)}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source-root", type=Path, required=True, help="Already prepared N source; never modified")
+    parser.add_argument("--native-manifest", type=Path, required=True)
+    parser.add_argument("--native-manifest-sha256", required=True)
+    parser.add_argument("--producer-references-sha256", required=True)
+    parser.add_argument("--cargo", type=Path, required=True)
+    parser.add_argument("--cargo-home", type=Path, required=True)
+    parser.add_argument("--git", default="git")
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--evidence-dir", type=Path, required=True, help="New private metadata output outside public staging")
+    parser.add_argument("--development-qualification", action="store_true")
+    args = parser.parse_args()
+    source, output, evidence = args.source_root.resolve(), args.output.resolve(), args.evidence_dir.resolve()
+    require(not output.exists() and not evidence.exists() and output != evidence
+            and not output.is_relative_to(source) and not source.is_relative_to(output)
+            and not output.is_relative_to(REPO) and not evidence.is_relative_to(REPO)
+            and not evidence.is_relative_to(source) and not evidence.is_relative_to(output)
+            and not output.is_relative_to(evidence), "Choose new independent output/evidence directories")
+    require(args.cargo.is_absolute() and args.cargo_home.is_absolute(), "Explicit Cargo/cache paths required")
+    raw_path = plain(args.native_manifest)
+    require(sha(raw_path) == args.native_manifest_sha256, "Raw input manifest checksum differs")
+    raw = load(raw_path); outputs = raw_outputs(raw); native = REPO / "native"
+    n_lock, j_lock = load(native / "build-lock.json"), load(native / "build-lock.J.json")
+    graph = shared_graph(n_lock, j_lock, native)
+    require(raw["native_version"] == n_lock["native_version"]
+            and raw["upstream_commit"] == n_lock["upstream_commit"], "Raw native baseline differs")
+    source_index = source_index_location(raw_path, raw)
+    metadata_dir = source_index.parent
+    indexed_sources(raw, load(source_index), sha(source_index),
+                    args.producer_references_sha256, n_lock, j_lock)
+    references = metadata_dir / "producer-references.json"
+    require(sha(plain(references)) == args.producer_references_sha256, "Producer reference checksum differs")
+    producers = load(references)
+    require(producers["actual_N_CLI_producer"]["source_sha256"] == n_lock["prepared_source_sha256"]
+            and producers["actual_J17_retained_producer"]["source_sha256"] == j_lock["prepared_source_sha256"],
+            "Native component producers differ")
+    require(sha(metadata_dir / "N-original-build-lock.json") == sha(native / "build-lock.json")
+            and sha(metadata_dir / "J17-original-build-lock.json") == sha(native / "build-lock.J.json"),
+            "Original producer locks differ from public recipe")
+    require(sha(metadata_dir / "M-original-baseline-lock.json") ==
+            producers["baseline_M_source"]["build_lock_sha256"], "Retained M provenance differs")
+    j_outputs = {r["name"]:r for r in producers["actual_J17_retained_producer"]["projected_original_outputs"]["outputs"]}
+    for name in BINARIES - {"codex.exe"}:
+        require({k:outputs[name][k] for k in ("sha256", "size")} ==
+                {k:j_outputs[name][k] for k in ("sha256", "size")}, "Retained J bytes differ")
+    spec = importlib.util.spec_from_file_location("cag_native_build", REPO / "scripts/build_native.py")
+    build = importlib.util.module_from_spec(spec); spec.loader.exec_module(build)
+    before = build.source_state(source)
+    require(before["sha256"] == n_lock["prepared_source_sha256"]
+            and before["count"] == n_lock["prepared_source_files"], "Prepared source fingerprint differs")
+    lock = source / "codex-rs/Cargo.lock"
+    require(sha(lock) == graph["Cargo_lock_sha256"], "Actual Cargo.lock differs")
+    git = lambda *v: subprocess.check_output([args.git, "-C", str(REPO), *v]).decode("utf-8").strip()
+    commit = git("rev-parse", "HEAD"); epoch = int(git("show", "-s", "--format=%ct", commit))
+    dirty = bool(git("status", "--porcelain=v1", "-uall"))
+    require(args.development_qualification or not dirty, "Public native assembly requires clean committed source")
+    evidence.mkdir(); output.mkdir()
+    env = {k:v for k,v in os.environ.items() if not k.upper().startswith(("OPENAI", "OPENROUTER", "CODEX", "PYTHON", "PIP_", "GH_", "GITHUB_"))}
+    env.update(CARGO_HOME=str(args.cargo_home), CARGO_NET_OFFLINE="true",
+               CARGO_TARGET_DIR=str(evidence / "metadata-target"), RUSTC=str(args.cargo.parent / "rustc.exe"),
+               PATH=str(args.cargo.parent) + os.pathsep + env.get("PATH", ""))
+    command = [str(args.cargo), "metadata", "--offline", "--locked", "--format-version", "1",
+               "--filter-platform", TARGET, "--manifest-path", str(source / "codex-rs/Cargo.toml")]
+    result = subprocess.run(command, cwd=source, env=env, capture_output=True, timeout=120)
+    (evidence / "cargo-metadata.json").write_bytes(result.stdout)
+    (evidence / "cargo-metadata.stderr").write_bytes(result.stderr)
+    require(result.returncode == 0, "Offline metadata failed; retain private stderr, do not download missing inputs")
+    metadata = json.loads(result.stdout)
+    # Public graph omits private absolute package paths while retaining exact dependency identities/features.
+    public_ids = {p["id"]:p["id"] if p.get("source") else "workspace:" + p["name"] + "@" + p["version"]
+                  for p in metadata["packages"]}
+    graph["packages"] = sorted(({"id":p["id"], "name":p["name"], "version":p["version"], "source":p["source"]}
+                                for p in metadata["packages"] if p.get("source")), key=lambda p:p["id"])
+    resolved = sorted(({"id":public_ids[n["id"]], "features":sorted(n["features"]),
+                        "dependencies":sorted(public_ids[x] for x in n["dependencies"])}
+                       for n in metadata["resolve"]["nodes"]), key=lambda n:n["id"])
+    graph["resolved_nodes"] = resolved
+    graph["resolve_sha256"] = hashlib.sha256(canonical(resolved)).hexdigest()
+    graph["scope"] = "Common N/J target external workspace graph, a build/test-inclusive superset"
+    for name, row in outputs.items():
+        require((raw_path.parent / name).stat().st_size == row["size"], "Native input size differs")
+        copy_bytes(raw_path.parent / name, output / name, row["sha256"])
+    copy_bytes(REPO / "LICENSE", output / "LICENSE")
+    copy_bytes(REPO / "NOTICE", output / "NOTICE")
+    for name in ("LICENSE", "NOTICE"):
+        copy_bytes(source / name, output / "licenses" / ("codex-" + name))
+    licenses = collect_licenses(metadata, output / "licenses/rust", [args.cargo_home, source])
+    write(output / "provenance/dependency-graph.json", graph)
+    copy_bytes(lock, output / "provenance/Cargo.lock", graph["Cargo_lock_sha256"])
+    copy_bytes(references, output / "provenance/producer-references.json", args.producer_references_sha256)
+    copy_bytes(raw_path, output / "provenance/original-raw-manifest.json", args.native_manifest_sha256)
+    for name in ("N-original-build-lock.json", "J17-original-build-lock.json", "M-original-baseline-lock.json"):
+        copy_bytes(metadata_dir / name, output / "provenance" / name)
+    copy_bytes(source_index, output / "provenance/native-source-index.json", raw["source_index"]["sha256"])
+    for row in n_lock["patches"]:
+        copy_bytes(native / row["file"], output / "provenance/patches" / row["file"], row["sha256"])
+    write(output / "provenance/source.json", {
+        "schema_version":1, "repository":"https://github.com/0xZoharHuang/codex-app-deepseek-gateway",
+        "source_commit":commit, "source_dirty":dirty,
+        "kind":"development_qualification" if args.development_qualification else "clean_source_assembly",
+        "source_date_epoch":epoch, "native_upstream_commit":n_lock["upstream_commit"],
+        "native_archive_sha256":n_lock["archive_sha256"],
+        "native_archive_url":"https://codeload.github.com/openai/codex/tar.gz/" + n_lock["upstream_commit"],
+        "prepared_N_source_sha256":before["sha256"], "J_sibling_source_sha256":j_lock["prepared_source_sha256"],
+        "mixed_producer_source_index_sha256":raw["source_sha256"],
+        "packager_sha256":sha(__file__), "no_native_compile_or_execution":True,
+        "sidecar_policy":"Obtain required Code Mode Host locally through public app-prepare-runtime; not redistributed here."})
+    manifest = copy.deepcopy(raw)
+    manifest["source_index"] = {"file":"provenance/native-source-index.json", "sha256":sha(output / "provenance/native-source-index.json")}
+    manifest["distribution"] = {"schema_version":1, "kind":"raw_four_binary_distribution",
+        "license_index":{"file":"licenses/rust/index.json", "sha256":sha(output / "licenses/rust/index.json")},
+        "producer_references":{"file":"provenance/producer-references.json", "sha256":sha(output / "provenance/producer-references.json")},
+        "native_build_executed":False, "App_acceptance_asserted":False}
+    write(output / "manifest.json", manifest)
+    after = build.source_state(source)
+    require(after == before and sha(raw_path) == args.native_manifest_sha256
+            and sha(references) == args.producer_references_sha256, "Original source/producers changed")
+    require(git("rev-parse", "HEAD") == commit and bool(git("status", "--porcelain=v1", "-uall")) == dirty,
+            "Gateway source state changed during packaging")
+    inventory = validate_tree(output)
+    write(output / "provenance/distribution-inventory.json", inventory)
+    suffix = ".qualification.tar.gz" if args.development_qualification else ".tar.gz"
+    archive = output.parent / (output.name + suffix)
+    packed = make_archive(output, archive, epoch)
+    report = {"status":"raw_native_assembled_not_App_qualified", "output":str(output), "archive":str(archive),
+              "archive_identity":packed, "manifest_sha256":sha(output / "manifest.json"),
+              "raw_binary_count":len(outputs), "external_crates":len(licenses["packages"]),
+              "no_official_App_or_prepared_sidecar":True, "no_compile_or_native_execution":True,
+              "original_source_and_receipts_unchanged":True,
+              "kind":"development_qualification" if args.development_qualification else "clean_source_assembly"}
+    write(evidence / "assembly-result.json", report)
+    print(json.dumps(report))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
+        print("Native assembly rejected: " + str(error))
+        raise SystemExit(1)

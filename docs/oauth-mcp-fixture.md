@@ -36,9 +36,11 @@ References: [official SDK](https://github.com/modelcontextprotocol/python-sdk),
 Copy the fixture source into the intended user's owned acceptance workspace
 without preserving SSH-created owners/ACLs. Compare SHA256 with
 .evidence/oauth-mcp-fixture-handoff.json. Use an independently verified Python
-environment containing mcp==2.3.0. Example PowerShell, substituting the owned copy:
+environment containing mcp==2.3.0. Example PowerShell: replace both placeholder
+paths with that verified interpreter and owned fixture copy; do not point the
+command at an old development .venv or modify a running installation.
 
-    & 'D:\Projects\codex-app-deepseek-gateway\.venv\Scripts\python.exe' -I -X utf8 'D:\OWNED-ACCEPTANCE-WORKSPACE\oauth_mcp\server.py' --access-ttl 60 --lifetime 1800
+    & 'C:\PATH-TO-VERIFIED-MCP-ENV\Scripts\python.exe' -I -X utf8 'D:\OWNED-ACCEPTANCE-WORKSPACE\oauth_mcp\server.py' --access-ttl 60 --lifetime 1800
 
 The process binds only 127.0.0.1 on an OS-assigned port and generates a fresh
 128-bit nonce. Its one JSON startup descriptor contains base, mcp_url,

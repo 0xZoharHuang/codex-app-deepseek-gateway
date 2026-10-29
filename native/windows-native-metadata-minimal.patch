@@ -1,0 +1,1794 @@
+--- a/codex-rs/windows-sandbox-rs/src/acl.rs
++++ b/codex-rs/windows-sandbox-rs/src/acl.rs
+@@ -734,18 +734,13 @@
+         if code2 != ERROR_SUCCESS {
+             return Err(anyhow!("SetEntriesInAclW failed: {code2}"));
+         }
+-        // SET_ACCESS may merge/remove an independently owned metadata-only ACE.
+-        // Keep its exact bytes when the new grant already includes that right.
+-        // This changes ownership representation, never the effective access mask.
+-        let mut preserved = preserve_standalone_metadata_entries(p_dacl, p_new_dacl, &entries)?;
+-        let effective_dacl = preserved
+-            .as_mut()
+-            .map_or(p_new_dacl, |storage| storage.as_mut_ptr().cast::<ACL>());
++        // Preserve native SET_ACCESS semantics. Later native/user permissions may
++        // supersede an earlier metadata-only ACE; its receipt never reconstructs it.
+         if root_only_directory {
+             set_directory_dacl_without_propagation(
+                 handle.as_raw_handle() as HANDLE,
+                 p_sd,
+-                effective_dacl,
++                p_new_dacl,
+             )?;
+         } else {
+             let code3 = SetSecurityInfo(
+@@ -754,7 +749,7 @@
+                 DACL_SECURITY_INFORMATION,
+                 std::ptr::null_mut(),
+                 std::ptr::null_mut(),
+-                effective_dacl,
++                p_new_dacl,
+                 std::ptr::null_mut(),
+             );
+             if code3 != ERROR_SUCCESS {
+@@ -808,111 +803,6 @@
+         }
+     }
+     Ok(Some((guard, result?)))
+-}
+-
+-// Preserve a separate non-inheriting metadata ACE through the native allow setter.
+-// The requested permission already contains FILE_READ_ATTRIBUTES; the retained
+-// ACE is redundant for access but necessary for exact ownership-based revocation.
+-unsafe fn preserve_standalone_metadata_entries(
+-    previous: *mut ACL,
+-    updated: *mut ACL,
+-    requested: &[EXPLICIT_ACCESS_W],
+-) -> Result<Option<Vec<u32>>> {
+-    use windows_sys::Win32::Security::AddAce;
+-    use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
+-    if previous.is_null() || updated.is_null() {
+-        return Ok(None);
+-    }
+-    ensure!(
+-        IsValidAcl(previous) != 0 && IsValidAcl(updated) != 0,
+-        "invalid metadata preservation ACL"
+-    );
+-    let mut additional = Vec::new();
+-    for index in 0..(*previous).AceCount as u32 {
+-        let mut raw = std::ptr::null_mut();
+-        ensure!(
+-            GetAce(previous, index, &mut raw) != 0,
+-            "read original metadata ACE"
+-        );
+-        let header = &*raw.cast::<ACE_HEADER>();
+-        if header.AceType != ACCESS_ALLOWED_ACE_TYPE
+-            || header.AceFlags != 0
+-            || (header.AceSize as usize) < size_of::<ACCESS_ALLOWED_ACE>()
+-        {
+-            continue;
+-        }
+-        let ace = &*raw.cast::<ACCESS_ALLOWED_ACE>();
+-        if ace.Mask != FILE_READ_ATTRIBUTES
+-            || !requested.iter().any(|request| {
+-                request.grfAccessPermissions & FILE_READ_ATTRIBUTES != 0
+-                    && request.grfInheritance & u32::from(INHERIT_ONLY_ACE) == 0
+-                    && EqualSid(
+-                        (&raw const ace.SidStart) as *mut c_void,
+-                        request.Trustee.ptstrName.cast(),
+-                    ) != 0
+-            })
+-        {
+-            continue;
+-        }
+-        let bytes = std::slice::from_raw_parts(raw.cast::<u8>(), header.AceSize as usize);
+-        let mut exists = false;
+-        for i in 0..(*updated).AceCount as u32 {
+-            let mut current = std::ptr::null_mut();
+-            ensure!(
+-                GetAce(updated, i, &mut current) != 0,
+-                "read updated metadata ACE"
+-            );
+-            let size = (*current.cast::<ACE_HEADER>()).AceSize as usize;
+-            if size == bytes.len()
+-                && std::slice::from_raw_parts(current.cast::<u8>(), size) == bytes
+-            {
+-                exists = true;
+-                break;
+-            }
+-        }
+-        if !exists {
+-            additional.push(bytes.to_vec());
+-        }
+-    }
+-    if additional.is_empty() {
+-        return Ok(None);
+-    }
+-    let old_size = (*updated).AclSize as usize;
+-    let size = old_size + additional.iter().map(Vec::len).sum::<usize>();
+-    ensure!(
+-        size <= u16::MAX as usize,
+-        "metadata-preserving ACL is too large"
+-    );
+-    let mut storage = vec![0u32; size.div_ceil(size_of::<u32>())];
+-    let acl = storage.as_mut_ptr().cast::<ACL>();
+-    std::ptr::copy_nonoverlapping(updated.cast::<u8>(), acl.cast::<u8>(), old_size);
+-    (*acl).AclSize = size as u16;
+-    let mut insertion = (*acl).AceCount as u32;
+-    for index in 0..(*acl).AceCount as u32 {
+-        let mut raw = std::ptr::null_mut();
+-        ensure!(
+-            GetAce(acl, index, &mut raw) != 0,
+-            "find metadata ACE insertion"
+-        );
+-        if (*raw.cast::<ACE_HEADER>()).AceFlags & INHERITED_ACE != 0 {
+-            insertion = index;
+-            break;
+-        }
+-    }
+-    for bytes in additional {
+-        ensure!(
+-            AddAce(
+-                acl,
+-                (*acl).AclRevision as u32,
+-                insertion,
+-                bytes.as_ptr().cast(),
+-                bytes.len() as u32
+-            ) != 0,
+-            "preserve standalone metadata ACE"
+-        );
+-        insertion += 1;
+-    }
+-    Ok(Some(storage))
+ }
+ 
+ // Match the pinned-handle DACL write used by file_write: preserve protection
+--- a/codex-rs/windows-sandbox-rs/src/ancestor_metadata.rs
++++ b/codex-rs/windows-sandbox-rs/src/ancestor_metadata.rs
+@@ -1,13 +1,9 @@
+-//! Namespace-owned, non-inheriting directory metadata for CODEX_HOME ancestors.
++//! Current-request, non-inheriting directory metadata for the private runtime.
+ //! PowerShell resolves ancestor attributes before selecting its initial location.
+-//! Never grant directory enumeration, file data access, or descendant inheritance.
++//! Native uninstall preserves filesystem permissions; no metadata history is read or written.
+ use crate::file_security::get_raw_file_security;
+ use anyhow::{Context, Result, bail, ensure};
+-use serde::{Deserialize, Serialize};
+ use std::ffi::c_void;
+-use std::fs::OpenOptions;
+-use std::io::Read;
+-use std::os::windows::fs::OpenOptionsExt;
+ use std::os::windows::io::{AsRawHandle, OwnedHandle};
+ use std::path::{Path, PathBuf};
+ use windows_sys::Win32::Foundation::{HANDLE, LocalFree};
+@@ -15,42 +11,17 @@
+ use windows_sys::Win32::Security::{
+     ACE_HEADER, ACL, AddAce, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetLengthSid,
+     INHERIT_ONLY_ACE, INHERITED_ACE, InitializeAcl, IsValidAcl, IsValidSid,
+-    OWNER_SECURITY_INFORMATION,
++    OWNER_SECURITY_INFORMATION, SidTypeAlias,
+ };
+ use windows_sys::Win32::Storage::FileSystem as fs;
+ 
+-use crate::deny_read_state::{lock_private_state_transaction, validate_state_file};
+ use crate::namespace::SandboxNamespace;
+ use crate::no_reparse_dir::{DirectoryOpenDisposition, open_directory_no_reparse};
+ 
+-const STATE: &str = "ancestor_metadata_acl_state.json";
+-const LOCK: &str = "ancestor_metadata_acl_state.lock";
+-
+-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+-#[serde(deny_unknown_fields)]
++#[derive(Clone, Debug, PartialEq, Eq)]
+ struct DirectoryId {
+     volume: u64,
+     file_id: [u8; 16],
+-}
+-
+-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+-#[serde(deny_unknown_fields)]
+-struct Grant {
+-    path: PathBuf,
+-    identity: DirectoryId,
+-    ace: Vec<u8>,
+-    #[serde(default)]
+-    revoking: bool,
+-}
+-
+-#[derive(Debug, Deserialize, Serialize)]
+-#[serde(deny_unknown_fields)]
+-struct Ledger {
+-    schema: u32,
+-    namespace: String,
+-    owner_sid: String,
+-    group_sid: String,
+-    grants: Vec<Grant>,
+ }
+ 
+ struct PinnedDirectory {
+@@ -142,7 +113,7 @@
+ }
+ 
+ // Only below-home parents of this request's already-authorized physical roots
+-// enter the grant set. Journal-only paths are validated/revoked, never regranted.
++// enter the grant set. Historical files never select metadata targets.
+ fn private_descendant(namespace: &SandboxNamespace, path: &Path) -> bool {
+     let key = crate::deny_read_acl::lexical_path_key(dunce::simplified(path));
+     let home = crate::deny_read_acl::lexical_path_key(dunce::simplified(&namespace.home));
+@@ -209,402 +180,6 @@
+     }
+     pinned.sort_by_key(|item| item.path.components().count());
+     Ok(pinned)
+-}
+-
+-fn handle_path(handle: HANDLE, volume_guid: bool) -> Result<PathBuf> {
+-    use std::os::windows::ffi::OsStringExt;
+-    let mut name = vec![0_u16; 32_768];
+-    let count = unsafe {
+-        fs::GetFinalPathNameByHandleW(
+-            handle,
+-            name.as_mut_ptr(),
+-            name.len() as u32,
+-            if volume_guid { 1 } else { 0 },
+-        )
+-    };
+-    ensure!(
+-        count > 0 && (count as usize) < name.len(),
+-        "resolve metadata object path: {}",
+-        std::io::Error::last_os_error()
+-    );
+-    name.truncate(count as usize);
+-    Ok(PathBuf::from(std::ffi::OsString::from_wide(&name)))
+-}
+-
+-fn filesystem_name(handle: HANDLE) -> Result<String> {
+-    let mut name = [0_u16; 32];
+-    let mut label = [0_u16; 260];
+-    let (mut serial, mut maximum, mut flags) = (0_u32, 0_u32, 0_u32);
+-    let ok = unsafe {
+-        fs::GetVolumeInformationByHandleW(
+-            handle,
+-            label.as_mut_ptr(),
+-            label.len() as u32,
+-            &mut serial,
+-            &mut maximum,
+-            &mut flags,
+-            name.as_mut_ptr(),
+-            name.len() as u32,
+-        )
+-    };
+-    ensure!(
+-        ok != 0,
+-        "read metadata volume type: {}",
+-        std::io::Error::last_os_error()
+-    );
+-    let end = name
+-        .iter()
+-        .position(|v| *v == 0)
+-        .context("unterminated filesystem name")?;
+-    Ok(String::from_utf16(&name[..end])?)
+-}
+-
+-fn open_recorded_id(
+-    home: &PinnedDirectory,
+-    identity: &DirectoryId,
+-) -> Result<std::result::Result<OwnedHandle, std::io::Error>> {
+-    use std::os::windows::io::FromRawHandle;
+-    ensure!(
+-        identity.volume == home.identity.volume,
+-        "metadata identity belongs to another volume"
+-    );
+-    let mut descriptor = fs::FILE_ID_DESCRIPTOR {
+-        dwSize: size_of::<fs::FILE_ID_DESCRIPTOR>() as u32,
+-        Type: fs::ExtendedFileIdType,
+-        Anonymous: fs::FILE_ID_DESCRIPTOR_0 {
+-            ExtendedFileId: fs::FILE_ID_128 {
+-                Identifier: identity.file_id,
+-            },
+-        },
+-    };
+-    let open = |descriptor: &fs::FILE_ID_DESCRIPTOR| {
+-        let handle = unsafe {
+-            fs::OpenFileById(
+-                home.handle.as_raw_handle() as _,
+-                descriptor,
+-                fs::READ_CONTROL | fs::FILE_READ_ATTRIBUTES | fs::FILE_TRAVERSE,
+-                fs::FILE_SHARE_READ | fs::FILE_SHARE_WRITE,
+-                std::ptr::null(),
+-                fs::FILE_FLAG_BACKUP_SEMANTICS | fs::FILE_FLAG_OPEN_REPARSE_POINT,
+-            )
+-        };
+-        if handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+-            Err(std::io::Error::last_os_error())
+-        } else {
+-            Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
+-        }
+-    };
+-    let first = open(&descriptor);
+-    if let Err(error) = &first
+-        && matches!(error.raw_os_error(), Some(87 | 50))
+-        && identity.file_id[8..] == [0; 8]
+-        && filesystem_name(home.handle.as_raw_handle() as _)?.eq_ignore_ascii_case("NTFS")
+-    {
+-        // Microsoft documents NTFS references as a zero-extended 64-bit ID.
+-        // This compatibility path is explicit and every successful open is
+-        // subsequently compared against the original complete 128-bit identity.
+-        descriptor.Type = fs::FileIdType;
+-        descriptor.Anonymous = fs::FILE_ID_DESCRIPTOR_0 {
+-            FileId: i64::from_le_bytes(identity.file_id[..8].try_into().unwrap()),
+-        };
+-        return Ok(open(&descriptor));
+-    }
+-    Ok(first)
+-}
+-
+-#[derive(Debug)]
+-struct NtfsRecordMetadata {
+-    ordinal: u64,
+-    sequence: u16,
+-}
+-
+-fn same_ntfs_generation(reference: u64, record: &NtfsRecordMetadata) -> bool {
+-    record.ordinal == reference & ((1_u64 << 48) - 1)
+-        && u64::from(record.sequence) == reference >> 48
+-}
+-
+-fn query_ntfs_record(
+-    volume: HANDLE,
+-    ordinal: u64,
+-    record_bytes: usize,
+-) -> Result<NtfsRecordMetadata> {
+-    ensure!(
+-        ordinal < (1_u64 << 48),
+-        "NTFS record ordinal exceeds its documented field"
+-    );
+-    ensure!(
+-        (512..=65_536).contains(&record_bytes),
+-        "unsupported bounded NTFS record size"
+-    );
+-    let mut output = vec![0_u8; 16 + record_bytes - 1];
+-    let mut count = 0_u32;
+-    let ok = unsafe {
+-        windows_sys::Win32::System::IO::DeviceIoControl(
+-            volume,
+-            0x0009_0068,
+-            (&raw const ordinal).cast(),
+-            size_of_val(&ordinal) as u32,
+-            output.as_mut_ptr().cast(),
+-            output.len() as u32,
+-            &mut count,
+-            std::ptr::null_mut(),
+-        )
+-    };
+-    ensure!(
+-        ok != 0,
+-        "query one NTFS metadata record: {}",
+-        std::io::Error::last_os_error()
+-    );
+-    parse_ntfs_record_metadata(&output, count as usize, record_bytes, ordinal)
+-}
+-
+-fn parse_ntfs_record_metadata(
+-    output: &[u8],
+-    count: usize,
+-    record_bytes: usize,
+-    ordinal: u64,
+-) -> Result<NtfsRecordMetadata> {
+-    ensure!(
+-        ordinal < (1_u64 << 48) && (512..=65_536).contains(&record_bytes),
+-        "invalid bounded NTFS metadata request"
+-    );
+-    ensure!(
+-        count <= output.len() && count >= 12,
+-        "truncated NTFS record response"
+-    );
+-    let returned = u64::from_le_bytes(output[..8].try_into().unwrap());
+-    let length = u32::from_le_bytes(output[8..12].try_into().unwrap()) as usize;
+-    ensure!(
+-        length >= 24 && length <= record_bytes && count >= 12 + length,
+-        "invalid NTFS metadata header length"
+-    );
+-    // Only the fixed, documented NTFS3.0/3.1 metadata header is inspected:
+-    // signature, SequenceNumber and IN_USE. Attributes/file content are neither
+-    // interpreted nor logged. The output FileReferenceNumber can be ordinal-only.
+-    ensure!(
+-        &output[12..16] == b"FILE",
+-        "unrecognized NTFS record signature"
+-    );
+-    let sequence = u16::from_le_bytes(output[28..30].try_into().unwrap());
+-    let flags = u16::from_le_bytes(output[34..36].try_into().unwrap());
+-    ensure!(
+-        sequence != 0 && flags & 1 != 0,
+-        "NTFS result is not an in-use metadata generation"
+-    );
+-    ensure!(
+-        returned >> 48 == 0 || returned >> 48 == u64::from(sequence),
+-        "unknown NTFS output-reference encoding"
+-    );
+-    let returned_ordinal = returned & ((1_u64 << 48) - 1);
+-    ensure!(
+-        returned_ordinal <= ordinal,
+-        "NTFS metadata query returned a higher ordinal"
+-    );
+-    Ok(NtfsRecordMetadata {
+-        ordinal: returned_ordinal,
+-        sequence,
+-    })
+-}
+-
+-fn parse_ntfs_volume_metadata(data: &[u8], count: usize, expected_volume: u64) -> Result<usize> {
+-    ensure!(
+-        count <= data.len() && count >= 104,
+-        "truncated NTFS version metadata"
+-    );
+-    ensure!(
+-        u64::from_le_bytes(data[..8].try_into().unwrap()) == expected_volume,
+-        "read-only NTFS volume differs from pinned namespace volume"
+-    );
+-    let extended = u32::from_le_bytes(data[96..100].try_into().unwrap());
+-    let major = u16::from_le_bytes(data[100..102].try_into().unwrap());
+-    let minor = u16::from_le_bytes(data[102..104].try_into().unwrap());
+-    ensure!(
+-        extended >= 8 && major == 3 && minor <= 1,
+-        "unsupported NTFS metadata header version"
+-    );
+-    let record_bytes = u32::from_le_bytes(data[48..52].try_into().unwrap()) as usize;
+-    ensure!(
+-        (512..=65_536).contains(&record_bytes),
+-        "unsupported NTFS record size"
+-    );
+-    ensure!(
+-        extended as usize <= count - 96,
+-        "NTFS extended metadata exceeds returned bytes"
+-    );
+-    Ok(record_bytes)
+-}
+-
+-fn ntfs_generation_deleted(home: &PinnedDirectory, identity: &DirectoryId) -> Result<bool> {
+-    use std::os::windows::ffi::OsStrExt;
+-    use std::os::windows::io::FromRawHandle;
+-    ensure!(
+-        identity.volume == home.identity.volume && identity.file_id[8..] == [0; 8],
+-        "deleted-object proof requires the same volume and a zero-extended NTFS reference"
+-    );
+-    ensure!(
+-        filesystem_name(home.handle.as_raw_handle() as _)?.eq_ignore_ascii_case("NTFS"),
+-        "deleted-object proof is only defined for NTFS"
+-    );
+-    let live_control = open_recorded_id(home, &home.identity)?
+-        .context("NTFS live control identity cannot be opened")?;
+-    ensure!(
+-        directory_id(live_control.as_raw_handle() as _)? == home.identity,
+-        "NTFS live control returned a different full identity"
+-    );
+-    let physical = handle_path(home.handle.as_raw_handle() as _, true)?;
+-    let text = physical.to_string_lossy();
+-    ensure!(
+-        text.starts_with(r"\\?\Volume{"),
+-        "metadata volume has no pinned GUID path"
+-    );
+-    let end = text
+-        .find('}')
+-        .context("metadata volume GUID is malformed")?
+-        + 1;
+-    ensure!(
+-        text.as_bytes().get(end) == Some(&b'\\'),
+-        "metadata GUID boundary is invalid"
+-    );
+-    let volume_name: Vec<u16> = std::ffi::OsStr::new(&text[..end])
+-        .encode_wide()
+-        .chain(Some(0))
+-        .collect();
+-    // Cold native uninstall may require its existing elevated context for this
+-    // read-only volume open. Normal per-request grants never call this proof.
+-    let raw = unsafe {
+-        fs::CreateFileW(
+-            volume_name.as_ptr(),
+-            0x8000_0000,
+-            fs::FILE_SHARE_READ | fs::FILE_SHARE_WRITE | fs::FILE_SHARE_DELETE,
+-            std::ptr::null(),
+-            fs::OPEN_EXISTING,
+-            0,
+-            std::ptr::null_mut(),
+-        )
+-    };
+-    ensure!(
+-        raw != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE,
+-        "open read-only metadata volume: {}",
+-        std::io::Error::last_os_error()
+-    );
+-    let volume = unsafe { OwnedHandle::from_raw_handle(raw) };
+-    ensure!(
+-        filesystem_name(volume.as_raw_handle() as _)?.eq_ignore_ascii_case("NTFS"),
+-        "metadata volume type changed"
+-    );
+-    let mut data = [0_u8; 128];
+-    let mut count = 0_u32;
+-    let ok = unsafe {
+-        windows_sys::Win32::System::IO::DeviceIoControl(
+-            volume.as_raw_handle() as _,
+-            0x0009_0064,
+-            std::ptr::null(),
+-            0,
+-            data.as_mut_ptr().cast(),
+-            data.len() as u32,
+-            &mut count,
+-            std::ptr::null_mut(),
+-        )
+-    };
+-    ensure!(
+-        ok != 0 && count >= 104,
+-        "read NTFS volume metadata: {}",
+-        std::io::Error::last_os_error()
+-    );
+-    let record_bytes = parse_ntfs_volume_metadata(&data, count as usize, identity.volume)?;
+-    ensure!(
+-        home.identity.file_id[8..] == [0; 8],
+-        "NTFS live control ID is not zero extended"
+-    );
+-    let control = u64::from_le_bytes(home.identity.file_id[..8].try_into().unwrap());
+-    let expected = u64::from_le_bytes(identity.file_id[..8].try_into().unwrap());
+-    let mask = (1_u64 << 48) - 1;
+-    let control_matches = |value: &NtfsRecordMetadata| same_ntfs_generation(control, value);
+-    ensure!(
+-        control_matches(&query_ntfs_record(
+-            volume.as_raw_handle() as _,
+-            control & mask,
+-            record_bytes
+-        )?),
+-        "live namespace NTFS control generation differs"
+-    );
+-    let actual = query_ntfs_record(volume.as_raw_handle() as _, expected & mask, record_bytes)?;
+-    ensure!(
+-        control_matches(&query_ntfs_record(
+-            volume.as_raw_handle() as _,
+-            control & mask,
+-            record_bytes
+-        )?),
+-        "live namespace NTFS control changed after object query"
+-    );
+-    ensure!(
+-        directory_id(live_control.as_raw_handle() as _)? == home.identity,
+-        "NTFS live control identity changed after metadata queries"
+-    );
+-    // Official FSCTL returns the first in-use ordinal <= requested. A lower
+-    // ordinal proves this slot is unused; another sequence proves generation
+-    // replacement. An alive matching generation remains unknown, never retired.
+-    Ok(!same_ntfs_generation(expected, &actual))
+-}
+-
+-fn resolve_recorded_directory(
+-    namespace: &SandboxNamespace,
+-    grant: &Grant,
+-) -> Result<Option<PinnedDirectory>> {
+-    if let Ok(directory) = PinnedDirectory::open(&grant.path)
+-        && directory.identity == grant.identity
+-    {
+-        return Ok(Some(directory));
+-    }
+-    ensure!(
+-        private_descendant(namespace, &grant.path),
+-        "recorded ancestor identity changed"
+-    );
+-    let home = PinnedDirectory::open(&namespace.home)?;
+-    let opened = open_recorded_id(&home, &grant.identity)?;
+-    let handle = match opened {
+-        Ok(handle) => handle,
+-        Err(error) if matches!(error.raw_os_error(), Some(2 | 3)) => return Ok(None),
+-        Err(error) if error.raw_os_error() == Some(87) => {
+-            if ntfs_generation_deleted(&home, &grant.identity)? {
+-                return Ok(None);
+-            }
+-            return Err(error)
+-                .context("historical metadata generation is live but cannot be opened");
+-        }
+-        Err(error) => {
+-            return Err(error)
+-                .context("historical metadata identity unresolved; ownership retained");
+-        }
+-    };
+-    ensure!(
+-        directory_id(handle.as_raw_handle() as _)? == grant.identity,
+-        "reopened metadata object identity differs"
+-    );
+-    let mut tag: fs::FILE_ATTRIBUTE_TAG_INFO = unsafe { std::mem::zeroed() };
+-    ensure!(
+-        unsafe {
+-            fs::GetFileInformationByHandleEx(
+-                handle.as_raw_handle() as _,
+-                fs::FileAttributeTagInfo,
+-                (&raw mut tag).cast(),
+-                size_of_val(&tag) as u32,
+-            )
+-        } != 0,
+-        "inspect reopened metadata directory: {}",
+-        std::io::Error::last_os_error()
+-    );
+-    ensure!(
+-        tag.FileAttributes & fs::FILE_ATTRIBUTE_DIRECTORY != 0
+-            && tag.FileAttributes & fs::FILE_ATTRIBUTE_REPARSE_POINT == 0,
+-        "recorded metadata object is not a physical directory"
+-    );
+-    let path = handle_path(handle.as_raw_handle() as _, false)?;
+-    Ok(Some(PinnedDirectory {
+-        path,
+-        handle,
+-        identity: grant.identity.clone(),
+-    }))
+ }
+ 
+ struct Dacl {
+@@ -816,165 +391,38 @@
+     Ok(exact.first().copied())
+ }
+ 
+-fn owned_index(entries: &[Vec<u8>], owned: &[u8], sid: &[u8]) -> Result<Option<usize>> {
+-    if let Some(index) = exact_index(entries, owned)? {
+-        return Ok(Some(index));
+-    }
+-    for ace in entries {
+-        if ace[0] == 0
+-            && ace.len() >= 16
+-            && entry_sid(ace)? == sid
+-            && metadata_mask(u32::from_le_bytes(ace[4..8].try_into().unwrap()))
+-        {
+-            bail!("owned metadata ACE was changed; preserve the ledger and unrelated permissions");
+-        }
+-    }
+-    Ok(None)
+-}
+-
+-fn load(path: &Path) -> Result<Option<Ledger>> {
+-    let mut file = match OpenOptions::new()
+-        .read(true)
+-        .share_mode(fs::FILE_SHARE_READ | fs::FILE_SHARE_DELETE)
+-        .custom_flags(fs::FILE_FLAG_OPEN_REPARSE_POINT)
+-        .open(path)
+-    {
+-        Ok(file) => file,
+-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+-        Err(error) => return Err(error).context("open ancestor metadata ledger"),
+-    };
+-    validate_state_file(&file)?;
+-    let mut bytes = Vec::new();
+-    file.read_to_end(&mut bytes)?;
+-    Ok(Some(serde_json::from_slice(&bytes).context(
+-        "invalid ancestor metadata ledger; preserve it for recovery",
+-    )?))
+-}
+-
+-fn save(path: &Path, ledger: &Ledger) -> Result<()> {
+-    let file = OpenOptions::new()
+-        .write(true)
+-        .create(true)
+-        .truncate(false)
+-        .share_mode(fs::FILE_SHARE_READ | fs::FILE_SHARE_WRITE)
+-        .custom_flags(fs::FILE_FLAG_OPEN_REPARSE_POINT)
+-        .open(path)?;
+-    validate_state_file(&file)?;
+-    crate::file_write::write_file_atomically_preserving_dacl(
+-        path,
+-        &serde_json::to_vec_pretty(ledger)?,
+-        file,
+-    )?;
+-    // A successful atomic rename alone does not flush the ownership record.
+-    // Persist it before any ACL mutation, including each successful revocation.
+-    let committed = OpenOptions::new()
+-        .write(true)
+-        .share_mode(fs::FILE_SHARE_READ)
+-        .custom_flags(fs::FILE_FLAG_OPEN_REPARSE_POINT)
+-        .open(path)?;
+-    validate_state_file(&committed)?;
+-    committed
+-        .sync_all()
+-        .context("flush ancestor metadata ownership before ACL mutation")
+-}
+-
+-fn validate(
+-    ledger: &Ledger,
+-    namespace: &SandboxNamespace,
+-    pinned: &[PinnedDirectory],
+-) -> Result<Vec<u8>> {
++// Validate current local SAM identities before any metadata target is mutated.
++// This is a current snapshot, not a replacement for the runner's token admission.
++fn current_user_sids(namespace: &SandboxNamespace, group_sid: &[u8]) -> Result<[Vec<u8>; 2]> {
++    let expected_group = namespace.key.group();
+     ensure!(
+-        ledger.schema == 1
+-            && ledger.namespace == namespace.key.id()
+-            && ledger.owner_sid == namespace.owner_sid,
+-        "ancestor metadata ledger owner mismatch"
++        crate::namespace::local_group_exists(&expected_group)?,
++        "metadata namespace group does not exist in the local SAM"
+     );
+-    let sid = crate::token::LocalSid::from_string(&ledger.group_sid)?;
+-    let bytes = unsafe {
+-        std::slice::from_raw_parts(
+-            sid.as_ptr().cast::<u8>(),
+-            GetLengthSid(sid.as_ptr()) as usize,
+-        )
+-    }
+-    .to_vec();
+-    let expected = metadata_ace(&bytes)?;
+-    let mut used = std::collections::HashSet::new();
+-    let current_home = PinnedDirectory::open(&namespace.home)?;
+-    for grant in &ledger.grants {
+-        crate::no_reparse_dir::validate_local_directory_path(&grant.path)?;
+-        let target = pinned
+-            .iter()
+-            .find(|directory| directory.path == grant.path && directory.identity == grant.identity);
+-        if private_descendant(namespace, &grant.path) {
+-            // Old targets may have been deleted or renamed. Protected journal
+-            // structure/namespace/ACE remains validated without re-opening or
+-            // regranting an unrelated historical object during a new request.
+-            ensure!(
+-                grant.identity.volume == current_home.identity.volume
+-                    && grant.identity.file_id != [0; 16],
+-                "private metadata journal has a foreign volume or invalid identity"
+-            );
+-            if let Some(directory) = target {
+-                Dacl::read(directory)?
+-                    .require_metadata_owner(&namespace.owner_sid, &directory.path)?;
+-            }
+-        } else {
+-            let target = target.context("ledger target is not a current CODEX_HOME ancestor")?;
+-            ensure!(
+-                target.path != namespace.home && target.path.parent().is_some(),
+-                "ledger may not target home itself or a volume root"
+-            );
+-        }
+-        ensure!(
+-            grant.ace == expected
+-                && used.insert((
+-                    grant.path.clone(),
+-                    grant.identity.volume,
+-                    grant.identity.file_id
+-                )),
+-            "ancestor metadata identity/ACE mismatch"
+-        );
+-    }
+-    Ok(bytes)
+-}
+-
+-fn transaction(namespace: &SandboxNamespace) -> Result<crate::deny_read_state::StateTransaction> {
+-    lock_private_state_transaction(
+-        &crate::setup::sandbox_secrets_dir(&namespace.home),
+-        STATE,
+-        LOCK,
+-    )
+-}
+-fn grant_ledger(
+-    namespace: &SandboxNamespace,
+-    pinned: &[PinnedDirectory],
+-    path: &Path,
+-    group: &str,
+-) -> Result<Ledger> {
+-    let mut ledger = load(path)?.unwrap_or_else(|| Ledger {
+-        schema: 1,
+-        namespace: namespace.key.id(),
+-        owner_sid: namespace.owner_sid.clone(),
+-        group_sid: group.to_owned(),
+-        grants: Vec::new(),
+-    });
+-    validate(&ledger, namespace, pinned)?;
++    let current_group = crate::winutil::resolve_sid(&expected_group)
++        .context("resolve current metadata namespace group")?;
+     ensure!(
+-        !ledger.grants.iter().any(|g| g.revoking),
+-        "ancestor metadata revocation is incomplete; finish native uninstall before setup"
++        current_group == group_sid,
++        "metadata group SID differs from the current namespace group"
+     );
+-    if ledger.group_sid != group {
+-        ensure!(
+-            ledger.grants.is_empty(),
+-            "ancestor metadata group SID changed with pending grants"
+-        );
+-        ledger.group_sid = group.to_owned();
+-        save(path, &ledger)?;
+-    }
+-    Ok(ledger)
+-}
+-/// Grant only missing metadata, with scope -> owner journal -> home transaction.
+-/// No owner/home journal is held while waiting for an inheritance domain.
++    let (name, kind) = crate::namespace_coordination::account_name(&current_group)?;
++    ensure!(
++        kind == SidTypeAlias && name.eq_ignore_ascii_case(&expected_group),
++        "metadata namespace group is not the expected alias"
++    );
++    let users = [
++        crate::namespace_coordination::local_user_sid(&namespace.key.offline())?,
++        crate::namespace_coordination::local_user_sid(&namespace.key.online())?,
++    ];
++    for user in &users {
++        ensure!(
++            crate::namespace_coordination::same_domain(user, &current_group)?,
++            "metadata namespace group is not in the local sandbox users' SAM domain"
++        );
++    }
++    Ok(users)
++}
++
+ pub(crate) fn grant(namespace: &SandboxNamespace, group_sid: &[u8]) -> Result<()> {
+     grant_for_roots(namespace, group_sid, &[])
+ }
+@@ -984,74 +432,44 @@
+     group_sid: &[u8],
+     roots: &[PathBuf],
+ ) -> Result<()> {
++    let users = current_user_sids(namespace, group_sid)?;
+     let pinned = pin_requested_parents(namespace, roots)?;
+-    grant_pinned(namespace, group_sid, &pinned)
+-}
+-
++    grant_pinned(namespace, group_sid, &pinned, &users)
++}
++
++// The private mechanism accepts synthetic subjects only in own-temp tests.
++// Production callers reach it exclusively through the validated public entry.
+ fn grant_pinned(
+     namespace: &SandboxNamespace,
+     group_sid: &[u8],
+     pinned: &[PinnedDirectory],
++    user_sids: &[Vec<u8>],
+ ) -> Result<()> {
+-    let group = crate::winutil::string_from_sid_bytes(group_sid).map_err(anyhow::Error::msg)?;
+-    let planned = {
+-        let _journal = crate::setup_mutex::acquire_metadata_acl_lock(&namespace.owner_sid, 5_000)?;
+-        let tx = transaction(namespace)?;
+-        grant_ledger(namespace, pinned, &tx.state_path, &group)?
+-    };
+     let ace = metadata_ace(group_sid)?;
+-    let principals = vec![
++    let mut principals = vec![
+         group_sid.to_vec(),
+         crate::resolve_sid("Users")?,
+         crate::resolve_sid("Authenticated Users")?,
+         crate::resolve_sid("Everyone")?,
+     ];
++    principals.extend_from_slice(user_sids);
+     let deadline = crate::acl_lock::deadline();
+-    for directory in pinned
+-        .iter()
+-        .filter(|p| p.path != namespace.home && p.path.parent().is_some())
+-    {
++    for directory in pinned.iter().filter(|p| p.path.parent().is_some()) {
+         let dacl = Dacl::read(directory)?;
+-        let entries = dacl.entries()?;
+-        let previously_owned = planned
+-            .grants
+-            .iter()
+-            .any(|g| g.path == directory.path && g.identity == directory.identity);
+-        if !previously_owned && already_readable(&dacl, &entries, &principals)? {
++        if already_readable(&dacl, &dacl.entries()?, &principals)? {
+             continue;
+         }
+-        // These three guards are scoped to this target. Never wait for the next
+-        // domain with an owner-wide or home-local journal held.
++        // Preserve the existing object -> owner lock order. No persistent home
++        // transaction is needed for native filesystem permissions that outlive uninstall.
+         let _scope = directory.lock_acl(deadline)?;
+-        let _journal = crate::setup_mutex::acquire_metadata_acl_lock(&namespace.owner_sid, 5_000)?;
+-        let tx = transaction(namespace)?;
+-        let mut ledger = grant_ledger(namespace, pinned, &tx.state_path, &group)?;
++        let _owner_lock =
++            crate::setup_mutex::acquire_metadata_acl_lock(&namespace.owner_sid, 5_000)?;
+         let dacl = Dacl::read(directory)?;
+         let mut entries = dacl.entries()?;
+-        if let Some(owned) = ledger
+-            .grants
+-            .iter()
+-            .find(|g| g.path == directory.path && g.identity == directory.identity)
+-        {
+-            owned_index(&entries, &owned.ace, group_sid)?;
+-        }
+         if already_readable(&dacl, &entries, &principals)? {
+             continue;
+         }
+         dacl.require_metadata_owner(&namespace.owner_sid, &directory.path)?;
+-        if !ledger
+-            .grants
+-            .iter()
+-            .any(|g| g.path == directory.path && g.identity == directory.identity)
+-        {
+-            ledger.grants.push(Grant {
+-                path: directory.path.clone(),
+-                identity: directory.identity.clone(),
+-                ace: ace.clone(),
+-                revoking: false,
+-            });
+-            save(&tx.state_path, &ledger)?;
+-        }
+         let index = entries
+             .iter()
+             .position(|entry| entry[1] & INHERITED_ACE as u8 != 0)
+@@ -1059,115 +477,18 @@
+         entries.insert(index, ace.clone());
+         dacl.write(directory, &entries)?;
+         ensure!(
+-            owned_index(&Dacl::read(directory)?.entries()?, &ace, group_sid)?.is_some(),
++            exact_index(&Dacl::read(directory)?.entries()?, &ace)?.is_some(),
+             "metadata ACE did not persist"
+         );
+     }
+     Ok(())
+-}
+-/// Remove only journaled exact bytes on the same pinned objects. Replanning never
+-/// carries a stale last-index across an unlocked transaction.
+-pub(crate) fn revoke(namespace: &SandboxNamespace) -> Result<()> {
+-    let path = crate::setup::sandbox_secrets_dir(&namespace.home).join(STATE);
+-    if !path.try_exists()? {
+-        return Ok(());
+-    }
+-    let pinned = pin_ancestors(namespace)?;
+-    let deadline = crate::acl_lock::deadline();
+-    loop {
+-        let planned = {
+-            let _journal =
+-                crate::setup_mutex::acquire_metadata_acl_lock(&namespace.owner_sid, 5_000)?;
+-            let tx = transaction(namespace)?;
+-            let Some(ledger) = load(&tx.state_path)? else {
+-                return Ok(());
+-            };
+-            validate(&ledger, namespace, &pinned)?;
+-            let Some(grant) = ledger.grants.last() else {
+-                return Ok(());
+-            };
+-            grant.clone()
+-        };
+-        let Some(directory) = resolve_recorded_directory(namespace, &planned)? else {
+-            // This branch is reached only by an identity lookup's documented
+-            // absence or the bounded same-volume NTFS generation proof.
+-            let _journal =
+-                crate::setup_mutex::acquire_metadata_acl_lock(&namespace.owner_sid, 5_000)?;
+-            let tx = transaction(namespace)?;
+-            let Some(mut ledger) = load(&tx.state_path)? else {
+-                return Ok(());
+-            };
+-            let sid = validate(&ledger, namespace, &pinned)?;
+-            if ledger.grants.last() != Some(&planned) {
+-                ensure!(
+-                    deadline.is_none_or(|end| std::time::Instant::now() < end),
+-                    "deleted metadata ownership changed while locking"
+-                );
+-                continue;
+-            }
+-            if crate::namespace::local_group_exists(&namespace.key.group())? {
+-                ensure!(
+-                    crate::resolve_sid(&namespace.key.group())? == sid,
+-                    "metadata group identity changed while retiring deleted generation"
+-                );
+-            }
+-            ledger.grants.pop();
+-            save(&tx.state_path, &ledger)?;
+-            continue;
+-        };
+-        let _scope = directory.lock_acl(deadline)?;
+-        let _journal = crate::setup_mutex::acquire_metadata_acl_lock(&namespace.owner_sid, 5_000)?;
+-        let tx = transaction(namespace)?;
+-        let Some(mut ledger) = load(&tx.state_path)? else {
+-            return Ok(());
+-        };
+-        let sid = validate(&ledger, namespace, &pinned)?;
+-        if ledger.grants.last() != Some(&planned) {
+-            ensure!(
+-                deadline.is_none_or(|end| std::time::Instant::now() < end),
+-                "metadata revocation changed while locking"
+-            );
+-            continue;
+-        }
+-        if crate::namespace::local_group_exists(&namespace.key.group())? {
+-            ensure!(
+-                crate::resolve_sid(&namespace.key.group())? == sid,
+-                "metadata group identity changed"
+-            );
+-        }
+-        let dacl = Dacl::read(&directory)?;
+-        if private_descendant(namespace, &planned.path) {
+-            dacl.require_metadata_owner(&namespace.owner_sid, &directory.path)?;
+-        }
+-        let mut entries = dacl.entries()?;
+-        let index = if planned.revoking {
+-            exact_index(&entries, &planned.ace)?
+-        } else {
+-            let index = owned_index(&entries, &planned.ace, &sid)?;
+-            if index.is_some() {
+-                dacl.require_metadata_owner(&namespace.owner_sid, &directory.path)?;
+-                ledger.grants.last_mut().unwrap().revoking = true;
+-                save(&tx.state_path, &ledger)?;
+-            }
+-            index
+-        };
+-        if let Some(index) = index {
+-            dacl.require_metadata_owner(&namespace.owner_sid, &directory.path)?;
+-            entries.remove(index);
+-            dacl.write(&directory, &entries)?;
+-            ensure!(
+-                exact_index(&Dacl::read(&directory)?.entries()?, &planned.ace)?.is_none(),
+-                "owned ancestor metadata ACE remains after revocation"
+-            );
+-        }
+-        ledger.grants.pop();
+-        save(&tx.state_path, &ledger)?;
+-    }
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use std::fs::OpenOptions;
++    use std::os::windows::fs::OpenOptionsExt;
+     use windows_sys::Win32::System::SystemServices::FILE_CS_FLAG_CASE_SENSITIVE_DIR;
+ 
+     fn sid(rid: u32) -> Vec<u8> {
+@@ -1354,7 +675,7 @@
+     }
+ 
+     #[test]
+-    fn raw_explicit_inheritance_bits_survive_native_metadata_grant_and_revoke() -> Result<()> {
++    fn raw_explicit_inheritance_bits_survive_native_metadata_grant() -> Result<()> {
+         let root = tempfile::tempdir()?;
+         let owner = SandboxNamespace::current(root.path())?.owner_sid;
+         let home = root.path().join("home");
+@@ -1380,7 +701,7 @@
+             [3, 3]
+         );
+         let principal = sid(1101);
+-        grant_pinned(&namespace, &principal, &[target_pin])?;
++        grant_pinned(&namespace, &principal, &[target_pin], &[])?;
+         let after = raw_fixture_descriptor(&PinnedDirectory::open(&target)?)?;
+         assert_eq!((after.0, after.1), (before.0, before.1));
+         let expected = metadata_ace(&principal)?;
+@@ -1395,13 +716,6 @@
+             "existing physical ACE flags/order/mask/SID must be exact"
+         );
+         assert_eq!(after.2.iter().filter(|ace| **ace == expected).count(), 1);
+-        assert_eq!(raw_fixture_descriptor(&home_pin)?, home_before);
+-        assert_eq!(raw_fixture_descriptor(&child_pin)?, child_before);
+-        revoke(&namespace)?;
+-        assert_eq!(
+-            raw_fixture_descriptor(&PinnedDirectory::open(&target)?)?,
+-            before
+-        );
+         assert_eq!(raw_fixture_descriptor(&home_pin)?, home_before);
+         assert_eq!(raw_fixture_descriptor(&child_pin)?, child_before);
+         Ok(())
+@@ -1492,49 +806,6 @@
+             fs::FILE_READ_ATTRIBUTES
+         );
+         assert_eq!(entry_sid(&ace).unwrap(), principal);
+-    }
+-
+-    #[test]
+-    fn exact_revocation_preserves_other_namespace_and_other_masks() {
+-        let principal = sid(1101);
+-        let owned = metadata_ace(&principal).unwrap();
+-        let other_namespace = metadata_ace(&sid(1102)).unwrap();
+-        let mut other_mask = owned.clone();
+-        other_mask[4..8].copy_from_slice(&fs::FILE_GENERIC_WRITE.to_le_bytes());
+-        let mut entries = vec![other_namespace.clone(), owned.clone(), other_mask.clone()];
+-        let index = owned_index(&entries, &owned, &principal).unwrap().unwrap();
+-        entries.remove(index);
+-        assert_eq!(entries, [other_namespace, other_mask]);
+-        assert_eq!(owned_index(&entries, &owned, &principal).unwrap(), None);
+-    }
+-
+-    #[test]
+-    fn revocation_intent_preserves_later_read_and_other_namespace() -> Result<()> {
+-        let principal = sid(1101);
+-        let owned = metadata_ace(&principal)?;
+-        let mut later_read = owned.clone();
+-        later_read[4..8].copy_from_slice(&fs::FILE_GENERIC_READ.to_le_bytes());
+-        let other = metadata_ace(&sid(1102))?;
+-        let mut entries = vec![owned.clone(), later_read.clone(), other.clone()];
+-        // The initial transition must prove the exact owned entry is still present.
+-        let index = owned_index(&entries, &owned, &principal)?.unwrap();
+-        entries.remove(index);
+-        // Simulates a crash after deletion, before journal removal was saved.
+-        assert_eq!(exact_index(&entries, &owned)?, None);
+-        assert_eq!(entries, [later_read, other]);
+-        // Without the persisted intent, the same input must remain fail-closed.
+-        assert!(owned_index(&entries, &owned, &principal).is_err());
+-        Ok(())
+-    }
+-
+-    #[test]
+-    fn ambiguous_modified_or_duplicate_owned_entries_are_rejected() {
+-        let principal = sid(1101);
+-        let owned = metadata_ace(&principal).unwrap();
+-        let mut changed = owned.clone();
+-        changed[4..8].copy_from_slice(&fs::FILE_GENERIC_READ.to_le_bytes());
+-        assert!(owned_index(&[changed], &owned, &principal).is_err());
+-        assert!(owned_index(&[owned.clone(), owned.clone()], &owned, &principal).is_err());
+     }
+ 
+     #[test]
+@@ -1559,7 +830,7 @@
+         assert_eq!(Dacl::read(&parent)?.entries()?, changed);
+         assert_eq!(Dacl::read(&child)?.entries()?, child_before);
+         let mut after = Dacl::read(&parent)?.entries()?;
+-        let index = owned_index(&after, &ace, &principal)?.unwrap();
++        let index = exact_index(&after, &ace)?.context("fixture metadata ACE missing")?;
+         after.remove(index);
+         Dacl::read(&parent)?.write(&parent, &after)?;
+         assert_eq!(Dacl::read(&parent)?.entries()?, before);
+@@ -1568,14 +839,13 @@
+     }
+ 
+     #[test]
+-    fn native_read_setter_keeps_owned_metadata_for_exact_revocation() -> Result<()> {
++    fn native_read_setter_supersedes_metadata_without_rebuilding_it() -> Result<()> {
+         let root = tempfile::tempdir()?;
+         let directory = PinnedDirectory::open(root.path())?;
+-        let before = Dacl::read(&directory)?.entries()?;
+         let principal = sid(1101);
+         let owned = metadata_ace(&principal)?;
+         let other = metadata_ace(&sid(1102))?;
+-        let mut entries = before.clone();
++        let mut entries = Dacl::read(&directory)?.entries()?;
+         let index = entries
+             .iter()
+             .position(|ace| ace[1] & INHERITED_ACE as u8 != 0)
+@@ -1591,22 +861,14 @@
+                     | windows_sys::Win32::Security::CONTAINER_INHERIT_ACE) as u32,
+             )?;
+         }
+-        let mut granted = Dacl::read(&directory)?.entries()?;
+-        assert!(exact_index(&granted, &owned)?.is_some());
++        let granted = Dacl::read(&directory)?.entries()?;
++        assert!(exact_index(&granted, &owned)?.is_none());
+         assert!(granted.contains(&other));
+         assert!(granted.iter().any(|ace| ace[0] == 0
+             && ace[1] == 3
+             && entry_sid(ace).is_ok_and(|sid| sid == principal)
+             && u32::from_le_bytes(ace[4..8].try_into().unwrap())
+                 == fs::FILE_GENERIC_READ | fs::FILE_GENERIC_EXECUTE));
+-        let index = owned_index(&granted, &owned, &principal)?.unwrap();
+-        granted.remove(index);
+-        Dacl::read(&directory)?.write(&directory, &granted)?;
+-        let after = Dacl::read(&directory)?.entries()?;
+-        assert!(exact_index(&after, &owned)?.is_none());
+-        assert_eq!(after, granted);
+-        assert!(after.contains(&other));
+-        Dacl::read(&directory)?.write(&directory, &before)?;
+         Ok(())
+     }
+ 
+@@ -1895,59 +1157,6 @@
+     }
+ 
+     #[test]
+-    fn ledger_rejects_foreign_namespace_path_identity_and_permissions() -> Result<()> {
+-        let root = tempfile::tempdir()?;
+-        let home = root.path().join("home");
+-        std::fs::create_dir(&home)?;
+-        let namespace = SandboxNamespace::current(&home)?;
+-        let pinned = pin_ancestors(&namespace)?;
+-        let target = pinned.iter().find(|p| p.path == root.path()).unwrap();
+-        let principal = sid(1101);
+-        let group =
+-            crate::winutil::string_from_sid_bytes(&principal).map_err(anyhow::Error::msg)?;
+-        let mut ledger = Ledger {
+-            schema: 1,
+-            namespace: namespace.key.id(),
+-            owner_sid: namespace.owner_sid.clone(),
+-            group_sid: group,
+-            grants: vec![Grant {
+-                path: target.path.clone(),
+-                identity: target.identity.clone(),
+-                ace: metadata_ace(&principal)?,
+-                revoking: false,
+-            }],
+-        };
+-        validate(&ledger, &namespace, &pinned)?;
+-        ledger.namespace.push('x');
+-        assert!(validate(&ledger, &namespace, &pinned).is_err());
+-        ledger.namespace = namespace.key.id();
+-        ledger.grants[0].identity.file_id[0] ^= 1;
+-        assert!(validate(&ledger, &namespace, &pinned).is_err());
+-        ledger.grants[0].identity = target.identity.clone();
+-        ledger.grants[0].ace[4..8].copy_from_slice(&fs::FILE_GENERIC_READ.to_le_bytes());
+-        assert!(validate(&ledger, &namespace, &pinned).is_err());
+-        ledger.grants[0].ace = metadata_ace(&principal)?;
+-        ledger.grants[0].path = root.path().join("not-an-ancestor");
+-        assert!(validate(&ledger, &namespace, &pinned).is_err());
+-        Ok(())
+-    }
+-
+-    #[test]
+-    fn malformed_or_reparse_ledger_is_not_recovered_as_empty() -> Result<()> {
+-        let root = tempfile::tempdir()?;
+-        let path = root.path().join(STATE);
+-        std::fs::write(&path, b"{invalid")?;
+-        assert!(load(&path).is_err());
+-        assert_eq!(std::fs::read(&path)?, b"{invalid");
+-        std::fs::remove_file(&path)?;
+-        let other = root.path().join("other");
+-        std::fs::write(&other, b"{}")?;
+-        std::fs::hard_link(&other, &path)?;
+-        assert!(load(&path).is_err());
+-        assert_eq!(std::fs::read(&other)?, b"{}");
+-        Ok(())
+-    }
+-    #[test]
+     fn waiter_replans_after_locked_writer_protects_target() -> Result<()> {
+         use std::sync::mpsc;
+         use std::time::Duration;
+@@ -2074,81 +1283,7 @@
+     }
+ 
+     #[test]
+-    fn journal_only_private_parent_is_validated_but_never_regranted() -> Result<()> {
+-        let root = tempfile::tempdir()?;
+-        let home = root.path().join("home");
+-        let parent = home.join("worktrees/old-task");
+-        std::fs::create_dir_all(&parent)?;
+-        let namespace = SandboxNamespace::current(&home)?;
+-        let directory = PinnedDirectory::open(&parent)?;
+-        let principal = sid(1101);
+-        let ledger = Ledger {
+-            schema: 1,
+-            namespace: namespace.key.id(),
+-            owner_sid: namespace.owner_sid.clone(),
+-            group_sid: crate::winutil::string_from_sid_bytes(&principal)
+-                .map_err(anyhow::Error::msg)?,
+-            grants: vec![Grant {
+-                path: parent.clone(),
+-                identity: directory.identity.clone(),
+-                ace: metadata_ace(&principal)?,
+-                revoking: false,
+-            }],
+-        };
+-        namespace.reserve_owner()?;
+-        let before = Dacl::read(&directory)?.entries()?;
+-        {
+-            let tx = transaction(&namespace)?;
+-            save(&tx.state_path, &ledger)?;
+-        }
+-        // Simulate a crash before the journaled ACE was written, or a removed
+-        // former root. An empty current grant set must not replay that journal.
+-        grant_pinned(&namespace, &principal, &[])?;
+-        let request = pin_requested_parents(&namespace, &[])?;
+-        assert!(!request.iter().any(|p| p.path == parent));
+-        assert_eq!(validate(&ledger, &namespace, &request)?, principal);
+-        assert_eq!(Dacl::read(&directory)?.entries()?, before);
+-        drop(directory);
+-        std::fs::remove_dir(&parent)?;
+-        // Deleted history must not even open a volume during an unrelated grant.
+-        grant_pinned(&namespace, &principal, &[])?;
+-        std::fs::create_dir(&parent)?;
+-        let replacement = PinnedDirectory::open(&parent)?;
+-        assert_ne!(replacement.identity, ledger.grants[0].identity);
+-        let broad = [
+-            crate::resolve_sid("Users")?,
+-            crate::resolve_sid("Authenticated Users")?,
+-            crate::resolve_sid("Everyone")?,
+-        ];
+-        let before_replacement = Dacl::read(&replacement)?;
+-        let mut private = before_replacement
+-            .entries()?
+-            .into_iter()
+-            .filter(|entry| {
+-                !entry_sid(entry).is_ok_and(|sid| broad.iter().any(|value| value.as_slice() == sid))
+-            })
+-            .collect::<Vec<_>>();
+-        private.push(fixture_owner_ace(&namespace.owner_sid)?);
+-        before_replacement
+-            .write(&replacement, &private)
+-            .context("set private replacement fixture DACL")?;
+-        grant_pinned(&namespace, &principal, &[replacement])
+-            .context("grant replacement fixture metadata")?;
+-        {
+-            let tx = transaction(&namespace)?;
+-            let current = load(&tx.state_path)?.context("replacement grant ledger missing")?;
+-            assert_eq!(current.grants.len(), 2);
+-            assert_eq!(current.grants[0].path, current.grants[1].path);
+-            assert_ne!(current.grants[0].identity, current.grants[1].identity);
+-        }
+-        let mut invalid = ledger;
+-        invalid.grants[0].identity.volume ^= 1;
+-        assert!(validate(&invalid, &namespace, &request).is_err());
+-        Ok(())
+-    }
+-
+-    #[test]
+-    fn private_parent_metadata_grant_and_cold_revoke_preserve_children() -> Result<()> {
++    fn private_parent_metadata_grant_is_idempotent_and_preserves_children() -> Result<()> {
+         let root = tempfile::tempdir()?;
+         let home = root.path().join("home");
+         let parent = home.join("worktrees/task");
+@@ -2177,34 +1312,26 @@
+         original
+             .write(&directory, &private)
+             .context("set private parent fixture DACL")?;
+-        let before = Dacl::read(&directory)?.entries()?;
+         let child_before = Dacl::read(&child)?.entries()?;
+         let principal = sid(1101);
+         // Exercise the actual owned native grant path on one isolated fixture;
+         // never invoke it on the real profile ancestors in a unit test.
+-        grant_pinned(&namespace, &principal, &[directory])
++        grant_pinned(&namespace, &principal, &[directory], &[])
+             .context("grant private fixture metadata")?;
+         let after = Dacl::read(&PinnedDirectory::open(&parent)?)?.entries()?;
+         assert!(exact_index(&after, &metadata_ace(&principal)?)?.is_some());
+         assert_eq!(Dacl::read(&child)?.entries()?, child_before);
+-        // Close the fixture child pin, then rename the original parent and
+-        // put an unrelated same-owner directory at its former pathname.
+-        drop(child);
+-        let renamed = home.join("worktrees/task-renamed");
+-        std::fs::rename(&parent, &renamed).context("rename granted fixture parent")?;
+-        std::fs::create_dir(&parent)?;
+-        let replacement = PinnedDirectory::open(&parent)?;
+-        let replacement_before = Dacl::read(&replacement)?.entries()?;
+-        revoke(&namespace).context("cold-revoke renamed fixture identity")?;
+-        assert_eq!(Dacl::read(&replacement)?.entries()?, replacement_before);
++        grant_pinned(
++            &namespace,
++            &principal,
++            &[PinnedDirectory::open(&parent)?],
++            &[],
++        )?;
+         assert_eq!(
+-            Dacl::read(&PinnedDirectory::open(&renamed)?)?.entries()?,
+-            before
+-        );
+-        assert_eq!(
+-            Dacl::read(&PinnedDirectory::open(&renamed.join("workspace"))?)?.entries()?,
+-            child_before
+-        );
++            Dacl::read(&PinnedDirectory::open(&parent)?)?.entries()?,
++            after
++        );
++        assert_eq!(Dacl::read(&child)?.entries()?, child_before);
+         Ok(())
+     }
+ 
+@@ -2356,84 +1483,230 @@
+         Ok(())
+     }
+ 
+-    fn ntfs_metadata_fixture(ordinal: u64, sequence: u16) -> Vec<u8> {
+-        let mut raw = vec![0_u8; 1039];
+-        raw[..8].copy_from_slice(&ordinal.to_le_bytes());
+-        raw[8..12].copy_from_slice(&1024_u32.to_le_bytes());
+-        raw[12..16].copy_from_slice(b"FILE");
+-        raw[28..30].copy_from_slice(&sequence.to_le_bytes());
+-        raw[34..36].copy_from_slice(&3_u16.to_le_bytes());
+-        raw
+-    }
+-
+-    #[test]
+-    fn ntfs_fixed_header_parser_rejects_unknown_or_truncated_metadata() {
+-        let valid = ntfs_metadata_fixture(100, 2);
+-        let parsed = parse_ntfs_record_metadata(&valid, 1036, 1024, 100).unwrap();
+-        assert_eq!((parsed.ordinal, parsed.sequence), (100, 2));
+-        assert!(parse_ntfs_record_metadata(&valid, valid.len() + 1, 1024, 100).is_err());
+-        assert!(parse_ntfs_record_metadata(&valid[..35], 35, 1024, 100).is_err());
+-        assert!(parse_ntfs_record_metadata(&valid, 1036, 0, 100).is_err());
+-        for (offset, bytes) in [
+-            (12, b"BAAD".to_vec()),
+-            (28, vec![0, 0]),
+-            (34, vec![0, 0]),
+-            (8, 2048_u32.to_le_bytes().to_vec()),
+-            (0, 101_u64.to_le_bytes().to_vec()),
+-            (0, ((9_u64 << 48) | 100).to_le_bytes().to_vec()),
++    #[test]
++    fn public_entry_rejects_missing_or_wrong_namespace_group_without_dacl_writes() -> Result<()> {
++        let root = tempfile::tempdir()?;
++        let home = root.path().join("home");
++        let target = home.join("worktrees/task/workspace");
++        std::fs::create_dir_all(&target)?;
++        let namespace = SandboxNamespace::current(&home)?;
++        assert!(!crate::namespace::local_group_exists(
++            &namespace.key.group()
++        )?);
++        let home_pin = PinnedDirectory::open(&home)?;
++        let target_pin = PinnedDirectory::open(&target)?;
++        let before_home = raw_fixture_descriptor(&home_pin)?;
++        let before_target = raw_fixture_descriptor(&target_pin)?;
++        for supplied in [sid(1101), crate::resolve_sid("Users")?] {
++            assert!(grant(&namespace, &supplied).is_err());
++            assert!(grant_for_roots(&namespace, &supplied, &[target.clone()]).is_err());
++            assert_eq!(raw_fixture_descriptor(&home_pin)?, before_home);
++            assert_eq!(raw_fixture_descriptor(&target_pin)?, before_target);
++        }
++        assert!(!crate::setup::sandbox_secrets_dir(&home).exists());
++        Ok(())
++    }
++
++    #[test]
++    fn concrete_user_inherited_metadata_deny_on_home_or_ancestor_is_not_overridden() -> Result<()> {
++        for location in ["home", "ancestor"] {
++            for ordinal in 0..2 {
++                let root = tempfile::tempdir()?;
++                let parent = root.path().join("parent");
++                let target = parent.join("target");
++                std::fs::create_dir_all(&target)?;
++                let home = if location == "home" {
++                    target.clone()
++                } else {
++                    target.join("home")
++                };
++                std::fs::create_dir_all(&home)?;
++                let namespace = SandboxNamespace::current(&home)?;
++                namespace.reserve_owner()?;
++                let group = sid(1101);
++                let users = [sid(1103), sid(1104)];
++                // Use the ordinary native inheriting setter on this own fixture.
++                // Its real child readback must prove the deny is inherited before grant is tried.
++                unsafe {
++                    crate::acl::add_deny_read_ace(
++                        &parent,
++                        users[ordinal].as_ptr().cast_mut().cast(),
++                    )?;
++                }
++                let target_pin = PinnedDirectory::open(&target)?;
++                let before = raw_fixture_descriptor(&target_pin)?;
++                let relevant_denies = before
++                    .2
++                    .iter()
++                    .filter(|ace| entry_sid(ace).is_ok_and(|sid| sid == users[ordinal].as_slice()))
++                    .map(|ace| {
++                        (
++                            ace[0],
++                            ace[1],
++                            u32::from_le_bytes(ace[4..8].try_into().unwrap()),
++                        )
++                    })
++                    .collect::<Vec<_>>();
++                println!(
++                    "own inherited-deny fixture location={location}, subject={ordinal}, readback={relevant_denies:?}"
++                );
++                assert!(before.2.iter().any(|ace| ace[0] == 1
++                    && ace[1] & INHERITED_ACE as u8 != 0
++                    && entry_sid(ace).is_ok_and(|sid| sid == users[ordinal].as_slice())));
++                assert!(grant_pinned(&namespace, &group, &[target_pin], &users).is_err());
++                assert_eq!(
++                    raw_fixture_descriptor(&PinnedDirectory::open(&target)?)?,
++                    before
++                );
++                assert!(exact_index(&before.2, &metadata_ace(&group)?)?.is_none());
++            }
++        }
++        Ok(())
++    }
++
++    #[test]
++    fn home_metadata_is_noninheriting_attributes_only_without_listing_or_file_data() -> Result<()> {
++        let root = tempfile::tempdir()?;
++        let owner = SandboxNamespace::current(root.path())?.owner_sid;
++        let home = root.path().join("home");
++        create_explicit_inheritable_fixture(&home, &owner)?;
++        let child = home.join("private");
++        create_explicit_inheritable_fixture(&child, &owner)?;
++        let file = child.join("private.txt");
++        std::fs::write(&file, b"own synthetic private contents")?;
++        let namespace = SandboxNamespace::current(&home)?;
++        namespace.reserve_owner()?;
++        let home_pin = PinnedDirectory::open(&home)?;
++        let child_pin = PinnedDirectory::open(&child)?;
++        let before = raw_fixture_descriptor(&home_pin)?;
++        let child_before = raw_fixture_descriptor(&child_pin)?;
++        let file_before = raw_fixture_handle(std::fs::File::open(&file)?.as_raw_handle() as _)?;
++        let group = sid(1101);
++        grant_pinned(&namespace, &group, &[home_pin], &[])?;
++        let current = PinnedDirectory::open(&home)?;
++        let after = raw_fixture_descriptor(&current)?;
++        let owned = metadata_ace(&group)?;
++        assert_eq!(
++            after
++                .2
++                .iter()
++                .filter(|entry| entry.as_slice() == owned)
++                .count(),
++            1
++        );
++        assert_eq!(
++            after
++                .2
++                .iter()
++                .filter(|entry| entry.as_slice() != owned)
++                .cloned()
++                .collect::<Vec<_>>(),
++            before.2
++        );
++        assert_eq!(raw_fixture_descriptor(&child_pin)?, child_before);
++        assert_eq!(
++            raw_fixture_handle(std::fs::File::open(&file)?.as_raw_handle() as _)?,
++            file_before
++        );
++        let psid = group.as_ptr().cast_mut().cast();
++        assert!(crate::path_mask_allows(
++            &home,
++            &[psid],
++            fs::FILE_READ_ATTRIBUTES,
++            true
++        )?);
++        assert!(!crate::path_mask_allows(
++            &home,
++            &[psid],
++            fs::FILE_LIST_DIRECTORY,
++            false
++        )?);
++        assert!(!crate::path_mask_allows(
++            &file,
++            &[psid],
++            fs::FILE_READ_DATA,
++            false
++        )?);
++        grant_pinned(&namespace, &group, &[current], &[])?;
++        assert_eq!(
++            raw_fixture_descriptor(&PinnedDirectory::open(&home)?)?,
++            after
++        );
++        Ok(())
++    }
++
++    #[test]
++    fn old_metadata_audit_files_are_not_read_modified_or_used_as_grant_authority() -> Result<()> {
++        use std::io::Read;
++        for bytes in [
++            b"{\"schema\":1,\"revoking\":true,\"path\":\"missing-history\"}".as_slice(),
++            b"\xff invalid old audit".as_slice(),
+         ] {
+-            let mut malformed = valid.clone();
+-            malformed[offset..offset + bytes.len()].copy_from_slice(&bytes);
+-            assert!(parse_ntfs_record_metadata(&malformed, 1036, 1024, 100).is_err());
+-        }
+-    }
+-
+-    #[test]
+-    fn ntfs_generation_proof_needs_old_generation_to_differ() -> Result<()> {
+-        let expected = (2_u64 << 48) | 100;
+-        let matches = |p: &NtfsRecordMetadata| same_ntfs_generation(expected, p);
+-        assert!(matches(&parse_ntfs_record_metadata(
+-            &ntfs_metadata_fixture(100, 2),
+-            1036,
+-            1024,
+-            100
+-        )?));
+-        assert!(!matches(&parse_ntfs_record_metadata(
+-            &ntfs_metadata_fixture(99, 2),
+-            1036,
+-            1024,
+-            100
+-        )?));
+-        assert!(!matches(&parse_ntfs_record_metadata(
+-            &ntfs_metadata_fixture(100, 3),
+-            1036,
+-            1024,
+-            100
+-        )?));
+-        Ok(())
+-    }
+-
+-    #[test]
+-    fn ntfs_volume_parser_rejects_foreign_or_unsupported_layout() {
+-        let mut valid = [0_u8; 128];
+-        valid[..8].copy_from_slice(&42_u64.to_le_bytes());
+-        valid[48..52].copy_from_slice(&1024_u32.to_le_bytes());
+-        valid[96..100].copy_from_slice(&8_u32.to_le_bytes());
+-        valid[100..102].copy_from_slice(&3_u16.to_le_bytes());
+-        valid[102..104].copy_from_slice(&1_u16.to_le_bytes());
+-        assert_eq!(parse_ntfs_volume_metadata(&valid, 104, 42).unwrap(), 1024);
+-        assert!(parse_ntfs_volume_metadata(&valid, 103, 42).is_err());
+-        assert!(parse_ntfs_volume_metadata(&valid, 129, 42).is_err());
+-        assert!(parse_ntfs_volume_metadata(&valid, 104, 43).is_err());
+-        for (offset, bytes) in [
+-            (100, 4_u16.to_le_bytes().to_vec()),
+-            (102, 2_u16.to_le_bytes().to_vec()),
+-            (48, 0_u32.to_le_bytes().to_vec()),
+-            (96, 32_u32.to_le_bytes().to_vec()),
+-        ] {
+-            let mut unsupported = valid;
+-            unsupported[offset..offset + bytes.len()].copy_from_slice(&bytes);
+-            assert!(parse_ntfs_volume_metadata(&unsupported, 104, 42).is_err());
+-        }
+-    }
+-}
++            let root = tempfile::tempdir()?;
++            let home = root.path().join("home");
++            std::fs::create_dir(&home)?;
++            let namespace = SandboxNamespace::current(&home)?;
++            namespace.reserve_owner()?;
++            let secrets = crate::setup::sandbox_secrets_dir(&home);
++            let audit = secrets.join("ancestor_metadata_acl_state.json");
++            let old_lock = secrets.join("ancestor_metadata_acl_state.lock");
++            std::fs::write(&audit, bytes)?;
++            std::fs::write(&old_lock, b"old audit lock bytes")?;
++            // An exclusive own-fixture handle makes any attempted runtime audit read fail.
++            let mut held = OpenOptions::new().read(true).share_mode(0).open(&audit)?;
++            let before_audit = raw_fixture_handle(held.as_raw_handle() as _)?;
++            let target = home.join("plugins");
++            create_explicit_inheritable_fixture(&target, &namespace.owner_sid)?;
++            let pin = PinnedDirectory::open(&target)?;
++            let before_target = raw_fixture_descriptor(&pin)?;
++            let principal = sid(1101);
++            grant_pinned(&namespace, &principal, &[pin], &[])?;
++            let after = raw_fixture_descriptor(&PinnedDirectory::open(&target)?)?;
++            assert_eq!(after.2.len(), before_target.2.len() + 1);
++            assert!(exact_index(&after.2, &metadata_ace(&principal)?)?.is_some());
++            assert_eq!(raw_fixture_handle(held.as_raw_handle() as _)?, before_audit);
++            let mut retained = Vec::new();
++            held.read_to_end(&mut retained)?;
++            assert_eq!(retained, bytes);
++            assert_eq!(std::fs::read(&old_lock)?, b"old audit lock bytes");
++        }
++        Ok(())
++    }
++
++    #[test]
++    #[ignore = "Explicit confirmed project home and full subject SIDs required; read-only SAM check only"]
++    fn confirmed_namespace_current_subjects_are_local_and_wrong_sid_is_rejected_read_only()
++    -> Result<()> {
++        let home = std::env::var_os("CADSG_CONFIRMED_NAMESPACE_HOME")
++            .context("confirmed project home must be explicitly supplied")?;
++        let expected_sids: [String; 3] = serde_json::from_str(
++            &std::env::var("CADSG_EXPECTED_NAMESPACE_SIDS")
++                .context("full expected subject SIDs must be explicitly supplied")?,
++        )
++        .context("expected namespace subjects must contain exactly three full SIDs")?;
++        let expected_home = dirs_next::data_local_dir()
++            .context("local known folder unavailable")?
++            .join("codex-app-deepseek-app");
++        ensure!(
++            dunce::canonicalize(&home)? == dunce::canonicalize(&expected_home)?,
++            "only the confirmed project default home is allowed"
++        );
++        let namespace = SandboxNamespace::current(Path::new(&home))?;
++        let group = crate::resolve_sid(&namespace.key.group())?;
++        let users = current_user_sids(&namespace, &group)?;
++        for (subject, expected) in [&group, &users[0], &users[1]]
++            .into_iter()
++            .zip(expected_sids)
++        {
++            let actual =
++                crate::winutil::string_from_sid_bytes(subject).map_err(anyhow::Error::msg)?;
++            ensure!(
++                actual == expected,
++                "confirmed namespace subject differs from the reviewed SID"
++            );
++        }
++        // Only the read-only validator is invoked, never grant, owner reservation or provisioning.
++        assert!(current_user_sids(&namespace, &crate::resolve_sid("Users")?).is_err());
++        Ok(())
++    }
++}
+--- a/codex-rs/windows-sandbox-rs/src/namespace_coordination.rs
++++ b/codex-rs/windows-sandbox-rs/src/namespace_coordination.rs
+@@ -57,7 +57,7 @@
+     selected.context("runner token has no enabled local namespace alias")
+ }
+ 
+-fn account_name(sid: &[u8]) -> Result<(String, i32)> {
++pub(crate) fn account_name(sid: &[u8]) -> Result<(String, i32)> {
+     let mut name_len = 0;
+     let mut domain_len = 0;
+     let mut kind = 0;
+@@ -103,7 +103,7 @@
+     Ok((name.trim_end_matches('\0').to_string(), kind))
+ }
+ 
+-fn local_user_sid(name: &str) -> Result<Vec<u8>> {
++pub(crate) fn local_user_sid(name: &str) -> Result<Vec<u8>> {
+     let mut data = null_mut();
+     // NULL server binds this lookup to the local SAM, not a similarly named domain user.
+     let status = unsafe { NetUserGetInfo(null(), to_wide(name).as_ptr(), 23, &mut data) };
+@@ -139,7 +139,7 @@
+     result
+ }
+ 
+-fn same_domain(user: &[u8], group: &[u8]) -> Result<bool> {
++pub(crate) fn same_domain(user: &[u8], group: &[u8]) -> Result<bool> {
+     let mut equal = 0;
+     if unsafe { EqualDomainSid(user.as_ptr() as _, group.as_ptr() as _, &mut equal) } != 0 {
+         return Ok(equal != 0);
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+@@ -904,26 +904,6 @@
+     Ok(())
+ }
+ 
+-// PowerShell resolves every ancestor of its initial CWD, including the private
+-// Codex home above the native junction. Only directory attributes are needed:
+-// never grant listing, data access, or inheritance to sessions and secrets.
+-fn ensure_codex_home_metadata(home: &Path, sandbox_group_psid: *mut c_void) -> Result<()> {
+-    unsafe {
+-        ensure_allow_mask_aces_with_inheritance(
+-            home,
+-            &[sandbox_group_psid],
+-            FILE_READ_ATTRIBUTES,
+-            /*inheritance*/ 0,
+-        )
+-    }
+-    .context("grant Codex home directory metadata for native CWD resolution")?;
+-    anyhow::ensure!(
+-        path_mask_allows(home, &[sandbox_group_psid], FILE_READ_ATTRIBUTES, true)?,
+-        "Codex home directory metadata remains denied; refusing native CWD fallback"
+-    );
+-    Ok(())
+-}
+-
+ fn collect_critical_read_roots(
+     payload: &Payload,
+     artifact_roots: &[PathBuf],
+@@ -1084,7 +1064,6 @@
+         )?;
+     }
+ 
+-    ensure_codex_home_metadata(&payload.codex_home, sandbox_group_psid)?;
+     crate::ancestor_metadata::grant(&validate_payload_namespace(payload)?, &sandbox_group_sid)?;
+ 
+     // These pure artifacts are intentionally inside a private CODEX_HOME. Ensure
+@@ -1720,7 +1699,6 @@
+     use serde_json::json;
+     use std::fs;
+     use windows_sys::Win32::Security::{ACE_HEADER, GetAce};
+-    use windows_sys::Win32::Storage::FileSystem::FILE_LIST_DIRECTORY;
+ 
+     fn acl_entries(path: &Path) -> Vec<Vec<u8>> {
+         unsafe {
+@@ -1739,48 +1717,7 @@
+         }
+     }
+ 
+-    #[test]
+-    fn home_metadata_only_grants_attributes_without_listing_or_child_inheritance() {
+-        let home = tempfile::tempdir().unwrap();
+-        let sid = LocalSid::from_string("S-1-5-21-915763429-1123581321-271828182-4245").unwrap();
+-        let children = [
+-            home.path().join("private.txt"),
+-            home.path().join("marker.json"),
+-        ];
+-        for child in &children {
+-            std::fs::write(child, "synthetic private content").unwrap();
+-        }
+-        let before: Vec<_> = children.iter().map(|path| acl_entries(path)).collect();
+-        ensure_codex_home_metadata(home.path(), sid.as_ptr()).unwrap();
+-        assert!(
+-            path_mask_allows(home.path(), &[sid.as_ptr()], FILE_READ_ATTRIBUTES, true).unwrap()
+-        );
+-        assert!(
+-            !path_mask_allows(home.path(), &[sid.as_ptr()], FILE_LIST_DIRECTORY, true).unwrap()
+-        );
+-        for (child, original) in children.iter().zip(before) {
+-            assert_eq!(acl_entries(child), original);
+-            assert!(!path_mask_allows(child, &[sid.as_ptr()], FILE_GENERIC_READ, false).unwrap());
+-        }
+-        let entries = acl_entries(home.path());
+-        assert!(entries.iter().any(|entry| entry[0] == 0
+-            && entry[1] == 0
+-            && u32::from_le_bytes(entry[4..8].try_into().unwrap()) == FILE_READ_ATTRIBUTES));
+-        ensure_codex_home_metadata(home.path(), sid.as_ptr()).unwrap();
+-        assert_eq!(acl_entries(home.path()), entries);
+-    }
+-
+-    #[test]
+-    fn home_metadata_preserves_existing_deny_and_fails_closed() {
+-        let home = tempfile::tempdir().unwrap();
+-        let sid = LocalSid::from_string("S-1-5-21-915763429-1123581321-271828182-4246").unwrap();
+-        unsafe {
+-            crate::add_deny_read_ace(home.path(), sid.as_ptr()).unwrap();
+-        }
+-        let before = acl_entries(home.path());
+-        assert!(ensure_codex_home_metadata(home.path(), sid.as_ptr()).is_err());
+-        assert_eq!(acl_entries(home.path()), before);
+-    }
++
+     // Establish fixture preconditions independently of the machine's TEMP ACL.
+     // This changes only paths created by this test, never accounts or caller policy.
+     fn set_critical_test_dacl(path: &Path, entries: &str) {
+--- a/codex-rs/windows-sandbox-rs/src/uninstall_windows.rs
++++ b/codex-rs/windows-sandbox-rs/src/uninstall_windows.rs
+@@ -132,9 +132,8 @@
+         }
+         self.namespace.validate_existing_state()?;
+         self.users.validate_current()?;
+-        // Revoke only journaled ancestor metadata ACEs before deleting the group or ledger.
+-        // A failure retains identities and ownership evidence for an exact retry.
+-        crate::ancestor_metadata::revoke(&self.namespace)?;
++        // Preserve native filesystem permissions. Historical metadata audit files
++        // are neither permission authority nor an automatic uninstall recovery job.
+         let mut errors = Vec::new();
+ 
+         if let Some(codex_home) = codex_home {

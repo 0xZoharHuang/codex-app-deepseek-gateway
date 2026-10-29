@@ -74,3 +74,48 @@ or rendered in a bounded subprocess. On Windows its exact suspended process is
 admitted to an anonymous Job before it can run. The worker inherits no credential,
 proxy, Python or Codex environment and accepts only fixed operations and stdin
 PDF bytes. See `web-media-handoff.json` in private evidence for the measured limits.
+
+## Native App display references
+
+The fixed local Codex App preserves opaque standalone-web result metadata but
+does not automatically turn its image_v2 records into native message images.
+The gateway therefore also returns a standard Markdown image destination in the
+actual tool text. Captions are fixed; a source title cannot inject Markdown.
+
+For a PDF screenshot, only the already-rendered, digest-verified PNG is atomically
+published under web-data/generated-media/<sha256>.png with private permissions.
+The file is an immutable derived cache within the same byte/count limits as
+retained sources. Wrong existing bytes, links, junctions or exhausted budgets
+produce a failure, never a display-success claim. Files persist across normal
+gateway/App restart so a previously returned absolute destination remains useful.
+No new endpoint, tool, renderer or native thread logic is introduced. The App's
+own read-file-binary path remains responsible for accessing and displaying it.
+
+Commons image results expose the provider's actual thumbnail URL in standard
+Markdown. The App's remote-image safe-URL policy remains authoritative. Remote
+images are not downloaded into the local generated cache to bypass that policy.
+A turnNimage reference identifies a backend source; it is not an image URL.
+Returning a valid reference is not evidence that the App displayed its pixels:
+actual GUI observation remains required.
+
+
+## What the image transport counters prove
+
+The current image transport planner counts supported inline data URLs in typed
+input-image parts. Its image_occurrences field is not a total of every image
+kind in an incoming request. A typed HTTPS image can remain in the forwarded
+payload while contributing zero to this inline-planning counter. Likewise,
+zero uploads means no private Files conversion was needed; it does not prove
+that no image was sent.
+
+The private-reference consumption status concerns uploaded-file lease tracking.
+A not_applicable status with no private references is not proof that a model
+did or did not receive pixels. Do not infer vision success, image loss or model
+quality from those values alone.
+
+For delivery acceptance, separately bind the native tool output and UI event,
+the next actual native request's typed-image structure, the translated outbound
+structure, and the provider response/usage when available. A small local image
+can remain inline; URL images and private file references require their own
+type-specific evidence. Record only counts, schemes and hashes in diagnostic
+artifacts, not bearer headers, private URLs, raw image bytes, prompts or reasoning.

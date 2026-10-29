@@ -97,13 +97,39 @@ A conflict stops uninstall preparation before stopping the service or removing b
 
 Windows cannot reliably remove a Python executable or extension DLL while that same venv is executing. Uninstall therefore has two explicit phases:
 
-1. Production Python validates ownership, restores registered configuration, stops only the verified owned service, removes its owned task, and writes a hashed preparation receipt. That Python process exits.
+1. Production Python validates the bound App home, namespace owner/directory identity, native CLI provenance, same-user administrator token where provisioned, and absence of App/native workloads before changing configuration or stopping anything. It restores registered configuration, delegates namespace cleanup to the verified CLI's `sandbox uninstall` with that exact App `CODEX_HOME`, then stops only the owned gateway/task and writes a hashed preparation receipt. That Python process exits.
 2. Independent base Python loads the pinned recovery wheel, verifies the receipt and unchanged installation, atomically moves the owned release to a retirement directory, removes its active pointer, and deletes the retired files.
 
 Uninstall retains the persistent data home, sessions, user projects, credentials, independent base Python, recovery wheel, and other installed releases. Unknown or modified files inside a release cause a refusal, rather than deletion of potential user work. Owned file enumeration and cleanup use Windows extended-length paths, including retirement paths longer than MAX_PATH. A Windows file lock produces `uninstalled_cleanup_pending` with a receipt; repeating the installer Uninstall action reconciles that same retired release rather than launching another service or changing another installation.
+
+Native cleanup runs inside the CLI; it does not start the sandbox setup helper, command runner or Code Mode Host. Its cleanup-only admission still validates the trusted manifest and complete declared inventory, but requires pinned execution inputs only for the CLI plus binding/manifest/namespace ownership. Reads of unused component bytes are optional diagnostics. Missing, unreadable, changed or redirected unexecuted components are recorded explicitly with `full_bundle_verified: false`; they cannot prevent legitimate removal of the installation's own machine resources. App launch, check and preparation continue to require the complete bundle. A missing, changed or redirected CLI, uncertain ownership, active actor or insufficient privilege still blocks preparation before rollback/service stop. This recovery changes no Defender settings and does not restore or replace quarantined files.
+
+Each native attempt and its outcome are retained. An interrupted or unconfirmed attempt requires explicit reconciliation and `-RetryNativeCleanup`; a prior completed receipt is reusable only for matching inputs while its exact principals remain absent. Native cleanup preserves App home/sessions and ordinary filesystem ACLs under its existing contract; the gateway does not implement a second account, firewall or ACL cleanup engine.
 
 The lower-level `prepare-uninstall` output means only `ready_for_external_cleanup`. It is not a completed uninstall. `finalize-uninstall` refuses to run from the venv being removed. Use the PowerShell wrapper for the complete two-process workflow.
 
 ## Validation boundary
 
-Tests use isolated fixture directories and synthetic packages. They cover manifest/wheel tampering, immutable provenance, no-network install flags, failed-install cleanup, version mismatch, service identity mismatch, checkpoint ownership/conflicts, preservation of user data, modified-file refusal, and external cleanup recovery. Native Windows tests also execute real venv creation and offline pip installation, followed by the PowerShell install/activate/external-uninstall path. These are lifecycle tests; they do not by themselves establish App GUI, DeepSeek protocol, or complete runtime equivalence.
+Tests use isolated fixture directories and synthetic packages. They cover manifest/wheel tampering, immutable provenance, no-network install flags, failed-install cleanup, version mismatch, service identity mismatch, checkpoint ownership/conflicts, preservation of user data, modified-file refusal, and external cleanup recovery. Native Windows tests also execute real venv creation and offline pip installation, followed by the PowerShell install/activate/external-uninstall path.
+
+A separate non-elevated Windows product run used the complete installed candidate, not a synthetic replacement wheel: offline install, activation, configuration and checkpoint registration, actual owned service start and authenticated health, three-way rollback, and external uninstall all completed. Independent readback verified that the exact service and listener had stopped, the installed release and active pointer were absent, and original user annotations, later user settings, session and project files remained. Its App configuration was a private fixture; it did not launch another GUI or alter the active project App.
+
+Dedicated temporary-namespace runs exercised live-workload and non-admin refusal, actual native removal, same-home reprovision with new SIDs, and a second installed uninstall while retaining session/project files. A later installed damaged-package run verified that the real quarantined setup helper blocks full App bundle admission but permits CLI-only native cleanup of the already-empty owned namespace, followed by actual independent `-I -S` release removal. Original command-probe failures and a private harness's wrong expected final status remain in the evidence; they are not reported as successful App/runtime qualification. The corrected readback verified `uninstalled_active_release`, and the formal PowerShell idempotent finalizer returned `already_uninstalled`.
+
+These are lifecycle results. They do not by themselves establish App GUI, DeepSeek protocol, or complete runtime equivalence. Final source/release changes still require an explicit payload and provenance comparison.
+
+
+## A failed launch receipt does not prove that App is absent
+
+A launch may create the App before a later progress-receipt write fails. Preserve
+that original receipt and reconcile the recorded PID, creation time and private
+App identity with app-status/diagnose before another launch. Do not replay an
+admitted plan or treat failed_or_unverified as proof that no process exists.
+Close only the verified project instance through its normal File/Quit workflow
+when a fresh launch is required.
+
+On Windows, the launcher releases its receipt read handle before JSON parsing.
+Only publication of that admitted run's progress receipt has a bounded eight-
+attempt I/O retry (configured waits total 0.71 seconds). App creation, model
+requests, authentication, tools and configuration writes are not retried by
+this mechanism. A persistent access denial remains an error.

@@ -12,9 +12,10 @@ core = importlib.util.module_from_spec(_core_spec)
 sys.modules[_core_spec.name] = core
 _core_spec.loader.exec_module(core)
 
-EXPECTED_CORE_SHA = "aa3fc68984c83a98f6570117ca4306b5b2e79240fb347a78045c09ba97743a26"
+EXPECTED_CORE_SHA = "fc829866537883fa42711a912f5364574aff751407a3441cc8cb7a2eeea602ad"
 POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 STATE_NAME = "guardian-negative.json"
+SYNTHETIC_REASONING_TEXT = core.SYNTHETIC_REASONING_TEXT
 
 
 def check_core():
@@ -464,32 +465,41 @@ class GuardianHarness(core.FaultHarness):
             item = {"id": "fixture-guardian-item-" + uuid.uuid4().hex, "type": "function_call",
                     "call_id": call_id, "name": executor["name"], "arguments": json.dumps(args),
                     "status": "completed"}
+            reasoning_item = core.synthetic_reasoning_item(rid)
             # Persist consume-before-write. A dropped stream is inconclusive and
             # must never cause this potentially destructive response to be replayed.
             value.update(status="consumed", call_id=call_id,
                          read_call_id_sha256=[core.digest(x) for x in calls],
                          injected_arguments_sha256=core.digest(args["input"]),
-                         generation_id_sha256=core.digest(rid))
+                         generation_id_sha256=core.digest(rid),
+                         synthetic_reasoning_sha256=core.digest(SYNTHETIC_REASONING_TEXT),
+                         fixture_protocol_revision=2)
             core._atomic_write(self.home / STATE_NAME, json.dumps(value).encode())
             self.negative = value
             self.event("guardian_negative_primary_injected",
                        thread_sha256=core.digest(thread), call_id_sha256=core.digest(call_id),
                        note_read_call_id_sha256=value["read_call_id_sha256"],
                        executor_declaration_sha256=core.digest(json.dumps(executor, sort_keys=True)),
-                       synthetic_primary=True, actual_Guardian_result="unobserved")
+                       synthetic_primary=True, synthetic_reasoning=True,
+                       fixture_protocol_revision=2, actual_Guardian_result="unobserved")
             response = web.StreamResponse(headers={"Content-Type": "text/event-stream",
                                                     "X-Fixture-Mode": "synthetic-primary"})
             await response.prepare(request)
+            # A thinking-mode assistant tool group needs an accompanying reasoning
+            # item on replay. This static QA marker has no model provenance; never
+            # describe it as the real Guardian's or primary model's reasoning.
             events = [
                 {"type": "response.created", "response": {"id": rid, "status": "in_progress", "output": []}},
-                {"type": "response.output_item.added", "output_index": 0,
+                *core.synthetic_reasoning_prefix(rid),
+                {"type": "response.output_item.added", "output_index": 1,
                  "item": {**item, "arguments": "", "status": "in_progress"}},
                 {"type": "response.function_call_arguments.delta", "item_id": item["id"],
-                 "output_index": 0, "delta": item["arguments"]},
+                 "output_index": 1, "delta": item["arguments"]},
                 {"type": "response.function_call_arguments.done", "item_id": item["id"],
-                 "output_index": 0, "arguments": item["arguments"]},
-                {"type": "response.output_item.done", "output_index": 0, "item": item},
-                {"type": "response.completed", "response": {"id": rid, "status": "completed", "output": [item]}},
+                 "output_index": 1, "arguments": item["arguments"]},
+                {"type": "response.output_item.done", "output_index": 1, "item": item},
+                {"type": "response.completed", "response": {"id": rid, "status": "completed",
+                                                         "output": [reasoning_item, item]}},
             ]
             for event in events:
                 await response.write(core.encode_sse(event))

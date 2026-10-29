@@ -24,6 +24,27 @@ PROFILE = {
     "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16",
 }
 
+# Fixed Cargo targets keep CLI-only builds separate from the J sibling producer.
+NATIVE_TARGETS = {
+    "codex.exe": ("codex-cli", "codex"),
+    "codex-command-runner.exe": ("codex-windows-sandbox", "codex-command-runner"),
+    "codex-windows-sandbox-setup.exe": ("codex-windows-sandbox", "codex-windows-sandbox-setup"),
+    "codex-windows-managed-deny-probe.exe": ("codex-windows-sandbox", "codex-windows-managed-deny-probe"),
+}
+
+def build_commands(toolchain: Path, binaries: list[str]) -> list[list[str]]:
+    require(isinstance(binaries, list) and bool(binaries)
+            and all(isinstance(name, str) and name in NATIVE_TARGETS for name in binaries)
+            and len(binaries) == len(set(binaries)), "Unsupported or duplicate native binary targets")
+    packages = list(dict.fromkeys(NATIVE_TARGETS[name][0] for name in binaries))
+    command = [str(toolchain / "cargo.exe"), "build", "--locked", "--release"]
+    for package in packages:
+        command.extend(["-p", package])
+    for name in binaries:
+        command.extend(["--bin", NATIVE_TARGETS[name][1]])
+    return [command]
+
+
 def sha(path: Path) -> str:
     value = hashlib.sha256()
     with path.open("rb") as handle:
@@ -145,6 +166,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--work-dir", type=Path, required=True, help="New directory, or a matching owned build directory")
     parser.add_argument("--toolchain-bin", type=Path, required=True, help="Installed Rust 1.99.1 bin directory")
     parser.add_argument("--output", type=Path, help="Empty candidate output directory; defaults to WORK/candidate")
+    parser.add_argument("--build-lock", type=Path, default=REPO / "native/build-lock.json", help="Explicit pinned source/target lock; defaults to the current CLI candidate")
     parser.add_argument("--dry-run", action="store_true", help="Verify inputs/tool versions and print the plan without writing")
     args = parser.parse_args(argv)
     require(os.name == "nt", "this candidate targets Windows; use a Windows x64 MSVC Developer shell")
@@ -155,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
             "use a separate build directory outside the gateway checkout")
     require(output != source and source not in output.parents and output not in source.parents,
             "candidate output must not overlap the source directory")
-    lock_path = REPO / "native" / "build-lock.json"
+    lock_path = args.build_lock.resolve()
     lock = json.loads(lock_path.read_text(encoding="utf8"))
     require(lock["schema_version"] == 1 and lock["release_environment"] == PROFILE, "unsupported build lock/profile")
     require(sha(archive) == lock["archive_sha256"], "upstream archive checksum mismatch")
@@ -172,11 +194,8 @@ def main(argv: list[str] | None = None) -> int:
     git, linker = shutil.which("git.exe"), shutil.which("link.exe")
     require(git is not None and linker is not None and bool(os.environ.get("LIB")),
             "Git and the MSVC linker/LIB environment are required; open an x64 Developer shell")
-    # One feature-unified Cargo invocation; --bins would also build logs_client.
-    commands = [[str(toolchain / "cargo.exe"), "build", "--locked", "--release",
-                 "-p", "codex-cli", "-p", "codex-windows-sandbox",
-                 "--bin", "codex", "--bin", "codex-command-runner",
-                 "--bin", "codex-windows-sandbox-setup", "--bin", "codex-windows-managed-deny-probe"]]
+    # One invocation for exactly the locked targets; never --bins.
+    commands = build_commands(toolchain, lock["binaries"])
     plan = {"schema_version": 1, "mode": "dry-run" if args.dry_run else "build",
             "build_lock_sha256": sha(lock_path), "upstream_commit": lock["upstream_commit"],
             "native_version": lock["native_version"],

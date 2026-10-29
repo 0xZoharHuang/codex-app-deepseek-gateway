@@ -1,6 +1,6 @@
 # Reversible Codex App configuration
 
-The gateway configures the official App through its documented custom provider interface. It does not replace the App runtime, log in or out, edit `auth.json`, enable or disable runtime features, create threads, or install a global proxy. All paths are explicit parameters. Configure only the intended Windows user, after stopping that user's relevant App instance; other users and existing CDS instances remain independent.
+The gateway configures the official App through its documented custom provider interface. It does not log in or out, edit `auth.json`, create threads, or install a global proxy. This module merges the provider, model and explicitly documented transport/tool defaults below; it preserves existing permission and feature choices. All paths are explicit parameters. Configure only the intended Windows user, after stopping that user's relevant App instance; other users and existing CDS instances remain independent.
 
 ## API and generated settings
 
@@ -56,7 +56,7 @@ The `PreparedConfig` and `ConfigCheckpoint` include `changed_settings`, a list o
 
 The original configuration is retained byte-for-byte, including BOM and line endings. A checkpoint JSON contains paths, hashes, existence, timestamps and state, never configuration contents or token values. A crash before the final checkpoint status update remains recoverable if the actual config matches the recorded applied hash. Checkpoints are local recovery records; keep them private and do not publish them because their adjacent original config may contain unrelated secrets.
 
-`restore` verifies the backup hash and requires the current config hash to equal this checkpoint's applied hash. It restores exact original bytes, or removes the config if this operation created it. Later user edits cause an explicit refusal; they are never overwritten. Repeated restore is safe when the already-restored file still matches the original state. A repeated identical apply is content-idempotent and produces its own checkpoint; roll back nested checkpoints in reverse order.
+`restore` verifies the checkpoint snapshots and ownership before writing. For schema 2, it performs the conservative original/applied/current merge described below: unrelated later edits survive, while conflicting edits to managed values are refused. A byte-identical applied file restores the exact original bytes. A previously created file is removed only when no later setting or comment remains. Schema 1 retains its strict whole-file hash requirement. Repeated restore verifies the recorded result; roll back nested checkpoints in reverse order.
 
 Atomic replacement and optimistic hash checks protect incomplete writes and detected intervening edits. They cannot lock out an unrelated editor writing at exactly the same time: close the relevant App/settings editor before apply or rollback. Do not apply to another user's live config. Symlink/junction destinations, non-TOML configuration targets, missing/invalid catalogs and conflicting target authentication fail before configuration mutation.
 
@@ -71,7 +71,16 @@ Official interface: [custom model providers and command-backed auth](https://lea
 Schema 2 checkpoints save both the original bytes and a private, hash-verified
 applied snapshot. Restore compares original, applied and current TOML and changes
 only the exact owned leaf fields. Later project trust entries, desktop settings,
-other providers and unrelated comments survive. A user change to an owned value
+other providers and unrelated comments survive. Comments attached to a managed
+value also survive its removal or replacement. Normal table pruning retains
+the existing parent-table layout; any annotation otherwise lost, including through
+non-contiguous TOML table fragments, is kept as a standalone document-footer
+comment. This includes array-internal comments, duplicates and additional `#`
+characters. A `#` inside a TOML string remains string data. Original annotations
+inside a restored owned array are recovered without reviving a line-end comment
+that the user later changed or removed. A managed array whose value is unchanged
+is left intact during preparation. Preserved comments prevent removal of a newly
+created file. A user change to an owned value
 or its parent table causes a conflict before any write. Booleans and integers
 are not equivalent, and quoted literal keys cannot impersonate dotted paths.
 
@@ -99,7 +108,42 @@ manifest hash. This also permits verified manual restores followed by uninstall,
 including several checkpoints on the same config file and later user edits.
 Legacy records lacking this evidence retain strict checks instead of guessing.
 
+Valid earlier C/R proofs retain their original renderer's byte result, including
+quote style and normal table-header layout. An earlier result that actually lost
+a captured original array annotation is not reclassified as a lossless restore:
+strict replay rejects it without changing the current config or checkpoint.
+The original snapshots remain available for explicit recovery.
+
+
 The live default App config was restored through all three project checkpoints
 while App/native processes were absent. Desktop, Windows and project settings
-retained their exact parsed values. A separate fresh App home is now prepared for
-the namespace-patched runtime; no sandbox has been initialized there yet.
+retained their exact parsed values. This paragraph describes that historical
+rollback exercise; current App/native qualification is recorded separately in
+[the acceptance matrix](acceptance-matrix.md).
+
+
+On Windows, a short-lived reader can prevent the final atomic replacement even
+when configuration permissions are correct. User-configuration apply and restore
+retry only that replacement, at most eight attempts with less than one second
+of backoff. They reuse the same already-written and synced temporary file; they
+do not repeat the configuration operation, checkpoint creation, model call, or
+App launch. Before each attempt, the original target's identity, regular-file
+metadata, and content digest must still match. The caller also supplies its
+already-known digest, including explicit absence for a new file, so an edit
+between preparation and publication is rejected.
+
+A permanent permission denial still fails and keeps the original target and its
+ACL intact. An independent edit or same-content replacement with a new file
+identity aborts publication. These are optimistic checks, not an exclusive lock
+against an unrelated editor. Configuration, receipts, manifests, and metadata
+share this one bounded publisher. There is no outer retry around receipt
+publication or around an apply, restore, model, or App operation.
+
+
+The shared publisher is a standard-library-only module. Initial installation and
+external uninstall recovery can publish their records directly from the pinned
+gateway wheel before runtime dependencies exist. The TOML configuration layer
+passes its existing private-permission callback and preserves its public
+configuration-conflict errors. Release qualification must exercise a real
+production wheel under isolated Python with third-party imports blocked;
+synthetic runtime wheels that include parser code do not prove that boundary.

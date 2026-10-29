@@ -1,5 +1,6 @@
 """Explicit per-user gateway installation and lifecycle; never owns the App runtime."""
 from __future__ import annotations
+from .paths import _is_link_or_reparse
 
 import argparse
 from contextlib import ExitStack, contextmanager
@@ -58,15 +59,15 @@ def _json(path: Path) -> dict:
 
 
 def _write(path: Path, value: dict) -> None:
+    from .atomic_io import atomic_write, AtomicPublicationConflict
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(prefix=".lifecycle-", dir=path.parent)
+    raw = (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    # Install/finalize bootstrap has only stdlib and the pinned gateway wheel.
+    # No permission callback retains this producer's original inherited ACL.
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
-            json.dump(value, stream, ensure_ascii=False, indent=2)
-            stream.write("\n"); stream.flush(); os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
+        atomic_write(path, raw)
+    except AtomicPublicationConflict as exc:
+        raise LifecycleError(str(exc)) from exc
 
 
 def _home(path: Path) -> Path:
@@ -159,7 +160,7 @@ def _inventory(directory: Path, *, owned_files: dict | None = None) -> dict[str,
     directory = _fs_path(directory)
     result = {}
     for file in directory.rglob("*"):
-        if file.is_symlink() or (hasattr(file, "is_junction") and file.is_junction()):
+        if _is_link_or_reparse(file):
             raise LifecycleError("Managed installation must not contain links or junctions")
         source = file.parent.parent / (file.name.split(".cpython-", 1)[0] + ".py")
         source_owned = source.is_file() or (owned_files is not None and source.is_relative_to(directory)
@@ -345,7 +346,7 @@ def _runtime_regular_file(path: Path) -> Path:
     import stat
     selected = _fs_path(Path(path).absolute())
     for part in (selected, *selected.parents):
-        if part.is_symlink() or (hasattr(part, "is_junction") and part.is_junction()):
+        if _is_link_or_reparse(part):
             raise LifecycleError("Runtime provenance must not traverse a link or junction")
     metadata = selected.stat()
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
@@ -1074,28 +1075,37 @@ def rollback(install_root: Path) -> dict:
             "persistent_data_deleted": False, "credentials_deleted": False}
 
 
-def prepare_uninstall(install_root: Path, *, remove_task=True, process_factory=None) -> dict:
+def prepare_uninstall(install_root: Path, *, remove_task=True, process_factory=None, retry_native_cleanup=False) -> dict:
     """Run under the production venv, then exit before external file deletion."""
     root = _home(install_root)
-    directory, receipt, _ = _active(root)
-    _verify_installation(directory, receipt)
-    # Restore first. Any conflict leaves service and binaries available. The
-    # app_config version owns semantic merging; no whole-file shortcut is used here.
-    if (root / "checkpoints.json").exists():
-        rollback(root)
-    stopped = stop(root, process_factory=process_factory, remove_task=remove_task)
-    data = _home(Path(receipt["data_home"]))
-    if (data / "service.json").exists():
-        raise LifecycleError("Service identity remains unresolved; uninstall is not prepared")
-    proof = {"schema_version": 1, "project": PROJECT, "stage": "prepared", "release_id": directory.name,
-             "receipt_sha256": digest(directory / "installation.json"),
-             "active_sha256": digest(root / "active.json"), "data_home": str(data),
-             "bootstrap_wheel": receipt["bootstrap_wheel"], "bootstrap_sha256": receipt["bootstrap_sha256"],
-             "service_result": stopped["status"], "installation": receipt, "nonce": os.urandom(16).hex()}
-    path = root / "uninstall-ready.json"
-    _write(path, proof)
-    return {"status": "ready_for_external_cleanup", "receipt": str(path), "receipt_sha256": digest(path),
-            "bootstrap_python": receipt["bootstrap_python"]}
+    with _operation_lease(root):
+        directory, receipt, _ = _active(root)
+        _verify_installation(directory, receipt)
+        # Native admission precedes every config/service mutation. Existing native
+        # code owns all namespace cleanup; an active App/workload or wrong token
+        # cannot be disguised by first stopping the gateway or undoing its config.
+        from .native_cleanup import admission, NativeCleanupError
+        try:
+            with admission(root, directory, receipt, retry_unconfirmed=retry_native_cleanup) as native:
+                if (root / "checkpoints.json").exists():
+                    rollback(root)
+                native_result = native.execute(retry_unconfirmed=retry_native_cleanup)
+                stopped = _stop_locked(root, process_factory=process_factory, remove_task=remove_task)
+                data = _home(Path(receipt["data_home"]))
+                if (data / "service.json").exists():
+                    raise LifecycleError("Service identity remains unresolved; uninstall is not prepared")
+                proof = {"schema_version": 1, "project": PROJECT, "stage": "prepared", "release_id": directory.name,
+                         "receipt_sha256": digest(directory / "installation.json"),
+                         "active_sha256": digest(root / "active.json"), "data_home": str(data),
+                         "bootstrap_wheel": receipt["bootstrap_wheel"], "bootstrap_sha256": receipt["bootstrap_sha256"],
+                         "service_result": stopped["status"], "native_cleanup": native_result,
+                         "installation": receipt, "nonce": os.urandom(16).hex()}
+                path = root / "uninstall-ready.json"
+                _write(path, proof)
+                return {"status": "ready_for_external_cleanup", "receipt": str(path), "receipt_sha256": digest(path),
+                        "bootstrap_python": receipt["bootstrap_python"], "native_cleanup": native_result}
+        except NativeCleanupError as error:
+            raise LifecycleError(str(error)) from error
 
 
 def finalize_uninstall(install_root: Path, proof_sha256: str) -> dict:
@@ -1109,6 +1119,20 @@ def finalize_uninstall(install_root: Path, proof_sha256: str) -> dict:
         raise LifecycleError("Uninstall is not prepared for this project")
     if not re.fullmatch(r"[0-9a-f]{20}", str(proof.get("release_id", ""))) or not re.fullmatch(r"[0-9a-f]{32}", str(proof.get("nonce", ""))):
         raise LifecycleError("Uninstall identity is invalid")
+    cleanup = proof.get("native_cleanup")
+    if cleanup is not None:
+        if (not isinstance(cleanup, dict)
+                or cleanup.get("status") not in {"native_cleanup_completed", "not_app_bound", "app_home_not_provisioned"}
+                or cleanup.get("native_command_performed") is not (cleanup.get("status") == "native_cleanup_completed")):
+            raise LifecycleError("Native uninstall cleanup is not verified")
+        if cleanup["status"] == "native_cleanup_completed":
+            cleanup_path = root / "native-uninstall.json"
+            if (cleanup.get("receipt") != str(cleanup_path)
+                    or digest(cleanup_path) != cleanup.get("receipt_sha256")
+                    or _json(cleanup_path).get("status") != "native_cleanup_completed"):
+                raise LifecycleError("Native cleanup receipt changed before release retirement")
+    elif (Path(proof["data_home"]) / "app-binding.json").exists():
+        raise LifecycleError("Bound App uninstall needs native cleanup admission before release retirement")
     directory = root / "releases" / proof["release_id"]
     retired = _within(root / "retired" / proof["nonce"] / proof["release_id"], root / "retired")
     if proof["stage"] == "removed":
@@ -1170,6 +1194,8 @@ def main(argv=None):
         if name == "start":
             command.add_argument("--port", type=int, default=42817); command.add_argument("--at-logon", action="store_true")
         if name == "register-checkpoint": command.add_argument("checkpoint", type=Path)
+        if name == "prepare-uninstall": command.add_argument("--retry-native-cleanup", action="store_true",
+                                                               help="Explicitly retry a recorded unconfirmed native cleanup after inspecting and draining it")
         if name == "finalize-uninstall": command.add_argument("--receipt-sha256", required=True)
     args = parser.parse_args(argv)
     try:
@@ -1177,7 +1203,7 @@ def main(argv=None):
         elif args.command == "activate": result = activate(args.install_root, args.release_id)
         elif args.command == "register-checkpoint": result = register_checkpoint(args.install_root, args.checkpoint)
         elif args.command == "start": result = start(args.install_root, args.port, at_logon=args.at_logon)
-        elif args.command == "prepare-uninstall": result = prepare_uninstall(args.install_root)
+        elif args.command == "prepare-uninstall": result = prepare_uninstall(args.install_root, retry_native_cleanup=args.retry_native_cleanup)
         elif args.command == "finalize-uninstall": result = finalize_uninstall(args.install_root, args.receipt_sha256)
         else: result = globals()[args.command](args.install_root)
         print(json.dumps(result)); return 0

@@ -56,19 +56,22 @@ loaded executable separately.
 
 Merge the following single entry into the copied workspace's project
 `.codex/config.toml` after substituting the actual owned workspace path.
-The interpreter must already have the fixed SDK available; verify its identity
-and access under the same Limited token used for App acceptance.
+Replace both placeholder paths below. The interpreter must be an explicitly
+selected, independently verified Python environment containing the fixed MCP
+SDK; do not resolve it through the development checkout's old .venv. Verify its
+identity and access under the same Limited token used for App acceptance.
 
 ```toml
 [mcp_servers.cdag_acceptance_inventory]
-command = 'D:\Projects\codex-app-deepseek-gateway\.venv\Scripts\python.exe'
+command = 'C:\PATH-TO-VERIFIED-MCP-ENV\Scripts\python.exe'
 args = ['-I', '-X', 'utf8', 'D:\PATH-TO-OWNED-ACCEPTANCE-WORKSPACE\mcp_server.py']
 ```
 
 The snippet contains no approval overrides, provider changes, credentials, or
 global configuration. Keep existing sandbox/approval policy. Trust the project
-through the ordinary App workflow when required. For a copied independent Python
-environment, substitute its verified executable rather than the development one.
+through the ordinary App workflow when required. Keep this fixture interpreter
+and workspace independent of running App/CDS installations; no global alias or
+existing environment needs to be changed.
 
 The skill is project-local. The plugin marketplace merely makes the plugin
 available; install it through the App's native local marketplace workflow. Do not

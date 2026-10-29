@@ -27,7 +27,7 @@ def build_fixture_wheel(path):
         name + "/WHEEL": "Wheel-Version: 1.0\nGenerator: lifecycle-fixture\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
         name + "/entry_points.txt": "[console_scripts]\ncodex-app-deepseek = codex_app_deepseek.cli:main\n",
     }
-    for module in ("lifecycle.py", "cli.py", "credentials.py", "app_config.py", "gateway_policy.py", "catalog.py"):
+    for module in ("lifecycle.py", "cli.py", "credentials.py", "app_config.py", "gateway_policy.py", "catalog.py", "paths.py", "atomic_io.py", "native_cleanup.py"):
         files["codex_app_deepseek/" + module] = (Path(lc.__file__).parent / module).read_text(encoding="utf-8")
     # Carry the real ACL helper and its parser dependency in this synthetic wheel.
     # A stub here would hide failures in the native Windows uninstall path.
@@ -192,7 +192,7 @@ def test_stop_refuses_wrong_identity_without_terminating_any_process(bundle,mism
     process,factory=process_fixture(bundle)
     if mismatch=="created": process.created+=100
     if mismatch=="executable": process.image=str(bundle.root / "another.exe")
-    if mismatch=="user": process.owner="DESKTOP\\RecorderPilot"
+    if mismatch=="user": process.owner="EXAMPLE\\unrelated-fixture-user"
     if mismatch=="command": process.arguments=[process.image,"unrelated"]
     if mismatch=="home": process.arguments[6]=str(bundle.root / "other-home")
     with pytest.raises(lc.LifecycleError): lc.stop(bundle.install,process_factory=factory,remove_task=False)
@@ -348,7 +348,8 @@ def test_native_independent_python_installs_real_offline_fixture_wheel(bundle):
 @pytest.mark.skipif(sys.platform!="win32",reason="Native Windows PowerShell installer fixture")
 def test_native_powershell_install_activate_and_external_uninstall(bundle):
     independent=Path(getattr(sys,"_base_executable",sys.executable))
-    script=Path(lc.__file__).parents[2] / "scripts/install_gateway.ps1"
+    # The external installer is a repository/release artifact, not a wheel file.
+    script=Path(__file__).resolve().parents[1] / "scripts/install_gateway.ps1"
     powershell=Path(os.environ.get("SystemRoot","C:/Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
     common=[str(powershell),"-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",str(script)]
     install=subprocess.run([*common,"-Action","Install","-ManifestPath",str(bundle.manifest),"-ManifestSha256",lc.digest(bundle.manifest),
@@ -568,12 +569,12 @@ def test_prepared_restore_resumes_exact_captured_transition(bundle, monkeypatch,
     config, original, record = checkpoint(bundle)
     original_atomic, original_manifest = ac._atomic_write, ac._write_manifest
     config_writes = []
-    def atomic(path, raw):
+    def atomic(path, raw, **kwargs):
         if path == config:
             config_writes.append(raw)
             if failure_point == 'before_config_write':
                 raise OSError('fixture crash before config write')
-        return original_atomic(path, raw)
+        return original_atomic(path, raw, **kwargs)
     def manifest(path, data):
         if data['state'] == 'restored' and failure_point == 'after_config_write':
             raise OSError('fixture crash after config write')
@@ -589,9 +590,9 @@ def test_prepared_restore_resumes_exact_captured_transition(bundle, monkeypatch,
     assert config.read_bytes() == (original if failure_point == 'after_config_write' else
                                   (record.manifest_path.parent/'restore-input.toml').read_bytes())
     successful_writes = []
-    def successful_atomic(path, raw):
+    def successful_atomic(path, raw, **kwargs):
         if path == config: successful_writes.append(raw)
-        return original_atomic(path, raw)
+        return original_atomic(path, raw, **kwargs)
     monkeypatch.setattr(ac, '_atomic_write', successful_atomic)
     monkeypatch.setattr(ac, '_write_manifest', original_manifest)
     result = lc.rollback(bundle.install)
@@ -622,9 +623,9 @@ def test_prepared_restore_with_new_user_edit_is_not_recomputed_or_overwritten(bu
     from codex_app_deepseek import app_config as ac
     config, _, record = checkpoint(bundle)
     original_atomic = ac._atomic_write
-    def failing(path, raw):
+    def failing(path, raw, **kwargs):
         if path == config: raise OSError('fixture failure')
-        return original_atomic(path, raw)
+        return original_atomic(path, raw, **kwargs)
     monkeypatch.setattr(ac, '_atomic_write', failing)
     with pytest.raises(ac.ConfigurationError): ac.restore(record.manifest_path)
     monkeypatch.setattr(ac, '_atomic_write', original_atomic)
@@ -861,9 +862,11 @@ def test_activation_does_not_overwrite_existing_incomplete_policy_or_change_acti
     from codex_app_deepseek import gateway_policy as gp
     result, _ = installed(bundle)
     bundle.data.mkdir()
-    path = bundle.data / "gateway.json"; path.write_bytes(b'{"allowed_providers":["deepseek"]}\n')
+    path = bundle.data / "gateway.json"
+    path.write_text(json.dumps({"accepted_models": list(gp.REQUEST_MODEL_IDS),
+                                "allowed_providers": ["deepseek"]}) + "\n", encoding="utf-8")
     before = path.read_bytes()
-    with pytest.raises(lc.LifecycleError, match="main/Guardian"):
+    with pytest.raises(lc.LifecycleError, match="required native schema/serial/default routes"):
         lc.activate(bundle.install, result["release_id"])
     assert path.read_bytes() == before and not (bundle.install / "active.json").exists()
 

@@ -1,0 +1,85 @@
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+@@ -948,7 +948,30 @@
+     sandbox_group_psid: *mut c_void,
+     log: &mut dyn Write,
+ ) -> Result<()> {
++    // Match the upstream read-ACL fast path: WRITE_RESTRICTED tokens use
++    // ordinary standard-user rights for reads. Already-readable roots must not
++    // require WRITE_DAC or receive an unnecessary namespace ACL grant.
++    let mut users = resolve_sid("Users")?;
++    let mut authenticated_users = resolve_sid("Authenticated Users")?;
++    let mut everyone = resolve_sid("Everyone")?;
++    let builtin_psids = [
++        users.as_mut_ptr().cast(),
++        authenticated_users.as_mut_ptr().cast(),
++        everyone.as_mut_ptr().cast(),
++    ];
++    let read_mask = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
+     for root in critical_roots {
++        let builtin_has = path_mask_allows(root, &builtin_psids, read_mask, true)
++            .with_context(|| format!("check builtin critical read ACL on {}", root.display()))?;
++        let group_has = path_mask_allows(root, &[sandbox_group_psid], read_mask, true)
++            .with_context(|| format!("check sandbox critical read ACL on {}", root.display()))?;
++        if builtin_has || group_has {
++            log_line(
++                log,
++                &format!("critical read ACL already ready: {}", root.display()),
++            )?;
++            continue;
++        }
+         let inheritance = if root.is_dir() {
+             OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+         } else {
+@@ -1778,4 +1801,50 @@
+         );
+         assert!(!read);
+     }
+-}
++    #[test]
++    fn critical_read_builtin_rx_preserves_acl_without_namespace_grant() {
++        let temp = tempfile::tempdir().unwrap();
++        let leaf = temp.path().join("already-public.txt");
++        let sibling = temp.path().join("private-sibling.txt");
++        fs::write(&leaf, "synthetic readable input").unwrap();
++        fs::write(&sibling, "synthetic private sibling").unwrap();
++        let everyone = LocalSid::from_string("S-1-1-0").unwrap();
++        let namespace =
++            LocalSid::from_string("S-1-5-21-915763429-1123581321-271828182-4249").unwrap();
++        unsafe {
++            crate::acl::grant_read_execute_aces(&leaf, &[everyone.as_ptr()], 0).unwrap();
++        }
++        let before = acl_entries(&leaf);
++        let sibling_before = acl_entries(&sibling);
++        assert!(!path_mask_allows(&leaf, &[namespace.as_ptr()], FILE_GENERIC_READ, false).unwrap());
++        let mut value = payload_json();
++        value["read_roots"] = json!([leaf]);
++        value["critical_read_roots"] = json!([leaf]);
++        let payload: Payload = serde_json::from_value(value).unwrap();
++        super::grant_critical_read_acls(&payload, &[], namespace.as_ptr(), &mut Vec::new())
++            .expect("already-readable root is a no-op");
++        assert_eq!(acl_entries(&leaf), before);
++        assert_eq!(acl_entries(&sibling), sibling_before);
++        assert!(!path_mask_allows(&leaf, &[namespace.as_ptr()], FILE_GENERIC_READ, false).unwrap());
++    }
++
++    #[test]
++    fn critical_read_existing_namespace_rx_preserves_acl() {
++        let temp = tempfile::tempdir().unwrap();
++        let leaf = temp.path().join("namespace-readable.txt");
++        fs::write(&leaf, "synthetic namespace input").unwrap();
++        let namespace =
++            LocalSid::from_string("S-1-5-21-915763429-1123581321-271828182-4250").unwrap();
++        unsafe {
++            crate::acl::grant_read_execute_aces(&leaf, &[namespace.as_ptr()], 0).unwrap();
++        }
++        let before = acl_entries(&leaf);
++        let mut value = payload_json();
++        value["read_roots"] = json!([leaf]);
++        value["critical_read_roots"] = json!([leaf]);
++        let payload: Payload = serde_json::from_value(value).unwrap();
++        super::grant_critical_read_acls(&payload, &[], namespace.as_ptr(), &mut Vec::new())
++            .expect("existing namespace read is a no-op");
++        assert_eq!(acl_entries(&leaf), before);
++    }
++}

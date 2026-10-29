@@ -66,7 +66,8 @@ class CatalogTests(unittest.TestCase):
     def test_public_catalog_is_only_the_actual_model(self):
         result = build_catalog(bundled(), native_version=NATIVE_VERSION)["models"]
         self.assertEqual([model["slug"] for model in result if model["visibility"] == "list"], [PINNED_MODEL])
-        self.assertEqual([model["slug"] for model in result if model["visibility"] == "hide"], ["gpt-5.6-luna"])
+        self.assertEqual([model["slug"] for model in result if model["visibility"] == "hide"],
+                         ["gpt-5.6-luna", "gpt-6-luna", "gpt-6.1-sol"])
         self.assertEqual(result[0]["visibility"], "list")
         self.assertEqual(result[0]["service_tiers"], [])
         self.assertNotIn("comp_hash", result[0])
@@ -127,3 +128,43 @@ class CatalogTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_missing_or_false_native_search_support_fails_closed():
+    for value in (None, False, 1):
+        source = bundled()
+        if value is None:
+            source['models'][0].pop('supports_search_tool')
+        else:
+            source['models'][0]['supports_search_tool'] = value
+        with unittest.TestCase().assertRaises(CatalogCompatibilityError):
+            build_catalog(source, native_version=NATIVE_VERSION)
+
+class NativeAgentVersionSelectionTests(unittest.TestCase):
+    def test_v2_remains_exact_default(self):
+        source = bundled()
+        self.assertEqual(build_catalog(source, native_version=NATIVE_VERSION),
+                         build_catalog(source, native_version=NATIVE_VERSION, multi_agent_version="v2"))
+
+    def test_v1_changes_only_visible_main_selector_and_is_deep_copied(self):
+        source = bundled()
+        original = deepcopy(source)
+        default = build_catalog(source, native_version=NATIVE_VERSION)
+        selected = build_catalog(source, native_version=NATIVE_VERSION, multi_agent_version="v1")
+        expected = deepcopy(default)
+        expected["models"][0]["multi_agent_version"] = "v1"
+        self.assertEqual(selected, expected)
+        self.assertEqual(source, original)
+        self.assertEqual(selected["models"][0]["slug"], PINNED_MODEL)
+        self.assertEqual(selected["models"][1:], default["models"][1:])
+        selected["models"][0]["model_messages"]["guardian_v2"]["policy"] = "changed"
+        self.assertEqual(source, original)
+        self.assertEqual(default["models"][0]["model_messages"]["guardian_v2"]["policy"], "native guardian")
+
+    def test_invalid_native_agent_versions_are_rejected_without_input_mutation(self):
+        for version in (None, True, False, 1, [], {}, "", "V1", "v3", "v1 "):
+            source = bundled()
+            original = deepcopy(source)
+            with self.assertRaises(CatalogCompatibilityError, msg=repr(version)):
+                build_catalog(source, native_version=NATIVE_VERSION, multi_agent_version=version)
+            self.assertEqual(source, original, msg=repr(version))

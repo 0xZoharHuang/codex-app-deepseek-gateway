@@ -348,3 +348,17 @@ def test_catalog_alias_mismatch_is_not_silently_renamed(fixture):
         delivery.configure(f.installation.root, f.catalog, app.sha(f.catalog), backend=f.backend)
     assert path.read_bytes() == before and not (f.installation.data / "app-catalogs").exists()
     assert not f.backend.spawned
+
+
+def test_configure_refuses_foreign_home_before_policy_catalog_or_config_writes(fixture):
+    f = fixture
+    bind(f)
+    f.backend.home_owner_mismatch = True
+    before = (f.paths["home"] / "config.toml").read_bytes()
+    with pytest.raises(app.LaunchError, match="home owner differs"):
+        delivery.configure(f.installation.root, f.catalog, app.sha(f.catalog), backend=f.backend)
+    assert not (f.installation.data / "app-catalogs").exists()
+    assert not (f.installation.data / "gateway.json").exists()
+    assert not (f.installation.data / "config-backups").exists()
+    assert (f.paths["home"] / "config.toml").read_bytes() == before
+    assert not f.backend.spawned

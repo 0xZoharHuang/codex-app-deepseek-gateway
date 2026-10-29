@@ -1,0 +1,285 @@
+--- a/codex-rs/windows-sandbox-rs/src/acl.rs
++++ b/codex-rs/windows-sandbox-rs/src/acl.rs
+@@ -443,6 +443,18 @@
+     false
+ }
+ 
++/// Check an effective deny for one known subject and an explicit access mask.
++///
++/// # Safety
++/// The ACL and SID pointers must remain valid for the duration of this call.
++pub(crate) unsafe fn dacl_denies_mask_for_sid(
++    p_dacl: *mut ACL,
++    psid: *mut c_void,
++    desired_mask: u32,
++) -> bool {
++    dacl_has_deny_mask(p_dacl, DenyAceScope::EffectiveForSid(psid), desired_mask)
++}
++
+ pub unsafe fn dacl_has_read_deny_for_sid(p_dacl: *mut ACL, psid: *mut c_void) -> bool {
+     dacl_has_deny_mask(
+         p_dacl,
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+@@ -943,9 +943,40 @@
+     Ok(critical_roots)
+ }
+ 
++// Full provisioning serves the dedicated offline/online accounts. These are
++// normal read principals, not the setup administrator or arbitrary capability SIDs.
++fn critical_read_acl_state(
++    root: &Path,
++    builtin_psids: &[*mut c_void],
++    sandbox_group_psid: *mut c_void,
++    target_user_psids: &[*mut c_void],
++    read_mask: u32,
++) -> Result<(bool, bool)> {
++    let (denied, builtin_has, group_has) = unsafe {
++        let (dacl, descriptor) = crate::acl::fetch_dacl_handle(root)?;
++        let denied = builtin_psids
++            .iter()
++            .chain(std::iter::once(&sandbox_group_psid))
++            .chain(target_user_psids.iter())
++            .any(|sid| crate::acl::dacl_denies_mask_for_sid(dacl, *sid, read_mask));
++        let builtin_has = crate::acl::dacl_mask_allows(dacl, builtin_psids, read_mask, true);
++        let group_has =
++            crate::acl::dacl_mask_allows(dacl, &[sandbox_group_psid], read_mask, true);
++        LocalFree(descriptor as HLOCAL);
++        (denied, builtin_has, group_has)
++    };
++    anyhow::ensure!(
++        !denied,
++        "critical read root explicitly denies a target read principal: {}",
++        root.display()
++    );
++    Ok((builtin_has, group_has))
++}
++
+ fn apply_critical_read_acls(
+     critical_roots: &[PathBuf],
+     sandbox_group_psid: *mut c_void,
++    target_user_psids: &[*mut c_void],
+     log: &mut dyn Write,
+ ) -> Result<()> {
+     // Match the upstream read-ACL fast path: WRITE_RESTRICTED tokens use
+@@ -961,10 +992,10 @@
+     ];
+     let read_mask = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
+     for root in critical_roots {
+-        let builtin_has = path_mask_allows(root, &builtin_psids, read_mask, true)
+-            .with_context(|| format!("check builtin critical read ACL on {}", root.display()))?;
+-        let group_has = path_mask_allows(root, &[sandbox_group_psid], read_mask, true)
+-            .with_context(|| format!("check sandbox critical read ACL on {}", root.display()))?;
++        let (builtin_has, group_has) = critical_read_acl_state(
++            root, &builtin_psids, sandbox_group_psid, target_user_psids, read_mask,
++        )
++        .with_context(|| format!("check critical read ACL on {}", root.display()))?;
+         if builtin_has || group_has {
+             log_line(
+                 log,
+@@ -979,13 +1010,11 @@
+         };
+         unsafe { crate::acl::grant_read_execute_aces(root, &[sandbox_group_psid], inheritance) }
+             .with_context(|| format!("apply critical read ACL to {}", root.display()))?;
++        let (_, group_has) = critical_read_acl_state(
++            root, &builtin_psids, sandbox_group_psid, target_user_psids, read_mask,
++        )?;
+         anyhow::ensure!(
+-            path_mask_allows(
+-                root,
+-                &[sandbox_group_psid],
+-                FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+-                true,
+-            )?,
++            group_has,
+             "critical read root remains denied: {}",
+             root.display()
+         );
+@@ -1002,7 +1031,7 @@
+     log: &mut dyn Write,
+ ) -> Result<Vec<PathBuf>> {
+     let roots = collect_critical_read_roots(payload, artifact_roots)?;
+-    apply_critical_read_acls(&roots, sandbox_group_psid, log)?;
++    apply_critical_read_acls(&roots, sandbox_group_psid, &[], log)?;
+     Ok(roots)
+ }
+ 
+@@ -1083,7 +1112,17 @@
+         &sandbox_group_sid,
+         &metadata_roots,
+     )?;
+-    apply_critical_read_acls(&critical_roots, sandbox_group_psid, log)?;
++    // These validated payload names identify the dedicated accounts, not the
++    // setup administrator or a capability that is present only as a restricting SID.
++    let mut offline_sid = resolve_sid(&payload.offline_username)
++        .context("resolve critical-read offline account SID")?;
++    let mut online_sid = resolve_sid(&payload.online_username)
++        .context("resolve critical-read online account SID")?;
++    let target_user_psids = [
++        offline_sid.as_mut_ptr().cast(),
++        online_sid.as_mut_ptr().cast(),
++    ];
++    apply_critical_read_acls(&critical_roots, sandbox_group_psid, &target_user_psids, log)?;
+ 
+     if let Some(user_profile) = payload.user_profile.as_deref()
+         && user_profile.is_absolute()
+@@ -1737,6 +1776,36 @@
+         assert!(ensure_codex_home_metadata(home.path(), sid.as_ptr()).is_err());
+         assert_eq!(acl_entries(home.path()), before);
+     }
++    // Establish fixture preconditions independently of the machine's TEMP ACL.
++    // This changes only paths created by this test, never accounts or caller policy.
++    fn set_critical_test_dacl(path: &Path, entries: &str) {
++        use windows_sys::Win32::Security::Authorization::{
++            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
++        };
++        use windows_sys::Win32::Security::{
++            DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW,
++        };
++        let user = crate::runtime_ownership::current_setup_user().unwrap();
++        let owner = string_from_sid_bytes(&resolve_sid(&user).unwrap()).unwrap();
++        let sddl = to_wide(format!("D:P{entries}(A;;FA;;;{owner})(A;;FA;;;SY)"));
++        unsafe {
++            let mut descriptor = std::ptr::null_mut();
++            assert_ne!(
++                ConvertStringSecurityDescriptorToSecurityDescriptorW(
++                    sddl.as_ptr(), SDDL_REVISION_1, &mut descriptor, std::ptr::null_mut(),
++                ),
++                0
++            );
++            let result = SetFileSecurityW(
++                to_wide(path).as_ptr(),
++                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
++                descriptor,
++            );
++            LocalFree(descriptor as HLOCAL);
++            assert_ne!(result, 0, "set protected fixture DACL");
++        }
++    }
++
+     #[test]
+     fn critical_read_leaf_gets_rx_without_write_or_sibling_access() {
+         let temp = tempfile::tempdir().expect("tempdir");
+@@ -1744,8 +1813,17 @@
+         let sibling = temp.path().join("private-sibling.txt");
+         fs::write(&leaf, "allowed").unwrap();
+         fs::write(&sibling, "private").unwrap();
++        for path in [temp.path(), leaf.as_path(), sibling.as_path()] {
++            set_critical_test_dacl(path, "");
++        }
+         let sid = crate::workspace_write_cap_sid_for_root(temp.path(), temp.path(), &leaf).unwrap();
+         let psid = unsafe { convert_string_sid_to_sid(&sid).unwrap() };
++        let builtin = ["S-1-5-32-545", "S-1-5-11", "S-1-1-0"]
++            .map(|sid| LocalSid::from_string(sid).unwrap());
++        let builtin_psids = builtin.each_ref().map(LocalSid::as_ptr);
++        let rx = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
++        assert!(!path_mask_allows(&leaf, &builtin_psids, rx, true).unwrap());
++        assert!(!path_mask_allows(&leaf, &[psid], rx, true).unwrap());
+         let mut value = payload_json();
+         value["read_roots"] = json!([leaf]);
+         value["critical_read_roots"] = json!([leaf]);
+@@ -1847,4 +1925,103 @@
+             .expect("existing namespace read is a no-op");
+         assert_eq!(acl_entries(&leaf), before);
+     }
+-}
++
++    // Test-only ACL capture uses READ_CONTROL without a synchronous file open.
++    // A generic-read DENY may make the production open fail closed before inspection.
++    fn critical_test_acl_entries(path: &Path) -> Vec<Vec<u8>> {
++        use windows_sys::Win32::Security::Authorization::GetNamedSecurityInfoW;
++        use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
++        unsafe {
++            let mut acl = std::ptr::null_mut();
++            let mut descriptor = std::ptr::null_mut();
++            let code = GetNamedSecurityInfoW(
++                to_wide(path).as_ptr(),
++                1, // SE_FILE_OBJECT
++                DACL_SECURITY_INFORMATION,
++                std::ptr::null_mut(),
++                std::ptr::null_mut(),
++                &mut acl,
++                std::ptr::null_mut(),
++                &mut descriptor,
++            );
++            assert_eq!(code, 0, "capture protected fixture DACL with READ_CONTROL");
++            assert!(!acl.is_null());
++            let entries = (0..(*acl).AceCount as u32)
++                .map(|index| {
++                    let mut entry = std::ptr::null_mut();
++                    assert_ne!(GetAce(acl, index, &mut entry), 0);
++                    let size = (*(entry as *const ACE_HEADER)).AceSize as usize;
++                    std::slice::from_raw_parts(entry.cast::<u8>(), size).to_vec()
++                })
++                .collect();
++            LocalFree(descriptor as HLOCAL);
++            entries
++        }
++    }
++
++    #[test]
++    fn critical_read_rejects_applicable_deny_without_changing_acl() {
++        let namespace_text = "S-1-5-21-915763429-1123581321-271828182-4251";
++        let offline_text = "S-1-5-21-915763429-1123581321-271828182-4252";
++        let online_text = "S-1-5-21-915763429-1123581321-271828182-4253";
++        let namespace = LocalSid::from_string(namespace_text).unwrap();
++        let offline = LocalSid::from_string(offline_text).unwrap();
++        let online = LocalSid::from_string(online_text).unwrap();
++        for subject in ["BU", "AU", "WD", namespace_text, offline_text, online_text] {
++            for denied in ["0x1", "0x20", "GR"] {
++                let temp = tempfile::tempdir().unwrap();
++                let leaf = temp.path().join("denied-readable.txt");
++                fs::write(&leaf, "synthetic").unwrap();
++                set_critical_test_dacl(
++                    &leaf,
++                    &format!("(D;;{denied};;;{subject})(A;;GRGX;;;WD)"),
++                );
++                let before = critical_test_acl_entries(&leaf);
++                let error = super::apply_critical_read_acls(
++                    &[leaf.clone()],
++                    namespace.as_ptr(),
++                    &[offline.as_ptr(), online.as_ptr()],
++                    &mut Vec::new(),
++                )
++                .expect_err("applicable read/execute deny must prevent readiness");
++                if denied == "GR" && matches!(subject, "BU" | "AU" | "WD") {
++                    assert!(error.chain().any(|cause| cause
++                        .downcast_ref::<std::io::Error>()
++                        .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)));
++                    eprintln!("critical deny {subject} {denied}: native access denied");
++                } else {
++                    assert!(error.chain().any(|cause| cause
++                        .to_string()
++                        .contains("explicitly denies a target read principal")));
++                    eprintln!("critical deny {subject} {denied}: explicit principal precheck");
++                }
++                assert_eq!(critical_test_acl_entries(&leaf), before, "never remove or override an existing deny");
++            }
++        }
++    }
++
++    #[test]
++    fn critical_read_unrelated_write_and_inherit_only_denies_do_not_block_rx() {
++        let namespace_text = "S-1-5-21-915763429-1123581321-271828182-4254";
++        let unrelated = "S-1-5-21-915763429-1123581321-271828182-4255";
++        let namespace = LocalSid::from_string(namespace_text).unwrap();
++        for deny in [
++            format!("(D;;GRGX;;;{unrelated})"),
++            "(D;;GRGX;;;S-1-15-3-1024-1-2-3-4-5-6-7-8)".to_string(),
++            "(D;;0x2;;;WD)".to_string(),
++            "(D;OIIO;GRGX;;;WD)".to_string(),
++        ] {
++            let temp = tempfile::tempdir().unwrap();
++            let leaf = temp.path().join("readable.txt");
++            fs::write(&leaf, "synthetic").unwrap();
++            set_critical_test_dacl(&leaf, &format!("{deny}(A;;GRGX;;;WD)"));
++            let before = critical_test_acl_entries(&leaf);
++            super::apply_critical_read_acls(
++                &[leaf.clone()], namespace.as_ptr(), &[], &mut Vec::new(),
++            )
++            .expect("unrelated, write-data-only and inherit-only denies do not deny this RX");
++            assert_eq!(critical_test_acl_entries(&leaf), before);
++            assert!(!path_mask_allows(&leaf, &[namespace.as_ptr()], FILE_GENERIC_READ, false).unwrap());
++        }
++    }
++}

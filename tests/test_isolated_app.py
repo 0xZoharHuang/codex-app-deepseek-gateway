@@ -42,6 +42,13 @@ def fixture(tmp_path, monkeypatch):
         def git_path_contains(self, identity, directory):
             return app.path_contains_directory(self.spawned[-1][2], directory)
         def live(self, identity): return identity["pid"] != 102
+        def home_guard(self, path, sid, *, create=False):
+            if getattr(self, "home_owner_mismatch", False):
+                raise app.LaunchError("dedicated App home owner differs from the intended Windows user")
+            if create:
+                Path(path).mkdir(exist_ok=True)
+            return nullcontext({"owner_sid": sid, "created": False,
+                                "scope": "fixture_home", "permissions_changed": False})
         def package(self, unused):
             return {"package": {"full_name": "fixed-package", "family": "fixed-family", "version": "fixed-version", "publisher": "fixed-publisher", "location": str(tmp_path / "package"), "status": "Ok", "signature_kind": "Store", "development": False},
                     "exe_signature": {"status": "Valid", "thumbprint": "THUMB"}, "package_signature_status": "Valid",
@@ -60,6 +67,11 @@ def fixture(tmp_path, monkeypatch):
         def profile_arguments(self, identity): return [arg for arg in self.spawned[-1][1] if arg.startswith("--user-data-dir=")]
         def native_role(self, identity): return "app-server"
         def descendants(self, root): return [root, {**root, "pid": 102, "exe": str(directory / "codex.exe")}]
+        def native_control_plane(self, root, *, executable, expected_sha256, environment):
+            assert Path(executable) == directory / "codex.exe"
+            assert expected_sha256 == manifest["outputs"][0]["sha256"]
+            assert environment["CODEX_CLI_PATH"] == str(executable)
+            return self.descendants(root)
     return paths, expected, manifest_path, manifest, request, Backend()
 
 def test_child_environment_filters_only_explicit_selectors_and_preserves_parent():
@@ -474,3 +486,250 @@ def test_pinned_config_is_checked_again_inside_existing_one_shot_protocol(fixtur
     with pytest.raises(app.LaunchError,match='configuration changed'):app.inside_launch(Path(plan['plan']),plan['plan_sha256'],backend)
     assert not backend.spawned
     with pytest.raises(FileExistsError):app.inside_launch(Path(plan['plan']),plan['plan_sha256'],backend)
+
+
+def test_real_direct_edge_failure_cannot_mark_initial_backend_ready(fixture,monkeypatch):
+    from test_app_process_edges import Graph
+    paths,_,_,_,request,backend=fixture
+    graph=Graph(monkeypatch);graph.rows[20].update(created=300.0,ppid=999)
+    backend.descendants=lambda root:graph.backend.descendants(graph.root)
+    plan=app.prepare_launch(request,backend)
+    with pytest.raises(app.LaunchError,match="direct parent"):app.inside_launch(plan["plan"],plan["plan_sha256"],backend)
+    receipt=app.load_json(Path(plan["run_dir"])/"receipt.json")
+    assert receipt["status"]=="failed_or_unverified" and "native_processes" not in receipt
+    assert len(backend.spawned)==1
+
+def test_initial_backend_poll_retries_only_naturally_gone_child(fixture,monkeypatch):
+    paths,_,_,_,request,backend=fixture
+    original=backend.descendants;calls=[]
+    def observed(root):
+        calls.append(root["pid"])
+        if len(calls)==1:raise app.psutil.NoSuchProcess(99999)
+        return original(root)
+    backend.descendants=observed
+    plan=app.prepare_launch(request,backend)
+    result=app.inside_launch(plan["plan"],plan["plan_sha256"],backend)
+    assert result["status"]=="started_expected_backend" and len(calls)==2 and len(backend.spawned)==1
+def test_initial_backend_poll_does_not_retry_pid_reuse_or_unknown_edge(fixture):
+    paths,_,_,_,request,backend=fixture;calls=[]
+    def observed(root):
+        calls.append(root["pid"]);raise app.LaunchError("App child PID was reused")
+    backend.descendants=observed
+    plan=app.prepare_launch(request,backend)
+    with pytest.raises(app.LaunchError,match="PID was reused"):app.inside_launch(plan["plan"],plan["plan_sha256"],backend)
+    assert len(calls)==1 and len(backend.spawned)==1
+    assert app.load_json(Path(plan["run_dir"])/"receipt.json")["status"]=="failed_or_unverified"
+def test_natural_child_disappearance_does_not_allow_original_owner_loss(fixture):
+    paths,_,_,_,request,backend=fixture;calls=[]
+    def observed(root):
+        calls.append(root["pid"]);raise app.psutil.NoSuchProcess(99999)
+    backend.descendants=observed;backend.live=lambda root:False
+    plan=app.prepare_launch(request,backend)
+    with pytest.raises(app.LaunchError,match="original App exited"):app.inside_launch(plan["plan"],plan["plan_sha256"],backend)
+    assert len(calls)==1
+
+
+def test_launch_uses_bound_control_plane_while_native_owns_workloads(fixture):
+    _,_,_,_,request,backend=fixture;broad=backend.descendants;calls=[]
+    def bounded(root,**binding):
+        calls.append(binding)
+        return broad(root)
+    backend.native_control_plane=bounded
+    def reject_tree(root):raise app.LaunchError("unexpected owner/session in App process tree")
+    backend.descendants=reject_tree
+    plan=app.prepare_launch(request,backend)
+    receipt=app.inside_launch(plan["plan"],plan["plan_sha256"],backend)
+    assert receipt["status"]=="started_expected_backend"
+    assert receipt["validation_scope"]=="app_frontend_and_verified_native_backends"
+    assert receipt["native_workload_scope"]=="owned_by_native_runtime_not_enumerated"
+    assert calls[0]["expected_sha256"]==app.sha(Path(request["native_manifest"]).parent/"codex.exe")
+
+
+def _windows_security_bytes(path):
+    # No windows-qa/pywin32 dependency in the ordinary test extra.
+    import ctypes
+    from ctypes import wintypes
+    api = ctypes.WinDLL("advapi32", use_last_error=True)
+    api.GetFileSecurityW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p,
+                                    wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    api.GetFileSecurityW.restype = wintypes.BOOL
+    needed = wintypes.DWORD()
+    assert not api.GetFileSecurityW(str(path), 7, None, 0, ctypes.byref(needed))
+    assert ctypes.get_last_error() == 122 and needed.value > 0
+    data = ctypes.create_string_buffer(needed.value)
+    assert api.GetFileSecurityW(str(path), 7, data, needed.value, ctypes.byref(needed))
+    return data.raw[:needed.value]
+
+
+def test_launch_refuses_foreign_home_owner_before_creating_launch_receipts(fixture):
+    paths, expected, path, value, request, backend = fixture
+    backend.home_owner_mismatch = True
+    before = (paths["home"] / "config.toml").read_bytes()
+    with pytest.raises(app.LaunchError, match="home owner differs"):
+        app.prepare_launch(request, backend)
+    assert not backend.spawned and not paths["launches"].exists()
+    assert (paths["home"] / "config.toml").read_bytes() == before
+
+
+@pytest.mark.skipif(__import__("os").name != "nt", reason="actual Windows directory owner handles")
+def test_actual_home_guard_creates_user_owned_directory_and_preserves_existing_acl(tmp_path):
+    import os
+    backend = app.WindowsBackend()
+    owner = backend.identity(os.getpid())
+    path = tmp_path / "dedicated-home"
+    if owner["elevated"]:
+        # A hosted/admin test process must not manufacture a BA-owned profile.
+        with pytest.raises(app.LaunchError, match="non-elevated account"):
+            with backend.home_guard(path, owner["sid"], create=True):
+                pytest.fail("elevated profile creation admitted")
+        assert not path.exists()
+        return
+    with backend.home_guard(path, owner["sid"], create=True) as first:
+        assert first["created"] and first["owner_sid"] == owner["sid"]
+        (path / "existing-session.txt").write_text("preserve this state")
+    before = _windows_security_bytes(path)
+    with backend.home_guard(path, owner["sid"], create=True) as second:
+        assert not second["created"]
+    assert _windows_security_bytes(path) == before
+    assert (path / "existing-session.txt").read_text() == "preserve this state"
+
+
+@pytest.mark.skipif(__import__("os").name != "nt", reason="actual Windows owner mismatch is read-only")
+def test_actual_home_guard_wrong_expected_user_does_not_reown_existing_directory(tmp_path):
+    import os
+    backend = app.WindowsBackend()
+    owner = backend.identity(os.getpid())
+    path = tmp_path / "existing-home"; path.mkdir()
+    (path / "existing-session.txt").write_text("preserve this state")
+    before = _windows_security_bytes(path)
+    foreign = "S-1-5-21-1-2-3-9999"
+    assert foreign != owner["sid"]
+    with pytest.raises(app.LaunchError, match="home owner differs"):
+        with backend.home_guard(path, foreign):
+            pytest.fail("foreign home admitted")
+    assert _windows_security_bytes(path) == before
+    assert (path / "existing-session.txt").read_text() == "preserve this state"
+
+
+@pytest.mark.skipif(__import__("os").name != "nt", reason="actual Windows junction metadata")
+@pytest.mark.parametrize("redirect_parent", [False, True])
+def test_actual_home_guard_rejects_junction_without_touching_target(tmp_path, redirect_parent):
+    import os
+    import subprocess
+    backend = app.WindowsBackend()
+    sid = backend.identity(os.getpid())["sid"]
+    target = tmp_path / "target"; target.mkdir()
+    (target / "existing-state.txt").write_text("preserve this state")
+    link = tmp_path / "redirect"
+    result = subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(target)],
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    before = _windows_security_bytes(target)
+    try:
+        path = link / "new-home" if redirect_parent else link
+        with pytest.raises(app.LaunchError, match="redirected"):
+            with backend.home_guard(path, sid, create=True):
+                pytest.fail("redirected profile admitted")
+        assert _windows_security_bytes(target) == before
+        assert sorted(x.name for x in target.iterdir()) == ["existing-state.txt"]
+        assert (target / "existing-state.txt").read_text() == "preserve this state"
+    finally:
+        # Remove only the test-created junction, never recurse through its target.
+        link.rmdir()
+
+
+@pytest.mark.parametrize("damage", ["missing", "unreadable", "checksum"])
+def test_cleanup_only_admits_damaged_unused_helper_without_weakening_app_guard(fixture, monkeypatch, damage):
+    paths, expected, path, manifest, request, backend = fixture
+    helper = Path(manifest["outputs"][2]["path"])
+    original_sha = app.sha
+    if damage == "missing":
+        helper.unlink()
+    elif damage == "unreadable":
+        def unreadable(file):
+            if Path(file) == helper:
+                raise PermissionError("quarantined fixture")
+            return original_sha(file)
+        monkeypatch.setattr(app, "sha", unreadable)
+    else:
+        helper.write_bytes(b"changed unused fixture")
+    result = app.verify_bundle(path, request["native_manifest_sha256"], expected, cleanup_only=True)
+    report = result["cleanup_verification"]
+    assert report["scope"] == "cleanup_cli_only" and report["full_bundle_verified"] is False
+    assert report["unexecuted_components"][helper.name] == {
+        "status": {"missing": "missing", "unreadable": "unreadable", "checksum": "checksum_mismatch"}[damage],
+        "required_for_cleanup": False}
+    assert "codex.exe" not in report["unexecuted_components"]
+    with pytest.raises((app.LaunchError, OSError)):
+        app.verify_bundle(path, request["native_manifest_sha256"], expected)
+    with pytest.raises((app.LaunchError, OSError)):
+        app.validate_request(request, backend)
+    assert not backend.spawned
+
+
+@pytest.mark.parametrize("damage", ["missing", "unreadable", "checksum", "size", "outside", "redirected"])
+def test_cleanup_only_still_requires_exact_executable(fixture, monkeypatch, damage):
+    paths, expected, path, manifest, request, backend = fixture
+    executable = Path(manifest["outputs"][0]["path"])
+    original_sha = app.sha
+    if damage == "missing":
+        executable.unlink()
+    elif damage == "unreadable":
+        def unreadable(file):
+            if Path(file) == executable:
+                raise PermissionError("unreadable CLI")
+            return original_sha(file)
+        monkeypatch.setattr(app, "sha", unreadable)
+    elif damage == "checksum":
+        executable.write_bytes(b"x" * executable.stat().st_size)
+    elif damage == "size":
+        executable.write_bytes(b"changed")
+    elif damage == "outside":
+        manifest["outputs"][0]["path"] = str(path.parent.parent / "codex.exe")
+        path.write_text(json.dumps(manifest))
+        request["native_manifest_sha256"] = app.sha(path)
+    else:
+        real = Path.is_symlink
+        monkeypatch.setattr(Path, "is_symlink", lambda file: file == executable or real(file))
+    with pytest.raises((app.LaunchError, OSError)):
+        app.verify_bundle(path, request["native_manifest_sha256"], expected, cleanup_only=True)
+
+
+@pytest.mark.parametrize("mutation", ["sha-shape", "bool-size", "negative-size", "outside", "duplicate", "missing-declaration", "not-object"])
+def test_cleanup_only_never_relaxes_unused_component_manifest_schema(fixture, mutation):
+    paths, expected, path, manifest, request, backend = fixture
+    row = manifest["outputs"][2]
+    if mutation == "sha-shape": row["sha256"] = "not-a-checksum"
+    elif mutation == "bool-size": row["size"] = True
+    elif mutation == "negative-size": row["size"] = -1
+    elif mutation == "outside": row["path"] = str(path.parent.parent / row["name"])
+    elif mutation == "duplicate": manifest["outputs"].append(dict(row))
+    elif mutation == "missing-declaration": manifest["outputs"].pop(2)
+    else: manifest["outputs"][2] = "invalid"
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(app.LaunchError):
+        app.verify_bundle(path, app.sha(path), expected, cleanup_only=True)
+
+
+def test_cleanup_only_ignores_validly_declared_fake_helper_hash_but_reports_mismatch(fixture):
+    paths, expected, path, manifest, request, backend = fixture
+    manifest["outputs"][2]["sha256"] = "0" * 64
+    path.write_text(json.dumps(manifest))
+    result = app.verify_bundle(path, app.sha(path), expected, cleanup_only=True)
+    assert result["cleanup_verification"]["unexecuted_components"][manifest["outputs"][2]["name"]]["status"] == "checksum_mismatch"
+    with pytest.raises(app.LaunchError):
+        app.verify_bundle(path, app.sha(path), expected)
+
+
+def test_cleanup_unused_reparse_is_diagnostic_without_following_target(fixture, monkeypatch):
+    paths, expected, path, manifest, request, backend = fixture
+    helper = Path(manifest["outputs"][2]["path"])
+    real_reparse = app._is_link_or_reparse
+    monkeypatch.setattr(app, "_is_link_or_reparse", lambda file: Path(file) == helper or real_reparse(file))
+    original_sha = app.sha
+    def no_read(file):
+        if Path(file) == helper: pytest.fail("followed unused reparse")
+        return original_sha(file)
+    monkeypatch.setattr(app, "sha", no_read)
+    result = app.verify_bundle(path, request["native_manifest_sha256"], expected, cleanup_only=True)
+    assert result["cleanup_verification"]["unexecuted_components"][helper.name]["status"] == "redirected"

@@ -8,7 +8,7 @@ param(
  [string]$ManifestPath,[string]$ManifestSha256,[string]$Wheelhouse,[string]$PythonExe,
  [string]$InstallRoot=(Join-Path $env:LOCALAPPDATA 'codex-app-deepseek-gateway\managed-install'),
  [string]$DataHome=(Join-Path $env:LOCALAPPDATA 'codex-app-deepseek-gateway'),
- [string]$ReleaseId,[string]$Checkpoint,[int]$Port=42817,[switch]$AtLogon
+ [string]$ReleaseId,[string]$Checkpoint,[int]$Port=42817,[switch]$AtLogon,[switch]$RetryNativeCleanup
 )
 $ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.Encoding]::UTF8
@@ -64,7 +64,9 @@ $runtime=Join-Path $release 'venv\Scripts\python.exe'
 if($Action -eq 'Uninstall'){
  # First process uses installed dependencies for stop/rollback, then exits. Final
  # deletion runs from independent Python so Windows does not hold venv DLLs open.
- $preparedText=& $runtime -I -m codex_app_deepseek.lifecycle prepare-uninstall --install-root $InstallRoot
+ $prepareArguments=@('prepare-uninstall','--install-root',$InstallRoot)
+ if($RetryNativeCleanup){$prepareArguments+='--retry-native-cleanup'}
+ $preparedText=& $runtime -I -m codex_app_deepseek.lifecycle @prepareArguments
  if($LASTEXITCODE -ne 0){throw 'Uninstall preparation failed; service/binaries are retained'}
  $prepared=($preparedText -join "`n")|ConvertFrom-Json
  Assert-Hash $prepared.receipt $prepared.receipt_sha256

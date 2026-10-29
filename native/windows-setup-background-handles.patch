@@ -1,0 +1,625 @@
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_background.rs b/codex-rs/windows-sandbox-rs/src/setup_background.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/setup_background.rs
+@@ -0,0 +1,193 @@
++//! Background ACL repair must not retain unrelated app-server pipe handles.
++//! This is only the existing read-ACL helper launch, not a command runtime.
++use crate::proc_thread_attr::ProcThreadAttributeList;
++use crate::winutil::to_wide;
++use std::cmp::Ordering;
++use std::ffi::OsString;
++use std::fs::OpenOptions;
++use std::io;
++use std::os::windows::ffi::OsStrExt;
++use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
++use std::process::Command;
++use windows_sys::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle};
++use windows_sys::Win32::System::Threading::{
++    CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT,
++    GetCurrentProcess, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
++};
++
++#[link(name = "kernel32")]
++unsafe extern "system" {
++    fn CompareStringOrdinal(
++        a: *const u16,
++        na: i32,
++        b: *const u16,
++        nb: i32,
++        ignore_case: i32,
++    ) -> i32;
++}
++
++fn compare_keys(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> io::Result<Ordering> {
++    let a: Vec<_> = a.encode_wide().collect();
++    let b: Vec<_> = b.encode_wide().collect();
++    let na = i32::try_from(a.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
++    let nb = i32::try_from(b.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
++    // SAFETY: Both counted UTF-16 slices are valid throughout this call.
++    match unsafe { CompareStringOrdinal(a.as_ptr(), na, b.as_ptr(), nb, 1) } {
++        1 => Ok(Ordering::Less),
++        2 => Ok(Ordering::Equal),
++        3 => Ok(Ordering::Greater),
++        _ => Err(io::Error::last_os_error()),
++    }
++}
++
++fn environment_with_payload_overrides(command: &Command) -> io::Result<Vec<u16>> {
++    // configure_command only adds/removes its invocation-scoped payload keys.
++    // Preserve every other inherited value as UTF-16, including non-UTF-8 values.
++    let mut entries: Vec<(OsString, OsString)> = std::env::vars_os().collect();
++    for (key, value) in command.get_envs() {
++        if !crate::environment_transport::is_key(key) {
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidInput,
++                "read-ACL helper may only override launch-payload environment keys",
++            ));
++        }
++        let mut kept = Vec::with_capacity(entries.len() + 1);
++        for (old_key, old_value) in entries {
++            if compare_keys(&old_key, key)? != Ordering::Equal {
++                kept.push((old_key, old_value));
++            }
++        }
++        if let Some(value) = value {
++            kept.push((key.to_os_string(), value.to_os_string()));
++        }
++        entries = kept;
++    }
++    let mut error = None;
++    entries.sort_by(|a, b| match compare_keys(&a.0, &b.0) {
++        Ok(order) => order,
++        Err(value) => {
++            error = Some(value);
++            Ordering::Equal
++        }
++    });
++    if let Some(error) = error {
++        return Err(error);
++    }
++    let mut block = Vec::new();
++    for (key, value) in entries {
++        block.extend(key.encode_wide());
++        block.push(b'=' as u16);
++        block.extend(value.encode_wide());
++        block.push(0);
++    }
++    if block.is_empty() {
++        block.push(0);
++    }
++    block.push(0);
++    Ok(block)
++}
++
++// Mirror the existing CRT quoting rules over UTF-16 code units so a valid
++// Windows OsStr (including unpaired surrogates) never passes through UTF-8.
++fn command_line(command: &Command) -> io::Result<Vec<u16>> {
++    let mut line = Vec::new();
++    for (index, value) in std::iter::once(command.get_program())
++        .chain(command.get_args())
++        .enumerate()
++    {
++        let value: Vec<u16> = value.encode_wide().collect();
++        if value.contains(&0) {
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidInput,
++                "NUL in setup argument",
++            ));
++        }
++        if index > 0 {
++            line.push(b' ' as u16);
++        }
++        let quoted = value.is_empty() || value.iter().any(|x| matches!(*x, 9 | 10 | 13 | 32 | 34));
++        if !quoted {
++            line.extend(value);
++            continue;
++        }
++        line.push(b'"' as u16);
++        let mut slashes = 0;
++        for unit in value {
++            if unit == b'\\' as u16 {
++                slashes += 1;
++                continue;
++            }
++            if unit == b'"' as u16 {
++                line.extend(std::iter::repeat_n(b'\\' as u16, slashes * 2 + 1));
++            } else {
++                line.extend(std::iter::repeat_n(b'\\' as u16, slashes));
++            }
++            line.push(unit);
++            slashes = 0;
++        }
++        line.extend(std::iter::repeat_n(b'\\' as u16, slashes * 2));
++        line.push(b'"' as u16);
++    }
++    line.push(0);
++    Ok(line)
++}
++
++pub(super) fn spawn_read_acl_helper(command: &Command) -> io::Result<()> {
++    let program = to_wide(command.get_program());
++    let mut command_line = command_line(command)?;
++    let environment = environment_with_payload_overrides(command)?;
++    let cwd = command.get_current_dir().map(to_wide);
++    let null = OpenOptions::new().read(true).write(true).open("NUL")?;
++    let mut inherited = std::ptr::null_mut();
++    // SAFETY: Duplicate only the newly opened NUL handle, never caller stdio.
++    if unsafe {
++        DuplicateHandle(
++            GetCurrentProcess(),
++            null.as_raw_handle(),
++            GetCurrentProcess(),
++            &mut inherited,
++            0,
++            1,
++            DUPLICATE_SAME_ACCESS,
++        )
++    } == 0
++    {
++        return Err(io::Error::last_os_error());
++    }
++    // SAFETY: A successful DuplicateHandle returned a uniquely owned handle.
++    let inherited = unsafe { OwnedHandle::from_raw_handle(inherited) };
++    let mut attributes = ProcThreadAttributeList::new(1)?;
++    attributes.set_handle_list(vec![inherited.as_raw_handle()])?;
++    let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
++    startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
++    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
++    startup.StartupInfo.hStdInput = inherited.as_raw_handle();
++    startup.StartupInfo.hStdOutput = inherited.as_raw_handle();
++    startup.StartupInfo.hStdError = inherited.as_raw_handle();
++    startup.lpAttributeList = attributes.as_mut_ptr();
++    let mut child: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
++    // SAFETY: All strings, environment, allowed handle and attributes outlive creation.
++    // bInheritHandles must be TRUE for the explicit HANDLE_LIST, which excludes all
++    // other handles. Closing our process handle does not terminate background ACL work.
++    if unsafe {
++        CreateProcessW(
++            program.as_ptr(),
++            command_line.as_mut_ptr(),
++            std::ptr::null(),
++            std::ptr::null(),
++            1,
++            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
++            environment.as_ptr().cast(),
++            cwd.as_ref().map_or(std::ptr::null(), |x| x.as_ptr()),
++            &startup.StartupInfo,
++            &mut child,
++        )
++    } == 0
++    {
++        return Err(io::Error::last_os_error());
++    }
++    // SAFETY: Successful CreateProcessW returns these two uniquely owned handles.
++    let _thread = unsafe { OwnedHandle::from_raw_handle(child.hThread) };
++    let _process = unsafe { OwnedHandle::from_raw_handle(child.hProcess) };
++    Ok(())
++}
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_background_tests.rs b/codex-rs/windows-sandbox-rs/src/setup_background_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/setup_background_tests.rs
+@@ -0,0 +1,378 @@
++//! Component regressions for the existing background read-ACL spawn only.
++//! No setup payload is provisioned, and no sandbox account, policy or ACL is changed.
++use anyhow::{Context, Result, bail, ensure};
++use serde::{Deserialize, Serialize};
++use std::collections::HashMap;
++use std::fs;
++use std::os::windows::fs::MetadataExt;
++use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
++use std::os::windows::process::CommandExt;
++use std::path::{Path, PathBuf};
++use std::process::{Child, Command, Stdio};
++use std::ptr::null_mut;
++use std::thread;
++use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
++use windows_sys::Win32::Foundation::{
++    ERROR_BROKEN_PIPE, FILETIME, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation,
++    WAIT_OBJECT_0,
++};
++use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
++use windows_sys::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
++use windows_sys::Win32::System::Threading::{
++    GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, OpenProcess,
++    PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
++};
++
++const CHILD_TEST: &str =
++    "setup_provisioning::setup_background_tests::background_read_acl_child_gate";
++const PREFIX: &str = "cag-background-eof-";
++const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
++const STILL_RUNNING: u32 = 259;
++
++#[derive(Serialize, Deserialize)]
++struct GatePayload {
++    root: PathBuf,
++    nonce: String,
++}
++
++#[derive(Serialize, Deserialize)]
++struct Ready {
++    nonce: String,
++    pid: u32,
++    creation_time: u64,
++}
++
++fn process_birth(handle: HANDLE) -> Result<u64> {
++    let mut creation: FILETIME = unsafe { std::mem::zeroed() };
++    let mut exit: FILETIME = unsafe { std::mem::zeroed() };
++    let mut kernel: FILETIME = unsafe { std::mem::zeroed() };
++    let mut user: FILETIME = unsafe { std::mem::zeroed() };
++    ensure!(
++        unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) } != 0,
++        "query own child creation time: {}",
++        std::io::Error::last_os_error()
++    );
++    Ok((u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime))
++}
++
++fn child_running(handle: HANDLE) -> Result<bool> {
++    let mut code = 0;
++    ensure!(
++        unsafe { GetExitCodeProcess(handle, &mut code) } != 0,
++        "query own child exit state: {}",
++        std::io::Error::last_os_error()
++    );
++    Ok(code == STILL_RUNNING)
++}
++
++fn own_pipe() -> Result<(OwnedHandle, OwnedHandle)> {
++    let attributes = SECURITY_ATTRIBUTES {
++        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
++        lpSecurityDescriptor: null_mut(),
++        bInheritHandle: 1,
++    };
++    let mut read = null_mut();
++    let mut write = null_mut();
++    ensure!(
++        unsafe { CreatePipe(&mut read, &mut write, &attributes, 0) } != 0,
++        "create isolated anonymous pipe: {}",
++        std::io::Error::last_os_error()
++    );
++    // SAFETY: CreatePipe returned two distinct, uniquely owned handles.
++    let read = unsafe { OwnedHandle::from_raw_handle(read) };
++    let write = unsafe { OwnedHandle::from_raw_handle(write) };
++    ensure!(
++        unsafe { SetHandleInformation(read.as_raw_handle(), HANDLE_FLAG_INHERIT, 0) } != 0,
++        "make own pipe reader non-inheritable: {}",
++        std::io::Error::last_os_error()
++    );
++    Ok((read, write))
++}
++
++fn pipe_eof(read: &OwnedHandle) -> Result<bool> {
++    let mut available = 0;
++    let ok = unsafe {
++        PeekNamedPipe(
++            read.as_raw_handle(),
++            null_mut(),
++            0,
++            null_mut(),
++            &mut available,
++            null_mut(),
++        )
++    };
++    if ok != 0 {
++        ensure!(
++            available == 0,
++            "unrelated fixture pipe unexpectedly carried data"
++        );
++        return Ok(false);
++    }
++    let error = unsafe { GetLastError() };
++    if error == ERROR_BROKEN_PIPE {
++        return Ok(true);
++    }
++    bail!(
++        "inspect isolated fixture pipe: {}",
++        std::io::Error::from_raw_os_error(error as i32)
++    )
++}
++
++fn wait_eof(read: &OwnedHandle, bound: Duration) -> Result<bool> {
++    let deadline = Instant::now() + bound;
++    loop {
++        if pipe_eof(read)? {
++            return Ok(true);
++        }
++        if Instant::now() >= deadline {
++            return Ok(false);
++        }
++        thread::sleep(Duration::from_millis(5));
++    }
++}
++
++struct ReleaseGate {
++    release: PathBuf,
++    process: Option<OwnedHandle>,
++    finished: bool,
++}
++
++impl ReleaseGate {
++    fn new(root: &Path) -> Self {
++        Self {
++            release: root.join("release"),
++            process: None,
++            finished: false,
++        }
++    }
++
++    fn finish(&mut self) -> Result<()> {
++        fs::write(&self.release, b"release")?;
++        let process = self
++            .process
++            .as_ref()
++            .context("own child was not admitted")?;
++        ensure!(
++            unsafe { WaitForSingleObject(process.as_raw_handle(), 3_000) } == WAIT_OBJECT_0,
++            "own child did not finish after its release gate"
++        );
++        let mut code = 0;
++        ensure!(
++            unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) } != 0 && code == 0,
++            "own gated child did not exit successfully; code={code}"
++        );
++        self.finished = true;
++        Ok(())
++    }
++}
++
++impl Drop for ReleaseGate {
++    fn drop(&mut self) {
++        if !self.finished {
++            // Wake only this fixture child, including when an assertion unwinds.
++            // The child also has its own eight-second lifetime bound. Never kill by name.
++            let _ = fs::write(&self.release, b"release");
++            if let Some(process) = &self.process {
++                unsafe { WaitForSingleObject(process.as_raw_handle(), 3_000) };
++            }
++        }
++    }
++}
++
++fn wait_ready(root: &Path, nonce: &str) -> Result<Ready> {
++    let deadline = Instant::now() + Duration::from_secs(3);
++    loop {
++        if let Ok(raw) = fs::read(root.join("ready.json"))
++            && let Ok(ready) = serde_json::from_slice::<Ready>(&raw)
++        {
++            ensure!(
++                ready.nonce == nonce && ready.pid != 0 && ready.pid != std::process::id(),
++                "child readiness identity differs"
++            );
++            return Ok(ready);
++        }
++        ensure!(
++            Instant::now() < deadline,
++            "own child never published readiness"
++        );
++        thread::sleep(Duration::from_millis(5));
++    }
++}
++
++fn admit_child(ready: &Ready) -> Result<OwnedHandle> {
++    let process = unsafe {
++        OpenProcess(
++            PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE_ACCESS,
++            0,
++            ready.pid,
++        )
++    };
++    ensure!(
++        !process.is_null(),
++        "open exact own child: {}",
++        std::io::Error::last_os_error()
++    );
++    // SAFETY: OpenProcess returned this uniquely owned process handle.
++    let process = unsafe { OwnedHandle::from_raw_handle(process) };
++    ensure!(
++        process_birth(process.as_raw_handle())? == ready.creation_time,
++        "own child PID creation time changed"
++    );
++    ensure!(
++        child_running(process.as_raw_handle())?,
++        "own child already exited"
++    );
++    Ok(process)
++}
++
++fn child_command(payload: &GatePayload) -> Result<Command> {
++    let mut command = Command::new(std::env::current_exe()?);
++    command.args([
++        "--ignored",
++        "--exact",
++        CHILD_TEST,
++        "--nocapture",
++        "--test-threads",
++        "1",
++    ]);
++    // Reuse only the invocation-scoped payload keys accepted by the production helper.
++    // This keeps the test free of process-global or machine environment mutation.
++    for (key, _) in std::env::vars_os() {
++        if crate::environment_transport::is_key(&key) {
++            command.env_remove(key);
++        }
++    }
++    let mut environment = HashMap::new();
++    crate::environment_transport::encode(&serde_json::to_string(payload)?, &mut environment)?;
++    command.envs(environment);
++    Ok(command)
++}
++
++fn run_eof_case(original_stdio_control: bool) -> Result<()> {
++    let root = tempfile::Builder::new()
++        .prefix(PREFIX)
++        .tempdir()
++        .context("create own background-handle fixture")?;
++    let nonce = format!(
++        "{}-{}",
++        std::process::id(),
++        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
++    );
++    let payload = GatePayload {
++        root: root.path().to_path_buf(),
++        nonce,
++    };
++    let (read, write) = own_pipe()?;
++    ensure!(
++        !pipe_eof(&read)?,
++        "own writer must initially keep the pipe open"
++    );
++    let mut gate = ReleaseGate::new(root.path());
++    let mut command = child_command(&payload)?;
++    let mut original_child: Option<Child> = None;
++    if original_stdio_control {
++        // This is exactly the prior std::Command/null-stdio launch boundary.
++        // It deliberately keeps unrelated inheritable pipe handles in the child.
++        original_child = Some(
++            command
++                .stdin(Stdio::null())
++                .stdout(Stdio::null())
++                .stderr(Stdio::null())
++                .creation_flags(0x0800_0000)
++                .spawn()?,
++        );
++    } else {
++        super::setup_background::spawn_read_acl_helper(&command)?;
++    }
++    let ready = wait_ready(root.path(), &payload.nonce)?;
++    if let Some(child) = &original_child {
++        ensure!(
++            child.id() == ready.pid,
++            "control readiness came from a different child"
++        );
++    }
++    gate.process = Some(admit_child(&ready)?);
++    drop(write);
++    let eof_while_alive = wait_eof(&read, Duration::from_millis(500))?;
++    ensure!(
++        child_running(
++            gate.process
++                .as_ref()
++                .context("missing child handle")?
++                .as_raw_handle()
++        )?,
++        "EOF evidence cannot use a child that already exited"
++    );
++    ensure!(
++        eof_while_alive != original_stdio_control,
++        "unexpected pipe outcome: original_control={original_stdio_control}, eof={eof_while_alive}"
++    );
++    println!(
++        "background_handle_fixture original_control={original_stdio_control} pid={} birth={} child_alive=true unrelated_pipe_eof={eof_while_alive}",
++        ready.pid, ready.creation_time
++    );
++    gate.finish()?;
++    if let Some(child) = &mut original_child {
++        ensure!(
++            child.wait()?.success(),
++            "original control child did not finish normally"
++        );
++    }
++    ensure!(
++        wait_eof(&read, Duration::from_millis(500))?,
++        "pipe stayed open after its only child was released"
++    );
++    Ok(())
++}
++
++#[test]
++fn background_read_acl_handle_list_releases_unrelated_pipe_while_child_runs() -> Result<()> {
++    run_eof_case(false)
++}
++
++#[test]
++fn original_stdio_null_spawn_control_retains_unrelated_pipe_while_child_runs() -> Result<()> {
++    run_eof_case(true)
++}
++
++#[test]
++#[ignore = "Fixture child role; invoked only with an explicit isolated payload by the two parent tests"]
++fn background_read_acl_child_gate() -> Result<()> {
++    let payload: GatePayload =
++        serde_json::from_str(&crate::environment_transport::decode(std::env::vars_os())?)?;
++    ensure!(
++        payload.nonce.len() <= 64
++            && payload
++                .nonce
++                .bytes()
++                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
++        "invalid own fixture nonce"
++    );
++    let root = payload.root.canonicalize()?;
++    let temp = std::env::temp_dir().canonicalize()?;
++    ensure!(
++        root.parent() == Some(temp.as_path())
++            && root
++                .file_name()
++                .is_some_and(|name| name.to_string_lossy().starts_with(PREFIX))
++            && fs::symlink_metadata(&payload.root)?.file_attributes() & 0x400 == 0,
++        "child gate must be a direct own non-reparse temporary directory"
++    );
++    let ready = Ready {
++        nonce: payload.nonce,
++        pid: std::process::id(),
++        creation_time: process_birth(unsafe { GetCurrentProcess() })?,
++    };
++    let temporary = root.join("ready.tmp");
++    fs::write(&temporary, serde_json::to_vec(&ready)?)?;
++    fs::rename(temporary, root.join("ready.json"))?;
++    let deadline = Instant::now() + Duration::from_secs(8);
++    while !root.join("release").exists() {
++        ensure!(
++            Instant::now() < deadline,
++            "own fixture release was never signaled"
++        );
++        thread::sleep(Duration::from_millis(5));
++    }
++    Ok(())
++}
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+@@ -54,11 +54,9 @@
+ use std::ffi::c_void;
+ use std::io::Write;
+ use std::os::windows::io::AsRawHandle;
+-use std::os::windows::process::CommandExt;
+ use std::path::Path;
+ use std::path::PathBuf;
+ use std::process::Command;
+-use std::process::Stdio;
+ use std::sync::mpsc;
+ use windows_sys::Win32::Foundation::GetLastError;
+ use windows_sys::Win32::Foundation::HLOCAL;
+@@ -209,6 +207,13 @@
+     Ok(sid_strs)
+ }
+ 
++#[path = "setup_background.rs"]
++mod setup_background;
++
++#[cfg(test)]
++#[path = "setup_background_tests.rs"]
++mod setup_background_tests;
++
+ fn spawn_read_acl_helper(payload: &Payload, _log: &mut dyn Write) -> Result<()> {
+     let mut read_payload = payload.clone();
+     read_payload.mode = SetupMode::ReadAclsOnly;
+@@ -218,13 +223,7 @@
+     let exe = std::env::current_exe().context("locate setup helper")?;
+     let mut command = Command::new(&exe);
+     crate::launch_environment::configure_command(&mut command, &payload_b64)?;
+-    command
+-        .stdin(Stdio::null())
+-        .stdout(Stdio::null())
+-        .stderr(Stdio::null())
+-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+-        .spawn()
+-        .context("spawn read ACL helper")?;
++    setup_background::spawn_read_acl_helper(&command).context("spawn read ACL helper")?;
+     Ok(())
+ }
+ 

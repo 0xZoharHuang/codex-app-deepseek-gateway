@@ -1,0 +1,135 @@
+--- a/codex-rs/windows-sandbox-rs/src/ancestor_metadata.rs
++++ b/codex-rs/windows-sandbox-rs/src/ancestor_metadata.rs
+@@ -650,11 +650,32 @@
+         Ok(value)
+     }
+ 
++    // This predicate only authorizes this module's exact, non-inheriting
++    // FILE_READ_ATTRIBUTES ACE. Windows still checks WRITE_DAC on the pinned
++    // target handle; no ownership, data-read, list, write or inherited grant is added.
++    // SYSTEM-owned profiles and Administrators-owned native setup directories
++    // are legitimate layouts. Both principals already control the namespace.
++    fn require_metadata_owner(&self, expected: &str, target: &Path) -> Result<()> {
++        let expected = crate::token::LocalSid::from_string(expected)?;
++        let system = crate::token::LocalSid::from_string("S-1-5-18")?;
++        let administrators = crate::token::LocalSid::from_string("S-1-5-32-544")?;
++        ensure!(
++            !self.owner.is_null()
++                && [expected.as_ptr(), system.as_ptr(), administrators.as_ptr()]
++                    .into_iter()
++                    .any(|sid| unsafe { EqualSid(self.owner, sid) } != 0),
++            "refusing to modify another owner's ancestor metadata: {}",
++            target.display()
++        );
++        Ok(())
++    }
++
++    #[cfg(test)]
+     fn require_owner(&self, expected: &str) -> Result<()> {
+         let expected = crate::token::LocalSid::from_string(expected)?;
+         ensure!(
+             !self.owner.is_null() && unsafe { EqualSid(self.owner, expected.as_ptr()) } != 0,
+-            "refusing to modify another owner's ancestor metadata"
++            "fixture owner must match its creating user"
+         );
+         Ok(())
+     }
+@@ -894,7 +915,8 @@
+                 "private metadata journal has a foreign volume or invalid identity"
+             );
+             if let Some(directory) = target {
+-                Dacl::read(directory)?.require_owner(&namespace.owner_sid)?;
++                Dacl::read(directory)?
++                    .require_metadata_owner(&namespace.owner_sid, &directory.path)?;
+             }
+         } else {
+             let target = target.context("ledger target is not a current CODEX_HOME ancestor")?;
+@@ -1016,7 +1038,7 @@
+         if already_readable(&dacl, &entries, &principals)? {
+             continue;
+         }
+-        dacl.require_owner(&namespace.owner_sid)?;
++        dacl.require_metadata_owner(&namespace.owner_sid, &directory.path)?;
+         if !ledger
+             .grants
+             .iter()
+@@ -1115,7 +1137,7 @@
+         }
+         let dacl = Dacl::read(&directory)?;
+         if private_descendant(namespace, &planned.path) {
+-            dacl.require_owner(&namespace.owner_sid)?;
++            dacl.require_metadata_owner(&namespace.owner_sid, &directory.path)?;
+         }
+         let mut entries = dacl.entries()?;
+         let index = if planned.revoking {
+@@ -1123,14 +1145,14 @@
+         } else {
+             let index = owned_index(&entries, &planned.ace, &sid)?;
+             if index.is_some() {
+-                dacl.require_owner(&namespace.owner_sid)?;
++                dacl.require_metadata_owner(&namespace.owner_sid, &directory.path)?;
+                 ledger.grants.last_mut().unwrap().revoking = true;
+                 save(&tx.state_path, &ledger)?;
+             }
+             index
+         };
+         if let Some(index) = index {
+-            dacl.require_owner(&namespace.owner_sid)?;
++            dacl.require_metadata_owner(&namespace.owner_sid, &directory.path)?;
+             entries.remove(index);
+             dacl.write(&directory, &entries)?;
+             ensure!(
+@@ -1589,7 +1611,52 @@
+     }
+ 
+     #[test]
+-    fn restricted_ancestor_owner_must_match_namespace() -> Result<()> {
++    fn metadata_owner_accepts_only_namespace_system_and_administrators() -> Result<()> {
++        let namespace = "S-1-5-21-1-2-3-1101";
++        let target = Path::new("metadata-owner-fixture");
++        for (owner, accepted) in [
++            (namespace, true),
++            ("S-1-5-18", true),
++            ("S-1-5-32-544", true),
++            ("S-1-5-21-1-2-3-1102", false),
++            ("S-1-5-32-545", false),
++            ("S-1-5-11", false),
++            ("S-1-1-0", false),
++        ] {
++            let owner = crate::token::LocalSid::from_string(owner)?;
++            // The LocalSid owns this test pointer. Dacl owns no descriptor here.
++            let dacl = Dacl {
++                descriptor: std::ptr::null_mut(),
++                owner: owner.as_ptr(),
++                acl: std::ptr::null_mut(),
++            };
++            assert_eq!(
++                dacl.require_metadata_owner(namespace, target).is_ok(),
++                accepted,
++                "metadata owner policy must not admit an unrelated user or broad group"
++            );
++        }
++        Ok(())
++    }
++
++    #[test]
++    fn metadata_owner_rejects_missing_owner_and_reports_target() {
++        let dacl = Dacl {
++            descriptor: std::ptr::null_mut(),
++            owner: std::ptr::null_mut(),
++            acl: std::ptr::null_mut(),
++        };
++        let error = dacl
++            .require_metadata_owner(
++                "S-1-5-21-1-2-3-1101",
++                Path::new("metadata-owner-missing-fixture"),
++            )
++            .unwrap_err();
++        assert!(error.to_string().contains("metadata-owner-missing-fixture"));
++    }
++
++    #[test]
++    fn fixture_owner_check_remains_strict() -> Result<()> {
+         let root = tempfile::tempdir()?;
+         let directory = PinnedDirectory::open(root.path())?;
+         let dacl = Dacl::read(&directory)?;

@@ -1,5 +1,6 @@
 """Installed, one-shot App entrypoints. No App supervisor or agent runtime."""
 from __future__ import annotations
+from .paths import _is_link_or_reparse
 from dataclasses import dataclass
 import json
 import hashlib
@@ -14,7 +15,7 @@ from . import lifecycle as lc
 from .app_config import apply, prepare, _atomic_write, _private
 from . import gateway_policy as gp
 
-LAUNCHER_SHA256 = "cf9d08c7fe978851084529dc1acacc38b474d26b5b8b5544e84e1156d9b81a78"
+LAUNCHER_SHA256 = "9a9269f2439aacca2c5b859a82497a1f8ad41a3b1fd111638e5c8701e8025507"
 AUTH_ARGS = ("-I", "-m", "codex_app_deepseek.cli", "auth-token")
 BINDING_KEYS = {"schema_version", "project", "gateway_release_id", "owner_sid",
                 "native_manifest", "native_manifest_sha256", "app_baseline_sha256", "catalog"}
@@ -192,45 +193,46 @@ def configure(root, catalog, catalog_sha256, *, port=42817, backend=None):
         app.verify_bundle(value["native_manifest"], value["native_manifest_sha256"], expected)
         paths = app.defaults()
         app.validate_state_paths(paths)
-        executable = installation.directory / "venv/Scripts/python.exe"
-        if not executable.is_file():
-            raise DeliveryError("Installed authentication helper is missing")
-        # Reject invalid source JSON/permissions before creating any catalog file.
-        prepare(paths["home"] / "config.toml", catalog_path=source,
-                auth_command=str(executable), auth_args=AUTH_ARGS, port=port)
-        policy, policy_result = gp.ensure_app_policy(installation.data)
-        gp.require_app_policy(policy, catalog_models)
-        target = installation.data / "app-catalogs" / (catalog_sha256 + ".json")
-        if target.exists():
-            if app.sha(target) != catalog_sha256:
-                raise DeliveryError("Existing immutable catalog bytes differ")
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            _private(target.parent, directory=True)
-            _atomic_write(target, source.read_bytes())
-            if app.sha(target) != catalog_sha256:
-                raise DeliveryError("Catalog changed during copying")
-        planned = prepare(paths["home"] / "config.toml", catalog_path=target,
-                          auth_command=str(executable), auth_args=AUTH_ARGS, port=port)
-        if gp.load_service_config(installation.data).config_sha256 != policy.config_sha256:
-            raise DeliveryError("Gateway policy changed during App configuration; no App config was applied")
-        checkpoint = apply(planned, backup_dir=installation.data / "config-backups")
-        # Preserve the returned checkpoint even if registry update fails. The
-        # existing public register-checkpoint command is the explicit recovery.
-        try:
-            registered = lc.register_checkpoint(installation.root, checkpoint.manifest_path)
-        except Exception:
-            raise DeliveryError("Configuration applied but checkpoint registration failed; retain and register "
-                                + str(checkpoint.manifest_path) + " before rollback/uninstall") from None
-        if gp.load_service_config(installation.data).config_sha256 != policy.config_sha256:
-            raise DeliveryError("Gateway policy changed after App configuration; retain registered checkpoint "
-                                + str(checkpoint.manifest_path) + " and explicitly configure again")
-        value["catalog"] = {"path": str(target), "sha256": catalog_sha256}
-        app.save(binding_path(installation), value)
+        with backend.home_guard(paths["home"], owner["sid"], create=True) as home_identity:
+            executable = installation.directory / "venv/Scripts/python.exe"
+            if not executable.is_file():
+                raise DeliveryError("Installed authentication helper is missing")
+            # Reject invalid source JSON/permissions before creating any catalog file.
+            prepare(paths["home"] / "config.toml", catalog_path=source,
+                    auth_command=str(executable), auth_args=AUTH_ARGS, port=port)
+            policy, policy_result = gp.ensure_app_policy(installation.data)
+            gp.require_app_policy(policy, catalog_models)
+            target = installation.data / "app-catalogs" / (catalog_sha256 + ".json")
+            if target.exists():
+                if app.sha(target) != catalog_sha256:
+                    raise DeliveryError("Existing immutable catalog bytes differ")
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                _private(target.parent, directory=True)
+                _atomic_write(target, source.read_bytes())
+                if app.sha(target) != catalog_sha256:
+                    raise DeliveryError("Catalog changed during copying")
+            planned = prepare(paths["home"] / "config.toml", catalog_path=target,
+                              auth_command=str(executable), auth_args=AUTH_ARGS, port=port)
+            if gp.load_service_config(installation.data).config_sha256 != policy.config_sha256:
+                raise DeliveryError("Gateway policy changed during App configuration; no App config was applied")
+            checkpoint = apply(planned, backup_dir=installation.data / "config-backups")
+            # Preserve the returned checkpoint even if registry update fails. The
+            # existing public register-checkpoint command is the explicit recovery.
+            try:
+                registered = lc.register_checkpoint(installation.root, checkpoint.manifest_path)
+            except Exception:
+                raise DeliveryError("Configuration applied but checkpoint registration failed; retain and register "
+                                    + str(checkpoint.manifest_path) + " before rollback/uninstall") from None
+            if gp.load_service_config(installation.data).config_sha256 != policy.config_sha256:
+                raise DeliveryError("Gateway policy changed after App configuration; retain registered checkpoint "
+                                    + str(checkpoint.manifest_path) + " and explicitly configure again")
+            value["catalog"] = {"path": str(target), "sha256": catalog_sha256}
+            app.save(binding_path(installation), value)
     return {"status": "private_app_configured_not_launched", "config": str(paths["home"] / "config.toml"),
             "checkpoint": str(checkpoint.manifest_path), "registered_checkpoint": registered,
             "catalog": str(target), "auth_command": str(executable), "auth_args": list(AUTH_ARGS),
-            "gateway_policy": policy_result, "instruction": "Start or explicitly restart the owned gateway, then run app-check",
+            "home_identity": home_identity, "gateway_policy": policy_result, "instruction": "Start or explicitly restart the owned gateway, then run app-check",
             "model_request_performed": False}
 
 
@@ -353,7 +355,7 @@ def status(root, *, run_id=None, backend=None):
                 raise DeliveryError("Many launch receipts exist; select an explicit --run-id")
             for candidate in entries:
                 if candidate.is_dir() and re.fullmatch("[0-9a-f]{32}", candidate.name):
-                    if candidate.resolve().parent != launches.resolve() or candidate.is_symlink() or (hasattr(candidate, "is_junction") and candidate.is_junction()):
+                    if candidate.resolve().parent != launches.resolve() or _is_link_or_reparse(candidate):
                         raise DeliveryError("Owned App receipt directory is redirected")
                     plan = app.load_json(candidate / "plan.json")
                     if plan["validated"]["owner"]["sid"] == backend.current()["sid"]:

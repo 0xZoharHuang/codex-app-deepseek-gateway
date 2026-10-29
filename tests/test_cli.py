@@ -398,3 +398,121 @@ def test_missing_maintenance_outcome_is_an_error_not_success(tmp_path, monkeypat
     assert cli.main(["image-cache-cleanup", "--home", str(tmp_path)]) == 2
     result = capsys.readouterr()
     assert not result.out and "verified completion" in result.err
+
+
+def _native_agent_catalog(path, version):
+    from codex_app_deepseek.catalog import PINNED_MODEL
+    raw = json.dumps({"models": [
+        {"slug": PINNED_MODEL, "visibility": "list", "multi_agent_version": version},
+        {"slug": "gpt-5.6-luna", "visibility": "hide", "multi_agent_version": "v1"},
+    ]}).encode()
+    path.write_bytes(raw)
+    import hashlib
+    return hashlib.sha256(raw).hexdigest()
+
+
+@pytest.mark.parametrize("entrypoint", ["configure-app", "app-configure"])
+@pytest.mark.parametrize("version", ["v1", "v2"])
+def test_configure_native_agent_mode_is_explicit_and_preserves_catalog(tmp_path, monkeypatch, capsys, entrypoint, version):
+    from dataclasses import dataclass
+    from codex_app_deepseek import app_config, app_delivery
+    path = tmp_path / "catalog.json"
+    digest = _native_agent_catalog(path, version)
+    original = path.read_bytes()
+    calls = []
+    @dataclass
+    class Receipt:
+        status: str = "prepared-fixture"
+    prepared = SimpleNamespace(catalog_sha256=digest)
+    monkeypatch.setattr(app_config, "prepare", lambda *a, **k: calls.append(("prepare", k["catalog_path"])) or prepared)
+    monkeypatch.setattr(app_config, "apply", lambda p, **k: calls.append(("apply", p)) or Receipt())
+    monkeypatch.setattr(app_delivery, "configure", lambda *a, **k: calls.append(("managed", a[1], a[2])) or {"status": "prepared-fixture"})
+    monkeypatch.setattr(cli, "read", lambda *a: pytest.fail("Configuration selection must not read credentials"))
+    args = [entrypoint, "--catalog", str(path)]
+    if entrypoint == "app-configure":
+        args += ["--catalog-sha256", digest]
+    if version == "v1":
+        args += ["--multi-agent-version", "v1"]
+    assert cli.main(args) == 0
+    assert path.read_bytes() == original
+    assert calls == ([("managed", path, digest)] if entrypoint == "app-configure"
+                     else [("prepare", path), ("apply", prepared)])
+    assert json.loads(capsys.readouterr().out)["status"] == "prepared-fixture"
+
+
+@pytest.mark.parametrize("entrypoint", ["configure-app", "app-configure"])
+@pytest.mark.parametrize("catalog_version, selection", [("v1", []), ("v2", ["--multi-agent-version", "v1"])])
+def test_configure_rejects_agent_mode_mismatch_before_operations(tmp_path, monkeypatch, capsys, entrypoint, catalog_version, selection):
+    from codex_app_deepseek import app_config, app_delivery
+    path = tmp_path / "catalog.json"
+    digest = _native_agent_catalog(path, catalog_version)
+    original = path.read_bytes()
+    def forbidden(*args, **kwargs):
+        pytest.fail("Invalid agent selection must not prepare, configure, apply or read credentials")
+    monkeypatch.setattr(app_config, "prepare", forbidden)
+    monkeypatch.setattr(app_config, "apply", forbidden)
+    monkeypatch.setattr(app_delivery, "configure", forbidden)
+    monkeypatch.setattr(cli, "read", forbidden)
+    args = [entrypoint, "--catalog", str(path), *selection]
+    if entrypoint == "app-configure":
+        args += ["--catalog-sha256", digest]
+    assert cli.main(args) == 2
+    output = capsys.readouterr()
+    assert not output.out and "must match --multi-agent-version" in output.err
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("entrypoint", ["configure-app", "app-configure"])
+def test_configure_agent_version_help_and_invalid_input(tmp_path, capsys, entrypoint):
+    with pytest.raises(SystemExit) as result:
+        cli.main([entrypoint, "--help"])
+    assert result.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "--multi-agent-version {v1,v2}" in help_text
+    assert "fresh chat" in help_text and "existing chats retain their recorded version" in help_text
+    args = [entrypoint, "--catalog", str(tmp_path / "unread.json"), "--multi-agent-version", "v3"]
+    if entrypoint == "app-configure":
+        args += ["--catalog-sha256", "a" * 64]
+    with pytest.raises(SystemExit) as result:
+        cli.main(args)
+    assert result.value.code == 2
+
+
+@pytest.mark.parametrize("mutation", ["duplicate", "hidden-main", "another-visible", "no-version", "nondict"])
+def test_agent_selection_requires_unique_visible_pinned_main(tmp_path, mutation):
+    path = tmp_path / "catalog.json"
+    _native_agent_catalog(path, "v2")
+    data = json.loads(path.read_bytes())
+    if mutation == "duplicate":
+        data["models"].append(dict(data["models"][0]))
+    elif mutation == "hidden-main":
+        data["models"][0]["visibility"] = "hide"
+    elif mutation == "another-visible":
+        data["models"][1]["visibility"] = "list"
+    elif mutation == "no-version":
+        del data["models"][0]["multi_agent_version"]
+    else:
+        data["models"].append(None)
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(cli.ServiceConfigError):
+        cli._validate_catalog_agent_version(path, "v2")
+
+
+def test_configure_binds_agent_validation_to_prepared_catalog_bytes(tmp_path, monkeypatch, capsys):
+    from codex_app_deepseek import app_config
+    path = tmp_path / "catalog.json"
+    _native_agent_catalog(path, "v1")
+    monkeypatch.setattr(app_config, "prepare", lambda *a, **k: SimpleNamespace(catalog_sha256="0" * 64))
+    monkeypatch.setattr(app_config, "apply", lambda *a, **k: pytest.fail("Changed catalog must not be applied"))
+    assert cli.main(["configure-app", "--catalog", str(path), "--multi-agent-version", "v1"]) == 2
+    assert "nothing applied" in capsys.readouterr().err
+
+
+def test_managed_agent_selection_keeps_supplied_trusted_sha(tmp_path, monkeypatch, capsys):
+    from codex_app_deepseek import app_delivery
+    path = tmp_path / "catalog.json"
+    _native_agent_catalog(path, "v1")
+    monkeypatch.setattr(app_delivery, "configure", lambda *a, **k: pytest.fail("Mismatched trusted SHA must not configure"))
+    assert cli.main(["app-configure", "--catalog", str(path), "--catalog-sha256", "0" * 64,
+                     "--multi-agent-version", "v1"]) == 2
+    assert "SHA256 mismatch" in capsys.readouterr().err

@@ -4,6 +4,7 @@ The body returned by prepare() must be the actual HTTP body sent by its caller. 
 cache metadata are private. No image bytes or upstream credentials are persisted.
 """
 from __future__ import annotations
+from .paths import _is_link_or_reparse, _sqlite_filename
 
 import asyncio
 import base64
@@ -389,6 +390,10 @@ def select_image_references(payload: dict, positions: list, slots: int) -> list:
     for encounter, (position, digest) in enumerate(positions):
         i, key, j = position
         part = payload['input'][i][key][j]
+        # Files references ignore detail. Explicit low must retain its native
+        # inline precision even when another occurrence shares the same bytes.
+        if part.get('detail') == 'low':
+            continue
         reference = dict(part)
         del reference['image_url']
         # Current official ID shape is 32 characters. The actual body is checked
@@ -406,7 +411,7 @@ def _private_directory(path: Path) -> None:
     if not path.is_absolute():
         raise ImageTransportError("Image cache must have an explicit absolute directory")
     for ancestor in (path, *path.parents):
-        if ancestor.is_symlink() or (hasattr(ancestor, "is_junction") and ancestor.is_junction()):
+        if _is_link_or_reparse(ancestor):
             raise ImageTransportError("Image cache cannot traverse a link or junction")
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     if os.name != "nt":
@@ -459,7 +464,7 @@ def _private_directory(path: Path) -> None:
 
 @asynccontextmanager
 async def _file_lock(path: Path, timeout: float):
-    if path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
+    if _is_link_or_reparse(path):
         raise ImageTransportError("Cache lock cannot be a link")
     handle = path.open("a+b")
     locked = False
@@ -542,7 +547,7 @@ class ImageTransport:
             path = directory / "files.sqlite"
             if path.is_symlink():
                 raise ImageTransportError("Image cache database cannot be a link")
-            db = sqlite3.connect(path, isolation_level=None)
+            db = sqlite3.connect(_sqlite_filename(path), isolation_level=None)
             try:
                 db.row_factory = sqlite3.Row
                 db.executescript("""
@@ -910,7 +915,7 @@ class ImageTransport:
             if not database.exists():
                 continue
             try:
-                with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as db:
+                with closing(sqlite3.connect(_sqlite_filename(database, read_only=True), uri=True)) as db:
                     count = db.execute("SELECT COUNT(*) FROM assets WHERE state NOT IN ('deleted','upload_rejected')").fetchone()[0]
                 if count:
                     pending.append(directory.name)

@@ -1,5 +1,6 @@
 """Explicit, reversible Codex App provider configuration. No credential access."""
 from __future__ import annotations
+from .paths import _is_link_or_reparse
 
 import csv
 import hashlib
@@ -10,6 +11,8 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import stat
+import time
 import tomllib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -73,7 +76,7 @@ def _regular_path(path: str | Path, label: str) -> Path:
     result = Path(path).absolute()
     # Refuse links/junctions: caller must explicitly choose the real destination.
     for part in [result, *result.parents]:
-        if part.is_symlink() or (hasattr(part, "is_junction") and part.is_junction()):
+        if _is_link_or_reparse(part):
             raise ConfigurationError(f"{label} must not traverse a symlink or junction")
     if result.exists() and not result.is_file():
         raise ConfigurationError(f"{label} must be a regular file")
@@ -183,7 +186,8 @@ def prepare(config_path: str | Path, *, catalog_path: str | Path,
         if not isinstance(auth, dict):
             raise ConfigurationError("Provider auth must be a TOML table")
         auth["command"] = str(command)
-        auth["args"] = arguments
+        if not _equal(_at(before_settings, ("model_providers", PROVIDER_ID, "auth", "args")), arguments):
+            auth["args"] = arguments
         auth["timeout_ms"] = 30000
         auth["refresh_interval_ms"] = 300000
         provider["auth"] = auth
@@ -267,19 +271,29 @@ def _private(path: Path, *, directory: bool = False) -> None:
         raise ConfigurationError("Cannot create a private configuration backup") from exc
 
 
-def _atomic_write(path: Path, data: bytes) -> None:
-    descriptor, temporary_name = tempfile.mkstemp(prefix=".app-deepseek-", suffix=".tmp", dir=path.parent)
-    temporary = Path(temporary_name)
+from . import atomic_io as _atomic_io
+
+_CAPTURE_CURRENT_TARGET = _atomic_io.CAPTURE_CURRENT_TARGET
+
+
+def _atomic_target_state(path: Path):
     try:
-        os.close(descriptor)
-        _private(temporary)
-        with temporary.open("wb") as output:
-            output.write(data)
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+        return _atomic_io.target_state(path)
+    except _atomic_io.AtomicPublicationConflict as exc:
+        raise ConfigurationConflict(str(exc)) from exc
+
+
+def _atomic_write(path: Path, data: bytes, *,
+                  expected_sha256=_CAPTURE_CURRENT_TARGET,
+                  retry_transient: bool = True,
+                  private_permissions: bool = True) -> None:
+    try:
+        return _atomic_io.atomic_write(
+            path, data, expected_sha256=expected_sha256,
+            retry_transient=retry_transient,
+            prepare_temp=_private if private_permissions else None)
+    except _atomic_io.AtomicPublicationConflict as exc:
+        raise ConfigurationConflict(str(exc)) from exc
 
 
 def _write_manifest(path: Path, manifest: dict) -> None:
@@ -311,7 +325,7 @@ def apply(prepared: PreparedConfig, *, backup_dir: str | Path) -> ConfigCheckpoi
         raise ConfigurationError("Prepared configuration hash does not match content")
     root = Path(backup_dir).absolute()
     for part in [root, *root.parents]:
-        if part.is_symlink() or (hasattr(part, "is_junction") and part.is_junction()):
+        if _is_link_or_reparse(part):
             raise ConfigurationError("backup_dir must not traverse a symlink or junction")
     root.mkdir(parents=True, exist_ok=True)
     checkpoint_dir = root / uuid4().hex
@@ -332,7 +346,8 @@ def apply(prepared: PreparedConfig, *, backup_dir: str | Path) -> ConfigCheckpoi
     if not _matches(config, prepared.before_sha256):
         raise ConfigurationConflict("Config changed while backing up; nothing applied")
     if prepared.changed:
-        _atomic_write(config, prepared.rendered_text.encode("utf-8"))
+        _atomic_write(config, prepared.rendered_text.encode("utf-8"),
+                      expected_sha256=prepared.before_sha256, retry_transient=True)
     manifest["state"] = "applied"
     _write_manifest(manifest_path, manifest)
     return ConfigCheckpoint(manifest_path, config, prepared.before_sha256, prepared.after_sha256,
@@ -408,27 +423,95 @@ def _created_tables(before, after, path=()):
     return result
 
 
+def _item_comments(value, *, include_outer=True):
+    """Read actual TOML trivia, including comments inside arrays and inline tables."""
+    from tomlkit.container import Container
+    from tomlkit.items import AoT, Array, InlineTable, Item, Table, Whitespace
+
+    if isinstance(value, Whitespace):
+        return
+    if isinstance(value, Item):
+        # Implicit parents share the explicit child's header trivia.
+        implicit = isinstance(value, Table) and value.is_super_table()
+        comment = getattr(value.trivia, "comment", "")
+        if comment and not implicit and include_outer:
+            yield comment
+        if isinstance(value, Array):
+            # This is the same token iterator used by the pinned tomlkit renderer.
+            for child in value._iter_items():
+                yield from _item_comments(child)
+        elif isinstance(value, AoT):
+            for child in value.body:
+                yield from _item_comments(child)
+        elif isinstance(value, (Table, InlineTable)):
+            yield from _item_comments(value.value)
+    elif isinstance(value, Container):
+        for _, child in value.body:
+            yield from _item_comments(child)
+
+
+def _comment_identity(comment):
+    # Header rendering historically normalizes spacing after the first '#'.
+    # Subsequent '#' characters and duplicate annotations remain significant.
+    return comment[1:].strip() if comment.startswith("#") else comment
+
+
+def _retain_removed_comments(table, comments, replacement):
+    """Keep lost current annotations as standalone document-footer comments."""
+    from collections import Counter
+    from tomlkit.items import Comment, Trivia
+
+    retained = Counter(_comment_identity(item) for item in _item_comments(replacement))
+    for comment in comments:
+        key = _comment_identity(comment)
+        if retained[key]:
+            retained[key] -= 1
+        else:
+            # Keep the complete comment, including additional '#' characters and duplicates.
+            table.add(Comment(Trivia(comment=comment, trail="\n")))
+
+
+def _syntax_at(document, parts):
+    """Read syntax items without the proxy mapping's boolean unwrapping."""
+    from tomlkit.container import OutOfOrderTableProxy
+
+    for part in parts:
+        if isinstance(document, OutOfOrderTableProxy):
+            # The pinned renderer uses this container to retain raw item trivia.
+            document = document._internal_container
+        document = document.item(part)
+    return document
+
+
 def _prune_created_tables(document, created_tables, path=()):
+    from copy import deepcopy
+    from tomlkit.container import Container
+    from tomlkit.items import Comment, InlineTable, Table, Trivia
+
     for key in list(document):
         value = document[key]
         if not isinstance(value, dict):
             continue
         _prune_created_tables(value, created_tables, (*path, key))
         if not value and (*path, key) in created_tables:
-            # TOML attaches trailing comments to the preceding table. Move those
-            # comments to its parent before dropping a table created by us.
-            from copy import deepcopy
-            from tomlkit.items import Comment, Table
-            comments = [deepcopy(item) for _, item in value.value.body if isinstance(item, Comment)]
-            # Implicit parent tables share the real child header trivia in tomlkit.
-            # Only an explicit header owns that comment; keep intentional duplicates.
-            header_comment = ("" if isinstance(value, Table) and value.is_super_table()
-                              else value.trivia.comment)
+            comments = []
+            header_comment = ""
+            if isinstance(value, (Table, InlineTable)):
+                comments = [deepcopy(item) for _, item in value.value.body if isinstance(item, Comment)]
+                header_comment = ("" if isinstance(value, Table) and value.is_super_table()
+                                  else value.trivia.comment)
             del document[key]
-            if header_comment:
-                document.add(tomlkit.comment(header_comment.lstrip('#').strip()))
-            for comment in comments:
-                document.add(comment)
+            # Preserve the preceding renderer's normal Table layout and its
+            # strict C/R byte proofs. Proxy/inline destinations use the footer
+            # conservation pass instead of unsupported comment insertion.
+            if isinstance(document, (Container, Table)):
+                if header_comment:
+                    rendered = tomlkit.comment(header_comment.lstrip("#").strip())
+                    if _comment_identity(header_comment) != _comment_identity(rendered.trivia.comment):
+                        rendered = Comment(Trivia(comment=header_comment, trail="\n"))
+                    document.add(rendered)
+                for comment in comments:
+                    document.add(comment)
 
 
 def _three_way_bytes(original, applied, current, declared):
@@ -467,11 +550,16 @@ def _three_way_bytes(original, applied, current, declared):
     if current == applied:
         return original
     if current is None:
-        if pending:
+        # File existence is part of the original state, including empty/comment-only TOML.
+        if original is not None or pending:
             raise ConfigurationConflict("Config was removed after apply; refusing later edits")
         return None
     text = current.decode("utf-8-sig")
     document = tomlkit.parse(text)
+    current_comments = list(_item_comments(document))
+    original_document = tomlkit.parse(original.decode("utf-8-sig")) if original is not None else None
+    original_comments = []
+    from collections import Counter
     for parts, prior in pending:
         table = document
         for part in parts[:-1]:
@@ -481,8 +569,24 @@ def _three_way_bytes(original, applied, current, declared):
         if prior is _MISSING:
             table.pop(parts[-1], None)
         else:
+            current_item = _syntax_at(table, (parts[-1],)) if parts[-1] in table else None
+            retained = Counter(_comment_identity(item) for item in _item_comments(current_item, include_outer=False))
+            for comment in _item_comments(_syntax_at(original_document, parts), include_outer=False):
+                key = _comment_identity(comment)
+                if retained[key]:
+                    retained[key] -= 1
+                else:
+                    original_comments.append(comment)
+            # Keep the established value renderer so valid older C/R byte proofs
+            # remain reproducible; recover B's internal annotations separately.
             table[parts[-1]] = prior
     _prune_created_tables(document, _created_tables(before, after))
+    # Native proxy deletion may remove empty physical fragments. Retain every
+    # current comment token that disappeared anywhere, including its multiplicity.
+    _retain_removed_comments(document, current_comments, document)
+    # Add B annotations only after conserving C, so equal unrelated C comments
+    # cannot mask a missing annotation from the restored owned value.
+    _retain_removed_comments(document, original_comments, None)
     rendered = tomlkit.dumps(document)
     if original is None and not rendered.strip():
         return None
@@ -622,7 +726,8 @@ def restore(manifest_path: str | Path) -> RestoreResult:
         if restored is None:
             config.unlink(missing_ok=True)
         elif restored != current:
-            _atomic_write(config, restored)
+            _atomic_write(config, restored,
+                          expected_sha256=current_hash, retry_transient=True)
         restored_hash = _digest(restored) if restored is not None else None
         manifest["state"] = "restored"
         manifest["restored_sha256"] = restored_hash

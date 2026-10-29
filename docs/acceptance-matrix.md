@@ -6,6 +6,48 @@ establish App runtime parity. Each passing row needs a concrete receipt and an
 independent assertion against actual state. Unknown and not-run rows block stable
 release when they are in the agreed scope.
 
+## Current evidence pointer
+
+The detailed C-run ledger below is historical and deliberately retains its
+original failures and then-open assertions. Current combination, per-component
+carry, bounded remaining gates and retained failures are tracked in
+[qualification-status.md](qualification-status.md).
+
+The actual signed App has now loaded N CLI `1dbf68a2...` with the original J
+helper/runner/probe and installed r4 manifest `1c4da3f7...`. R4 still uses published
+CDS 0.6.6 commit `d2edfa2a49dd9879d45375e7770ff8bd2ec3d753` and its 1,307 unique
+installed software cases remain separate from App parity. Historical M/r4
+completed the Jinja task with 908 official tests, 22 independent checks and a
+native-written report; its 79 sealed references were independently reviewed.
+The original failed windows remain failed, not relabeled as N executions.
+
+Historical M/r4 V2 interrupt/same-child follow-up is separately evidenced. A05
+selective two-session termination passed: A ended after one native Ctrl-C while
+original B continued and naturally exited0. Its first missed-cancellation attempt
+and observer2 missing B final kernel time remain explicit limitations.
+A03 native RankedSearch/schema/read-only-call and A11 same-child V1 warm/cold
+close/resume have passed their scoped actual cases. A09's original M/v2 defect
+is retained; N/r4 has now completed two consecutive actual cold capacity
+recoveries and manual GUI compaction. Full source-backed summary-prefix,
+unconsumed-suffix and checkpoint checks passed on the existing V1 root.
+
+A21 target-3 warm/revoke/grant passed the original strict validator; cache refresh
+and expiry have separate scoped evidence, with older full-criterion failures
+retained. Fresh-V2 N/r4 GUI Stop now interrupted its exact native turn. A separate
+original App background-terminal control terminated the retained resumable
+process early. The previous must-kill-on-turnStop assumption and missed QA
+windows remain recorded; the cancellation/process files match fixed upstream.
+Gateway recovery, changed weather/domain/cold-reference paths, A26 conditional
+native availability and final r5 release/lifecycle binding remain open. Guardian,
+memory, queues, web and other unchanged components retain scoped historical
+receipts, not a claim of a full N rerun.
+Actual web.run open/find/click and browser preview do not qualify IAB.
+
+The native hash in the initial baseline is the original bundled runtime.
+Current N and J source producers, plus historical M, are recorded per executable in the qualification
+ledger and [native-build.md](native-build.md). An unchanged upstream version
+alone does not establish byte identity or automatically transfer acceptance.
+
 ## Fixed baseline
 
 - Windows 10 Pro 19045, existing admin interactive session; no desktop takeover.
@@ -14,14 +56,17 @@ release when they are in the agreed scope.
   `680c4ba93ec79c292287fb9e0b627dc7a76e3b5e`.
 - Native SHA256 `e757246b4de87359e660647fa9514955a0971ff6a30affdd8c145d1d5ece7b84`.
 - OpenRouter request model `deepseek/deepseek-v4.1-flash-1017`.
-- Protocol dependency commit `83056e7cf320461c30a609e911f3bcf0bea41be0`.
+- Historical c110 protocol dependency commit `4f24af36f62c538ba35817ad48aa49d4308220b5`.
+- Current source pin: published CDS 0.6.7 / `cb788738864e97a16cde82f3c584164162ab6f7c`;
+  current r4 installation still uses the separately bound 0.6.6 input; r5 installation is pending.
+  The pin does not relabel earlier installed/App evidence or close other gates.
 
 Provider route selection is explicit and precedes sending the request. The
 requested provider is not proof of the served provider. Compatibility providers
 must be present in the operator's allowlist; upstream errors never trigger an
 implicit model or provider switch.
 
-## Required gates
+## Historical C-run gate ledger (not final H qualification)
 
 | Gate | Mechanisms and assertions | Current evidence level |
 | --- | --- | --- |
@@ -62,7 +107,7 @@ host. Model intelligence, model-inherent modalities, and cloud/account entitleme
 are reported separately. Windows 10 tests do not establish Windows 11 MXC support.
 No feature is silently disabled to turn a failing gate into a passing one.
 
-## Latest recorded execution evidence
+## Historical C-run execution evidence
 
 The first App turn was rejected because the native default cached-search contract
 cannot be supplied by Exa. The second turn, after explicitly selecting live
@@ -139,7 +184,7 @@ retained; successful relaunch does not erase them. The private namespace provisi
 receipt and `private-sandbox-after-first-live-shell.json` show unchanged shared
 account SIDs/password timestamps, group, firewall/WFP and RegisteredCore state.
 
-Task A root is `01a16569-433b-77d2-ac96-fbc443ecf39a`. Its database source and first
+Task A root is `historical-private-engineering-root`. Its database source and first
 own session metadata establish the real child and grandchild relationships. Forked
 history contains copied parent metadata, so taking the last session_meta would
 misattribute a child. Agent messages and tool results are assigned by their own
@@ -163,7 +208,7 @@ One cleanup command returned exit code zero while PowerShell reported Permission
 and Test-Path remained true. That command was not a successful deletion. Its original
 arguments lacked require_escalated; Allow once did not silently widen the whole thread.
 
-Task B root is `01a1659c-4eb1-7b41-8ad6-8753e1185c3e`. Its own first turn recorded
+Task B root is `historical-private-task-1`. Its own first turn recorded
 17 successful local MCP calls, 39 native web Extension items, and a separately spawned
 read-only child. Search selected an OpenRouter official document; opening it, finding
 text within that returned document, and clicking its real link ID succeeded. Attempts

@@ -1,5 +1,6 @@
 """Gateway and explicit one-shot App entrypoints; no agent runtime supervision."""
 from __future__ import annotations
+from .paths import _is_link_or_reparse
 import argparse
 import getpass
 import json
@@ -58,23 +59,14 @@ def _service_lease(home: Path, *, lock_name: str = "service.lock"):
 
 
 def _write_service_record(home: Path, record: dict):
-    import tempfile
-    from .app_config import _private
-    fd, name = tempfile.mkstemp(prefix=".service-", suffix=".tmp", dir=home)
-    pending = Path(name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            _private(pending)
-            json.dump(record, handle, indent=2)
-            handle.flush(); os.fsync(handle.fileno())
-        os.replace(pending, home / "service.json")
-    finally:
-        pending.unlink(missing_ok=True)
+    from .app_config import _atomic_write
+    # Preserve the existing service-record wire bytes (no trailing newline).
+    _atomic_write(home / "service.json", json.dumps(record, indent=2).encode("utf-8"))
 
 
 def _image_cache_home(home: Path) -> Path:
     path = home / "image-transport"
-    if path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
+    if _is_link_or_reparse(path):
         raise ServiceConfigError("Image transport directory cannot be a link or junction")
     if path.exists() and not path.is_dir():
         raise ServiceConfigError("Image transport directory must be a directory")
@@ -133,7 +125,7 @@ def serve(home: Path, port: int):
     config = load_service_config(home)
     transport_factory = image_transport_factory(home, config)
     web_home = home / "web-data"
-    if web_home.is_symlink() or (hasattr(web_home, "is_junction") and web_home.is_junction()):
+    if _is_link_or_reparse(web_home):
         raise ServiceConfigError("Web data directory cannot be a link or junction")
     from aiohttp import web
     from .bridge import BridgeSettings, create_app
@@ -155,10 +147,17 @@ def serve(home: Path, port: int):
         _private(web_home, directory=True)
         web_store = WebSourceStore(web_home / "sources.sqlite")
         resources.callback(web_store.close)
+        fetcher = PublicDocumentFetcher(ssl_context=context)
+        policy_backend = None
+        if config.web_search_backend == "firecrawl":
+            from .firecrawl_backend import FirecrawlBackend
+            policy_backend = FirecrawlBackend(ssl_context=context, fetcher=fetcher)
         backend = WebBackend(
             web_store,
-            OpenRouterSearch(lambda: read(UPSTREAM_TARGET), ssl_context=context, proxy_url=config.upstream_proxy),
-            PublicDocumentFetcher(ssl_context=context),
+            OpenRouterSearch(lambda: read(UPSTREAM_TARGET), ssl_context=context, proxy_url=config.upstream_proxy)
+                if policy_backend is None else None,
+            fetcher,
+            policy_backend=policy_backend,
             accepted_models=config.accepted_models,
             image_search=WikimediaImageSearch(ssl_context=context)
                          if config.image_search_backend == "wikimedia_commons" else None,
@@ -197,7 +196,32 @@ def serve(home: Path, port: int):
                     handler_cancellation=True, access_log=None, print=None)
 
 
+def _validate_catalog_agent_version(path: Path, version: str) -> str:
+    """Bind an explicit native mode to the same bytes later configured."""
+    import hashlib
+    from .catalog import PINNED_MODEL
+    try:
+        raw = path.read_bytes()
+        catalog = json.loads(raw.decode("utf-8-sig"))
+    except (OSError, UnicodeError, ValueError) as error:
+        raise ServiceConfigError("Model catalog must contain readable JSON") from error
+    models = catalog.get("models") if isinstance(catalog, dict) else None
+    if not isinstance(models, list) or any(not isinstance(model, dict) for model in models):
+        raise ServiceConfigError("Model catalog must contain a models array")
+    main = [model for model in models if model.get("slug") == PINNED_MODEL]
+    visible = [model for model in models if model.get("visibility") == "list"]
+    if len(main) != 1 or visible != main:
+        raise ServiceConfigError("Catalog must contain one unique visible pinned DeepSeek model")
+    if main[0].get("multi_agent_version") != version:
+        raise ServiceConfigError(
+            "Catalog native agent version must match --multi-agent-version; "
+            "build the selected catalog explicitly and start a fresh chat")
+    return hashlib.sha256(raw).hexdigest()
+
+
 def main(argv=None):
+    agent_version_help = ("Native agent version matching the supplied catalog (default: v2). "
+                          "V1 is explicit opt-in for a fresh chat; existing chats retain their recorded version.")
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version",action="version",version=__version__)
     sub=parser.add_subparsers(dest="command",required=True)
@@ -205,6 +229,7 @@ def main(argv=None):
     command=sub.add_parser("setup-credentials");command.add_argument("--import-existing-cds",action="store_true")
     command=sub.add_parser("health");command.add_argument("--port",type=int,default=42817)
     command=sub.add_parser("configure-app");command.add_argument("--config",type=Path,default=default_home().parent/"codex-app-deepseek-app/config.toml");command.add_argument("--catalog",type=Path,required=True);command.add_argument("--backup-dir",type=Path,default=default_home()/"config-backups");command.add_argument("--port",type=int,default=42817)
+    command.add_argument("--multi-agent-version", choices=("v1", "v2"), default="v2", help=agent_version_help)
     command=sub.add_parser("restore-app");command.add_argument("manifest",type=Path)
     sub.add_parser("auth-token",help="Official command-backed App authentication; stdout contains only the local gateway token")
     for name in ("image-cache-status", "image-cache-cleanup", "image-cache-reconcile-uploads", "image-cache-reconcile-calls"):
@@ -222,6 +247,7 @@ def main(argv=None):
         if name == "app-configure":
             command.add_argument("--catalog", type=Path, required=True)
             command.add_argument("--catalog-sha256", required=True)
+            command.add_argument("--multi-agent-version", choices=("v1", "v2"), default="v2", help=agent_version_help)
             command.add_argument("--port", type=int, default=42817)
         if name == "service-start":
             command.add_argument("--port", type=int, default=42817)
@@ -237,6 +263,10 @@ def main(argv=None):
     from .image_transport import ImageTransportError
     from .image_call_reconciliation import CallReconciliationError
     try:
+        if args.command in {"configure-app", "app-configure"}:
+            selected_catalog_sha = _validate_catalog_agent_version(args.catalog, args.multi_agent_version)
+            if args.command == "app-configure" and selected_catalog_sha != args.catalog_sha256:
+                raise ServiceConfigError("Model catalog SHA256 mismatch")
         if args.command in {"service-start", "service-stop", "diagnose"} or args.command.startswith("app-"):
             from . import app_delivery as delivery
             from . import lifecycle
@@ -288,6 +318,8 @@ def main(argv=None):
             from .app_config import prepare,apply
             command=Path(sys.prefix)/"Scripts/codex-app-deepseek.exe"
             prepared=prepare(args.config,catalog_path=args.catalog,auth_command=str(command),port=args.port)
+            if prepared.catalog_sha256 != selected_catalog_sha:
+                raise ServiceConfigError("Model catalog changed after native agent version validation; nothing applied")
             result=apply(prepared,backup_dir=args.backup_dir)
             print(json.dumps(dataclasses.asdict(result),default=str));return 0
         if args.command=="restore-app":

@@ -5,10 +5,42 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+
+from .paths import _sqlite_filename
 import time
 import uuid
 
 from codex_deepseek.protocol import ProtocolError, native_history_fingerprint
+
+
+def _argument_diagnostics(events):
+    """Copy only the fixed protocol's bounded, hash-only observation contract."""
+    summary = getattr(events, "diagnostic_summary", None) if events else None
+    if summary is None:
+        return None
+    value = summary()
+    if not isinstance(value, dict) or set(value) != {"total_count", "truncated", "records"}:
+        raise ValueError("Invalid tool-argument diagnostic summary")
+    total, truncated, records = value["total_count"], value["truncated"], value["records"]
+    if (type(total) is not int or not 0 <= total <= 2**31 - 1 or type(truncated) is not bool
+            or not isinstance(records, list) or len(records) != min(total, 16)
+            or truncated != (total > 16)):
+        raise ValueError("Invalid tool-argument diagnostic bounds")
+    fields = {"reason", "item_sha256", "call_sha256", "preview_arguments_sha256",
+              "candidate_arguments_sha256", "hash_encoding"}
+    reasons = {"producer_append_constraint_violation", "invalid_uncommitted_custom_preview"}
+    copied = []
+    for record in records:
+        if (not isinstance(record, dict) or set(record) != fields
+                or record["reason"] not in reasons or record["hash_encoding"] != "utf8-surrogatepass"):
+            raise ValueError("Invalid tool-argument diagnostic record")
+        for name in fields - {"reason", "hash_encoding"}:
+            digest = record[name]
+            if (not isinstance(digest, str) or len(digest) != 64
+                    or any(c not in "0123456789abcdef" for c in digest)):
+                raise ValueError("Invalid tool-argument diagnostic hash")
+        copied.append(dict(record))
+    return {"total_count": total, "truncated": truncated, "records": copied}
 
 
 class ProtocolState:
@@ -19,7 +51,7 @@ class ProtocolState:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.instance_id = str(uuid.uuid4())
         self._closed = False
-        self._lock = self.path.with_suffix(self.path.suffix + ".lock").open("a+b")
+        self._lock = open(_sqlite_filename(self.path.with_suffix(self.path.suffix + ".lock")), "a+b")
         self._lock.seek(0, os.SEEK_END)
         if self._lock.tell() == 0:
             self._lock.write(b"0")
@@ -36,7 +68,7 @@ class ProtocolState:
             self._lock.close()
             raise RuntimeError("Another gateway owns this protocol database") from exc
         try:
-            self.db = sqlite3.connect(self.path, timeout=30)
+            self.db = sqlite3.connect(_sqlite_filename(self.path), timeout=30)
             self.db.row_factory = sqlite3.Row
             if self.db.execute("PRAGMA user_version").fetchone()[0] > 3:
                 raise RuntimeError("Protocol database requires a newer gateway")
@@ -152,6 +184,7 @@ class ProtocolState:
                     fingerprint = native_history_fingerprint(normalized)
                     if fingerprint:
                         fingerprints.append((normalized["id"], fingerprint, key, events.response_id))
+        diagnostics = _argument_diagnostics(events)
         with self.db:
             changed = self.db.execute(
                 """UPDATE receipts SET finished=?,status=?,upstream_status=?,response_id=?,usage=?,detail=?
@@ -161,6 +194,12 @@ class ProtocolState:
             ).rowcount
             if changed:
                 self.db.executemany("INSERT OR IGNORE INTO completed_native_evidence VALUES (?,?,?,?)", fingerprints)
+                if diagnostics is not None and diagnostics["total_count"] > 0:
+                    row = self.db.execute("SELECT adaptations FROM receipts WHERE id=?", (key,)).fetchone()
+                    adaptations = json.loads(row["adaptations"])
+                    adaptations["tool_argument_diagnostics"] = diagnostics
+                    self.db.execute("UPDATE receipts SET adaptations=? WHERE id=?",
+                                    (json.dumps(adaptations, allow_nan=False), key))
         return bool(changed)
 
     def image_transport(self, key, **updates):

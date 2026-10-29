@@ -1,8 +1,20 @@
 # Native web runtime path and backend acceptance
 
-Audit date: 2026-10-22. Native source: `680c4ba93ec79c292287fb9e0b627dc7a76e3b5e` (release tag `rust-v0.163.0-alpha.11.1`). Pure CDS protocol dependency: `83056e7cf320461c30a609e911f3bcf0bea41be0`.
+Audit date: 2026-10-22. Native source: `680c4ba93ec79c292287fb9e0b627dc7a76e3b5e` (release tag `rust-v0.163.0-alpha.11.1`). Pure CDS protocol dependency (historical audit pin): `4f24af36f62c538ba35817ad48aa49d4308220b5`.
 
-This is a source audit and implementation boundary, not a claim that web acceptance passed. The first App request rejected cached search, and a later request rejected the inherited text-and-image hosted-search declaration. Those failures remain evidence. A separate shared-machine sandbox-account incident has paused App execution; no additional sandbox, credential, setup, or live provider probes should run until the owner resumes them.
+The current source dependency is published CDS0.6.7 / cb788738864e97a16cde82f3c584164162ab6f7c. Four protocol behavior modules remain byte-identical to r4; structured.py now recognizes dispatchable native client tool-search intermediates while retaining final JSON validation, and __init__.py records the package version. All six actual source/wheel hashes are pinned. Installed r4 still uses0.6.6; new App/web acceptance is not inferred from this source update.
+
+Current scope clarification (2026-10-28): acceptance concerns the local runtime
+mechanisms available in the fixed Windows App. Private financial-quote and sports
+cloud services are separately unavailable; they are neither functional passes
+nor requirements to add replacement business-data adapters for local-runtime
+qualification. Search, opening pages, in-page finding, following links and their
+agreed policy parameters remain in scope. Unsupported semantics must fail
+explicitly, never silently broaden into another mode. The historical full-schema
+requirements and failures below remain unchanged as originally recorded. Native
+web.run and browser preview do not qualify App IAB/computer interaction.
+
+This is a source audit and implementation boundary, not a claim that web acceptance passed. The first App request rejected cached search, and a later request rejected the inherited text-and-image hosted-search declaration. Those failures remain evidence. The shared-machine sandbox-account incident described in the historical section was subsequently repaired by the namespace-scoped runtime; the current combination and component-specific qualification remain tracked in the acceptance matrix.
 
 ## What the native runtime actually does
 
@@ -137,7 +149,7 @@ Sources downloaded on Windows:
 
 Two authorized, bounded protocol probes used the fixed model, official DeepSeek route, one server-tool step, 512 output tokens, and a public official documentation domain. Both returned routing HTTP 404 before producing a generation id. They used `tool_choice=required`, which does not match this integration's known official-DeepSeek tool-choice constraints. They establish neither successful tool execution nor absence of raw tool results. Evidence: `.evidence/web-server-tool-real-probes.json`; runner `223c1ed86728446a85211e4a5654d2dc` exited and deleted its owned scheduled task.
 
-A later, separately authorized corrected probe should use supported/default auto tool choice, inspect the exact server-tool item and raw-source fields, and keep strict route/engine selection. No tool invocation means inconclusive. A model-written answer with citations is not raw page evidence. Capture sanitized routing error codes and step names; do not automatically retry or change providers. Further live probes are currently paused.
+A later, separately authorized corrected probe should use supported/default auto tool choice, inspect the exact server-tool item and raw-source fields, and keep strict route/engine selection. No tool invocation means inconclusive. A model-written answer with citations is not raw page evidence. Capture sanitized routing error codes and step names; do not automatically retry or change providers. Further probes were paused at that historical checkpoint. Later configured backend and actual App results are recorded separately in the current qualification ledger.
 
 Implementation choices, in order:
 
@@ -150,9 +162,18 @@ Implementation choices, in order:
 
 The route adapter must validate the entire supplied command set and settings before outbound work, preserve explicit failures, and retain operation-level provenance. It must not infer a new task from the conversation, spawn subagents, implement model scheduling, or modify native approval decisions.
 
-## Required real acceptance
+## Historical full-schema acceptance plan
 
-These checks are required after the shared environment is cleared for execution; none is claimed passed by this document.
+The original service investigation retained the following full-schema plan.
+It is not the current completion checklist; actual results and remaining local
+runtime gates are tracked in [qualification-status.md](qualification-status.md).
+The agreed current scope excludes private financial quotes and sports cloud
+feeds, which remain separately unconnected and are not counted as passes.
+Their fields below retain the historical external-service contract; they do not
+require a new third-party finance/sports adapter. Search, navigation, tool
+identity, permissions, source ownership and error handling remain in scope.
+The changed weather backend still needs its own actual App check. No operation
+is qualified merely by appearing in this list.
 
 1. **Native admission:** App's actual effective catalog contains the native web.run schema, including every command; hosted web_search is absent when standalone is selected. Record the exact binary/config versions and sanitized tool catalog.
 2. **Search:** App-generated native web.run requests reach alpha/search; real search evidence and query/domain/recency controls are verified, with authentic backend/provider receipts. Search snippets alone do not pass open.
@@ -165,3 +186,29 @@ These checks are required after the shared environment is cleared for execution;
 9. **Side effects and billing:** A valid earlier operation may already have fetched or incurred cost before a later failure. Lack of a final success marker does not imply no work occurred. Use fixture/server counters and receipts where necessary.
 
 All source copies used for this audit are under `.evidence/web-runtime-source`; they are small text-only reads of fixed native sources or primary provider documentation. The audit did not alter the bridge service, App configuration, sandbox, or native tool execution.
+
+## Native fork and cold-resume reference namespaces
+
+The authenticated native x-codex-turn-metadata header binds session_id to the
+SearchRequest id and thread_id to its persistent document-cache namespace.
+A native fork grants the child a one-time snapshot of immutable references
+already visible in its parent's namespace. Cold resume retains that grant;
+a later fork can inherit the parent's existing grants. A fork's newly retrieved
+sources are not granted back to its parent or to sibling forks. Unrelated
+sessions still receive unknown_reference. Every access, including a retained
+or inherited reference, applies the request's current domain and public-URL
+policy before using source bytes.
+
+This is public-document cache inheritance, not reconstruction of chat history.
+The native forked_from_ordinal_exclusive value is retained only to check that
+the native lineage has not changed. It is not compared with the gateway's source
+sequence and is not evidence that a document occupied a particular chat-history
+ordinal. The native runtime continues to own full/partial fork history clipping.
+Model input, response text, and native databases never authorize a grant.
+
+Existing stores remain readable. Legacy root references can be inherited because
+a native root's session ID equals its thread ID. Unknown legacy subthread-to-root
+mappings are not guessed. No missing reference triggers a replacement search or
+an implicit URL fetch. Installation and unit tests alone do not establish the
+final App fork/cold-resume gate; that requires the pinned App to reuse its original
+reference after deployment.

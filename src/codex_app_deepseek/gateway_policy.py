@@ -25,6 +25,7 @@ class ServiceConfig:
     native_version: str | None = None
     native_sha256: str | None = None
     image_search_backend: str | None = None
+    web_search_backend: str = "openrouter_exa"
     image_transport: dict | None = None
     policy_origin: dict | None = None
     config_sha256: str | None = None
@@ -102,7 +103,7 @@ def load_service_config(home: Path) -> ServiceConfig:
         raise ServiceConfigError("gateway.json must contain a JSON object")
     allowed_fields = {"accepted_models", "allowed_providers", "upstream_proxy",
                       "app_version", "native_version", "native_sha256",
-                      "image_search_backend", "image_transport", "policy_origin"}
+                      "image_search_backend", "image_transport", "policy_origin", "web_search_backend"}
     if set(config) - allowed_fields:
         raise ServiceConfigError("gateway.json contains unsupported configuration fields")
     models = _config_names(config, "accepted_models", (MODEL,))
@@ -134,6 +135,9 @@ def load_service_config(home: Path) -> ServiceConfig:
                 raise ServiceConfigError("native_sha256 must be a 64-character hexadecimal digest")
             value = value.lower()
         metadata[key] = value
+    web_search = config.get("web_search_backend", "openrouter_exa")
+    if web_search not in ("openrouter_exa", "firecrawl"):
+        raise ServiceConfigError("web_search_backend must be openrouter_exa or firecrawl")
     image_search = config.get("image_search_backend")
     if image_search not in (None, "wikimedia_commons"):
         raise ServiceConfigError("image_search_backend must be null or wikimedia_commons")
@@ -151,19 +155,20 @@ def load_service_config(home: Path) -> ServiceConfig:
     if origin is not None and origin != DEFAULT_POLICY_ORIGIN:
         raise ServiceConfigError("gateway.json has an unrecognized policy_origin")
     return ServiceConfig(models, providers, proxy, **metadata,
-                         image_search_backend=image_search, image_transport=image_policy, policy_origin=origin,
+                         image_search_backend=image_search, web_search_backend=web_search,
+                         image_transport=image_policy, policy_origin=origin,
                          config_sha256=hashlib.sha256(raw).hexdigest() if raw is not None else None)
 
 
 
 # This is the complete route set reachable in pinned protocol.prepare() at
-# 83056e7: ordinary DeepSeek, strict/peer+hosted Morph, explicit serial Prime.
+# published CDS 0.6.7 / cb78873: DeepSeek, strict/peer+hosted Morph, explicit serial Prime.
 # It is metadata, not a second routing implementation.
 DEFAULT_PROVIDERS = ("deepseek", "morph/fp8", "primeintellect")
 DEFAULT_POLICY_ORIGIN = {
     "policy_id": "codex-app-680c4-full-runtime-v1",
     "native_version": NATIVE_VERSION,
-    "protocol_commit": "83056e7cf320461c30a609e911f3bcf0bea41be0",
+    "protocol_commit": "cb788738864e97a16cde82f3c584164162ab6f7c",
     "provider_reasons": {
         "deepseek": "official_default",
         "morph/fp8": "strict_json_schema_or_native_peer_history_with_hosted_tools",
@@ -178,8 +183,12 @@ def default_app_policy():
 
 
 def require_app_policy(config, catalog_models=None):
-    if not set(REQUEST_MODEL_IDS) <= set(config.accepted_models):
-        raise ServiceConfigError("Gateway policy lacks the fixed App main/Guardian aliases; update the explicit policy")
+    missing = sorted(set(REQUEST_MODEL_IDS) - set(config.accepted_models))
+    if missing:
+        raise ServiceConfigError(
+            "Gateway policy lacks fixed App/runtime aliases: " + ", ".join(missing)
+            + "; explicitly update accepted_models and the matching immutable catalog. "
+              "Existing policy bytes were not expanded.")
     if not set(DEFAULT_PROVIDERS) <= set(config.allowed_providers):
         raise ServiceConfigError("Gateway policy lacks required native schema/serial/default routes; update the explicit allowlist")
     if catalog_models is not None and set(config.accepted_models) != set(catalog_models):

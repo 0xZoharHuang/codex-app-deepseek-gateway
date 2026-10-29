@@ -10,11 +10,14 @@ The PowerShell examples below remain low-level development/diagnostic entrypoint
 the same script and fixed baseline are packaged in the wheel, so installed app-launch
 does not refer to this source checkout.
 
-**Current validation is launcher fixtures, package/resource verification, and a
-harmless packaged Python child. Actual App UI, runtime behavior, frontend storage,
-and failure recovery remain separate acceptance gates.** A launch receipt that says
-`started_expected_backend` only proves the expected child executable and home were
-observed. It is not a complete App acceptance result.
+**The initial launcher-only qualification used fixtures, package/resource
+verification and a harmless packaged Python child.** Later signed-App launches
+and scoped runtime/UI results are recorded in the
+[current qualification ledger](qualification-status.md); they do not turn the
+initial fixture result into complete App acceptance. A launch receipt that says
+`started_expected_backend` only proves the expected child executable and home
+were observed. Frontend storage, native behavior and failure recovery require
+their own actual App evidence.
 
 ## Fixed inputs
 

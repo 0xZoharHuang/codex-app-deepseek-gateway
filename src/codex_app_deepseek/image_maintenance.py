@@ -1,5 +1,6 @@
 """Bounded, image-file-only TTL maintenance for the gateway HTTP lifetime."""
 from __future__ import annotations
+from .paths import _is_link_or_reparse
 import asyncio
 from contextlib import suppress
 from datetime import timezone
@@ -67,7 +68,7 @@ class ImageMaintenance:
         if any(type(v) not in {float,int} or not math.isfinite(v) or v<=0 for v in (interval_seconds,timeout_seconds)) or type(max_assets) is not int or not 1<=max_assets<=2:
             raise ValueError('Image maintenance limits are invalid')
         self.path=Path(path)
-        if not self.path.is_absolute() or any(p.is_symlink() or (hasattr(p,'is_junction') and p.is_junction()) for p in (self.path,*self.path.parents)):
+        if not self.path.is_absolute() or any(_is_link_or_reparse(p) for p in (self.path,*self.path.parents)):
             raise ImageMaintenanceError('Image maintenance state must be a private regular path')
         self.factory=factory;self.interval=interval_seconds;self.timeout=timeout_seconds;self.max_assets=max_assets;self.clock=clock
         self.task=None;self.failure=None

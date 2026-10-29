@@ -60,6 +60,42 @@ username string in a payload cannot select an existing global sandbox account.
 The rule predicates, protocol/port restrictions, WFP layers and filter conditions,
 rights masks, token privileges, and command lifetime algorithms remain upstream's.
 
+## Current J metadata and uninstall boundary
+
+J keeps the existing per-home sandbox namespace, token admission, network
+policy and approval mechanisms. Its extra metadata path grants only
+non-inheriting FILE_READ_ATTRIBUTES for current authorized paths. It retains
+physical object and home identity, no-reparse/no-delete-share pins, owner and
+WRITE_DAC checks, effective-deny checks and existing mutation locks.
+
+The current group SID must fresh-match the expected local SAM alias, and the
+two local sandbox user SIDs participate in denial checks. Home itself and its
+ancestors use that same path. Group membership remains the native runner's
+actual-token admission responsibility.
+
+The extra history ledger and automatic metadata revoke have been removed.
+Historical paths, malformed old files, old SID records or deleted IDs do not
+authorize new grants or block setup; J leaves those files unchanged.
+No raw-volume NTFS lookup or private perfect-ACL-recovery engine is required.
+Native deny-read policy state and stale managed-deny removal remain active.
+
+The actual project CLI cleanup delegates to the native None-home uninstaller.
+It disables/retire its own accounts and workloads, removes owned network
+resources and principals, and preserves user files and filesystem permissions.
+It does not restore an old DACL or claim zero leftover permission entries.
+The original signed App's shared sandbox resources remain outside this namespace.
+
+Original App configuration/binding rollback still uses the existing checkpoint
+mechanism. Downgrading to development H/I is separate: those versions cannot
+know later unjournaled grants, even though old ledger bytes are retained.
+The unsupported Some-home packaged/service path must not inherit an audit-file
+preservation claim from this CLI-specific behavior.
+
+J's source replay and related 32 default Low-token tests plus one separate
+read-only namespace-subject test have passed. These do not establish App or
+antivirus deployment qualification. H/I results and the original detections
+remain retained as historical evidence.
+
 ## State, interruption, and cleanup
 
 Old shared `setup_marker.json` or either location of `sandbox_users.json` is not migrated, deleted, or
@@ -128,7 +164,7 @@ compared in full to the original archive and remain unchanged. `sha2 0.10.9` was
 already pinned upstream; the sandbox crate adds it as an existing workspace dependency.
 This normalization is not an external dependency upgrade.
 
-The current Windows source qualification has also passed locked Cargo checks for
+The historical early source qualification also passed locked Cargo checks for
 `codex-windows-sandbox --lib`, its three binary targets, and `codex-cli --bin codex`.
 The production sandbox library check emits no warnings. The final targeted native
 unit runs passed three ownership/directory-state fixtures and eight pure namespace
@@ -140,3 +176,45 @@ checked. C removes only an unused command-runner import found in build B. Origin
 app-server/cloud-tasks Windows warnings remain in the logs; the patch-added unused
 import warning is gone. Real provisioning, permission checks, shared-ACL coexistence
 and App workflow acceptance remain separate gates.
+
+
+## Native Windows carveout limitation
+
+The fixed upstream Windows legacy backend explicitly rejects a permission shape
+that reopens a writable descendant inside an existing read-only carveout.
+For example, granting extra filesystem access to an owned worktree's protected
+Git metadata can produce:
+
+    windows elevated sandbox cannot reopen writable descendants under read-only carveouts directly; refusing to run unsandboxed
+
+The same guard is present byte-for-byte in upstream sandboxing/src/windows.rs
+and has a corresponding expected-error case in core/src/exec_tests.rs. The
+observed rejection is retained; it is not a lost gateway permission or permission
+success. The word elevated identifies the preconfigured Windows sandbox backend,
+not a grant of administrator privileges to the model command.
+
+Use the App's normal staging workflow for an App-operated Git change. A model
+operation that genuinely needs escalation must request the separately authorized,
+single-command native fresh review. Do not remove the read-only carveout, change
+the whole thread to Full Access, or rerun an unknown Git effect blindly. This
+Windows 10 result does not establish Windows 11 MXC behavior.
+
+
+The dedicated App profile directory must be owned by the Windows user who runs
+the App. A directory created from an elevated setup shell can instead be owned
+by BUILTIN\Administrators. That is not an interchangeable owner: native
+request-capacity checkpoints bind the profile to the process user. Configuration
+and launch preflight therefore inspect the directory through a pinned Windows
+handle and reject an owner mismatch before starting the App. Initial profile
+creation runs under the intended non-elevated interactive account. Existing
+directory permissions, native sandbox grants, sessions, and child files are
+preserved; the gateway never takes ownership automatically.
+
+If a profile was previously prepared by an elevated shell, quit only this
+project's App and confirm the dedicated profile path and its owner first.
+Correct only that directory's owner to the intended account using the Windows
+Advanced Security dialog, with **Replace owner on subcontainers and objects**
+left unchecked. Preserve its existing access entries and inheritance settings.
+Then run app-check again before launching. Do not recursively reset permissions
+or change the regular Codex profile. An earlier successful task does not prove
+checkpoint recovery worked while an ownership warning was present.

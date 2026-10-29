@@ -127,7 +127,7 @@ note, production bridge conversion, loopback synthetic responses, and strict
 positive/negative assertions. It makes zero real model requests, reads no WinCred,
 starts no native/App, and never executes the injected deletion. It asserts source
 hashes unchanged and removes only its newly created directory after success.
-The original frozen fault_server.py and selftest.py are unchanged.
+Earlier frozen runs retain their original sources. QA protocol revision 2 adds a shared, explicitly synthetic plaintext reasoning item before the scripted primary call; no real model reasoning or verdict is fabricated. Call identity, action arguments, one-shot consumption and the original fault/approval controls remain unchanged.
 
 Use the existing authenticated stop action. Confirm the recorded exact PID and
 creation time exited before removing only the owned QA directory. Keep original

@@ -5,6 +5,7 @@ content. Source references are immutable, durable and scoped to native sessions.
 Unsupported native operations/policies fail before any outbound work.
 """
 from __future__ import annotations
+from .paths import _is_link_or_reparse, _sqlite_filename
 
 import asyncio
 import base64
@@ -24,8 +25,9 @@ import socket
 import sqlite3
 import ssl
 import textwrap
+import tempfile
 from typing import Callable
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 import uuid
 
 import aiohttp
@@ -223,7 +225,7 @@ class PublicDocumentFetcher:
         self.ssl_context = ssl_context or ssl.create_default_context()
         self.max_bytes, self.timeout = max_bytes, timeout
 
-    async def fetch(self, url, policy):
+    async def fetch(self, url, policy, *, index_check=None):
         initial = checked_url(url, policy)
         current, redirects = initial, []
         connector = aiohttp.TCPConnector(ssl=self.ssl_context, resolver=PublicResolver(), use_dns_cache=False)
@@ -232,6 +234,8 @@ class PublicDocumentFetcher:
                     cookie_jar=aiohttp.DummyCookieJar(), middlewares=(_single_attempt,),
                     timeout=aiohttp.ClientTimeout(total=self.timeout)) as client:
                 for _ in range(6):
+                    if index_check is not None:
+                        await index_check(current, policy)
                     async with client.get(current, allow_redirects=False,
                             headers={"User-Agent": "CodexAppDeepSeekGateway/0.1 (+public-document-fetch)",
                                      "Accept": "text/html,application/xhtml+xml,text/plain,application/pdf"}) as reply:
@@ -307,18 +311,26 @@ class WebSourceStore:
     """Private bounded SQLite store; raw documents are never public diagnostics."""
     def __init__(self, path, *, max_sources=2000, max_bytes=128 * 1024 * 1024):
         self.path = Path(path)
-        if any(p.is_symlink() or (hasattr(os.path, "isjunction") and os.path.isjunction(p))
+        if any(_is_link_or_reparse(p)
                for p in (self.path, *self.path.parents)):
             raise ValueError("Web source store must not traverse a symlink or junction")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.max_sources, self.max_bytes = max_sources, max_bytes
-        self.db = sqlite3.connect(self.path)
+        self.db = sqlite3.connect(_sqlite_filename(self.path))
         try:
             self.db.executescript("""
               PRAGMA journal_mode=WAL;
               CREATE TABLE IF NOT EXISTS web_sources (
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT NOT NULL,
                 ref TEXT UNIQUE, body TEXT NOT NULL, raw BLOB, bytes INTEGER NOT NULL);
+              PRAGMA foreign_keys=ON;
+              CREATE TABLE IF NOT EXISTS web_native_threads (
+                thread TEXT PRIMARY KEY, session TEXT NOT NULL,
+                fork_parent TEXT, fork_ordinal TEXT, inherited INTEGER NOT NULL);
+              CREATE TABLE IF NOT EXISTS web_source_grants (
+                session TEXT NOT NULL, sequence INTEGER NOT NULL,
+                PRIMARY KEY(session, sequence),
+                FOREIGN KEY(sequence) REFERENCES web_sources(sequence));
               CREATE TABLE IF NOT EXISTS web_receipts (
                 id TEXT PRIMARY KEY, session TEXT NOT NULL, operation TEXT NOT NULL,
                 request_sha256 TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT,
@@ -344,14 +356,79 @@ class WebSourceStore:
             self.db.execute("UPDATE web_sources SET ref=? WHERE sequence=?", (ref, cur.lastrowid))
         return {**source, "ref_id": ref}
 
+    def bind_native_namespace(self, session, metadata):
+        # This authenticated native header authorizes a document-cache namespace,
+        # not model text or raw chat history. Fork history clipping stays native.
+        if metadata is None:
+            return
+        if not isinstance(metadata, dict):
+            fail("invalid_native_metadata", "Native turn metadata must be an object")
+        def identity(name, required=False):
+            value = metadata.get(name)
+            if value is None and not required:
+                return None
+            if not isinstance(value, str) or len(value) != 36:
+                fail("invalid_native_metadata", "Native identity must be a canonical UUID")
+            try:
+                valid = str(uuid.UUID(value)) == value
+            except ValueError:
+                valid = False
+            if not valid:
+                fail("invalid_native_metadata", "Native identity must be a canonical UUID")
+            return value
+        native_session = identity("session_id", True)
+        thread = identity("thread_id", True)
+        parent = identity("forked_from_thread_id")
+        ordinal = metadata.get("forked_from_ordinal_exclusive")
+        if native_session != session or parent == thread:
+            fail("invalid_native_metadata", "Native session binding or fork identity is inconsistent")
+        if ordinal is not None and (type(ordinal) is not int or not 0 <= ordinal < 2**64):
+            fail("invalid_native_metadata", "Native fork boundary is invalid")
+        ordinal = str(ordinal) if ordinal is not None else None
+        with self.db:
+            row = self.db.execute(
+                "SELECT session,fork_parent,fork_ordinal,inherited FROM web_native_threads WHERE thread=?",
+                (thread,)).fetchone()
+            if ordinal is not None and parent is None and (row is None or row[1] is None):
+                fail("invalid_native_metadata", "Native fork boundary has no known parent")
+            if row is not None:
+                if row[0] != session or (parent is not None and row[1] != parent) or (row[2] is not None and ordinal is not None and row[2] != ordinal):
+                    fail("native_lineage_conflict", "Native thread namespace or fork lineage changed", 409)
+                if row[2] is None and ordinal is not None:
+                    self.db.execute("UPDATE web_native_threads SET fork_ordinal=? WHERE thread=?", (ordinal, thread))
+                if row[3]:
+                    return
+            else:
+                self.db.execute("INSERT INTO web_native_threads VALUES(?,?,?,?,0)", (thread, session, parent, ordinal))
+            if parent is not None:
+                owner = self.db.execute("SELECT session FROM web_native_threads WHERE thread=?", (parent,)).fetchone()
+                # Older gateways did not record thread metadata. A native root's
+                # session equals its thread ID, so existing root references remain usable.
+                parent_session = owner[0] if owner else parent
+                if parent_session != session:
+                    # Freeze only refs already visible to the parent. This is a
+                    # cache snapshot, never a claim about native history ordinal.
+                    self.db.execute(
+                        "INSERT OR IGNORE INTO web_source_grants(session,sequence) "
+                        "SELECT ?,sequence FROM web_sources WHERE session=? OR sequence IN "
+                        "(SELECT sequence FROM web_source_grants WHERE session=?)",
+                        (session, parent_session, parent_session))
+            self.db.execute("UPDATE web_native_threads SET inherited=1 WHERE thread=?", (thread,))
+
+    def _source_row(self, session, ref, columns):
+        return self.db.execute(
+            "SELECT " + columns + " FROM web_sources WHERE ref=? AND "
+            "(session=? OR sequence IN (SELECT sequence FROM web_source_grants WHERE session=?))",
+            (ref, session, session)).fetchone()
+
     def get(self, session, ref):
-        row = self.db.execute("SELECT body FROM web_sources WHERE session=? AND ref=?", (session, ref)).fetchone()
+        row = self._source_row(session, ref, "body")
         if row is None:
             fail("unknown_reference", "Reference is missing or belongs to a different native web session", 404)
         return {**json.loads(row[0]), "ref_id": ref}
 
     def raw(self, session, ref):
-        row = self.db.execute("SELECT body,raw FROM web_sources WHERE session=? AND ref=?", (session, ref)).fetchone()
+        row = self._source_row(session, ref, "body,raw")
         if row is None:
             fail("unknown_reference", "Reference is missing or belongs to a different native web session", 404)
         source = json.loads(row[0])
@@ -359,6 +436,67 @@ class WebSourceStore:
         if not isinstance(raw, bytes) or sha256(raw).hexdigest() != source.get("source_sha256"):
             fail("source_integrity_error", "Retained source bytes do not match their original digest", 500)
         return raw
+
+    def generated_png_path(self, session, ref):
+        """Expose only already-retained PDFium pixels via the App's native file reader."""
+        from .app_config import _private
+        source = self.get(session, ref)
+        raw = self.raw(session, ref)
+        if (source.get("content_type") != "image/png"
+                or source.get("provenance", {}).get("backend") != "pdfium"
+                or not raw.startswith(b"\x89PNG\r\n\x1a\n")):
+            fail("generated_media_invalid", "Only verified PDF renderer output can become a local display file", 500)
+        directory = self.path.absolute().parent / "generated-media"
+        def safe(path, *, file=False):
+            if any(_is_link_or_reparse(part)
+                   for part in (path, *path.parents)):
+                fail("generated_media_path_unsafe", "Generated media cannot traverse links or junctions", 500)
+            if path.exists() and (not path.is_file() or path.stat().st_nlink != 1) and file:
+                fail("generated_media_path_unsafe", "Generated image must be a single-link regular file", 500)
+        safe(directory)
+        if directory.exists() and not directory.is_dir():
+            fail("generated_media_path_unsafe", "Generated media directory is not a directory", 500)
+        directory.mkdir(mode=0o700, exist_ok=True)
+        _private(directory, directory=True)
+        target = directory / (source["source_sha256"] + ".png")
+        safe(target, file=True)
+        if target.exists():
+            if target.read_bytes() != raw:
+                fail("generated_media_integrity_error", "Existing generated image differs from retained pixels", 500)
+            return target
+        # Derived files are bounded separately by the same retained-source limits.
+        # Nothing is evicted: an existing reference must remain valid after resume.
+        count, used = 0, 0
+        for child in directory.iterdir():
+            safe(child, file=True)
+            if not re.fullmatch(r"[0-9a-f]{64}\.png", child.name):
+                fail("generated_media_path_unsafe", "Generated media contains an unexpected entry", 500)
+            count += 1
+            used += child.stat().st_size
+        if count >= self.max_sources or used + len(raw) > self.max_bytes:
+            fail("generated_media_full", "Generated image cache capacity reached; no retained image was removed", 507)
+        descriptor, name = tempfile.mkstemp(prefix=".generated-", suffix=".tmp", dir=directory)
+        temporary = Path(name)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                _private(temporary)
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            # Use the existing policy publisher's atomic no-replace pattern.
+            try:
+                if os.name == "nt":
+                    os.rename(temporary, target)
+                else:
+                    os.link(temporary, target)
+            except FileExistsError:
+                pass  # A winning immutable publication must still match below.
+        finally:
+            temporary.unlink(missing_ok=True)
+        safe(target, file=True)
+        if not target.is_file() or target.read_bytes() != raw:
+            fail("generated_media_integrity_error", "Generated image publication did not retain the exact pixels", 500)
+        return target
 
     def start(self, session, operation, request):
         key = uuid.uuid4().hex
@@ -867,6 +1005,20 @@ def _pdf_worker_main():
     sys.stdout.write(encoded(value))
 
 
+def native_image_markdown(target, *, page=None):
+    """A fixed caption and literal target; never interpret an untrusted source title."""
+    caption = "Web image" if page is None else f"PDF page {page}"
+    # Angle destinations preserve spaces in native absolute paths. Reject control
+    # characters and encode delimiters so URL/title data cannot inject Markdown.
+    if not isinstance(target, str) or any(ord(c) < 32 or ord(c) == 127 for c in target):
+        fail("invalid_image_display_target", "Image display target contains invalid characters", 500)
+    if target.startswith(("http:", "https:")):
+        target = quote(checked_url(target), safe=":/?&=#%+,-._~")
+    elif not Path(target).is_absolute() or any(c in target for c in "<>"):
+        fail("invalid_image_display_target", "Generated image needs an absolute native file path", 500)
+    return f"![{caption}](<{target}>)"
+
+
 def image_result(source, content_url=None):
     """Fields observed in the pinned App's generic image_v2 result renderer.
 
@@ -1005,10 +1157,10 @@ class WikimediaImageSearch:
 
 
 _NATIVE_COMMANDS = {"search_query", "image_query", "open", "find", "click", "screenshot", "finance", "weather", "sports", "time"}
-_SUPPORTED = {"search_query", "open", "find", "click", "time", "screenshot"}
+_SUPPORTED = {"search_query", "open", "find", "click", "time", "screenshot", "weather"}
 
 
-def validate_request(payload, accepted_models, *, supported_operations=None):
+def validate_request(payload, accepted_models, *, supported_operations=None, policy_backend=False):
     supported = _SUPPORTED if supported_operations is None else supported_operations
     object_fields(payload, {"id", "model", "reasoning", "input", "commands", "settings", "max_output_tokens"},
                   "search request", {"id", "model", "commands"})
@@ -1034,9 +1186,9 @@ def validate_request(payload, accepted_models, *, supported_operations=None):
             fail("backend_not_configured", f"Native {name} needs a verified backend; this acceptance gate remains open", 501)
         for value in values:
             fields = {"search_query": {"q", "recency", "domains"}, "image_query": {"q", "recency", "domains"}, "screenshot": {"ref_id", "pageno"}, "open": {"ref_id", "lineno"},
-                      "find": {"ref_id", "pattern"}, "click": {"ref_id", "id"}, "time": {"utc_offset"}}[name]
+                      "find": {"ref_id", "pattern"}, "click": {"ref_id", "id"}, "time": {"utc_offset"}, "weather": {"location", "start", "duration"}}[name]
             required = {"search_query": {"q"}, "image_query": {"q"}, "screenshot": {"ref_id", "pageno"}, "open": {"ref_id"}, "find": {"ref_id", "pattern"},
-                        "click": {"ref_id", "id"}, "time": {"utc_offset"}}[name]
+                        "click": {"ref_id", "id"}, "time": {"utc_offset"}, "weather": {"location"}}[name]
             object_fields(value, fields, name, required)
             for field in required - {"id", "pageno", "q"}:
                 string(value[field], field)
@@ -1052,9 +1204,13 @@ def validate_request(payload, accepted_models, *, supported_operations=None):
                 integer(value["lineno"], "line number")
             if "recency" in value:
                 integer(value["recency"], "recency")
-                fail("unsupported_recency", "Selected search backend has no verified native recency mapping", 422)
+                if not policy_backend:
+                    fail("unsupported_recency", "Selected search backend has no verified native recency mapping", 422)
             if "domains" in value:
                 domain_list(value["domains"])
+            if name == "weather":
+                from .weather_backend import validate_weather
+                validate_weather(value)
             if name == "time":
                 parse_offset(value["utc_offset"])
             operations.append((name, value))
@@ -1070,7 +1226,7 @@ def validate_request(payload, accepted_models, *, supported_operations=None):
         for name in {"country", "region", "city", "timezone"} & set(location):
             if location[name] is not None:
                 string(location[name], "user_location." + name, 256)
-        if query_operations and any(location.get(name) for name in ("country", "region", "city", "timezone")):
+        if not policy_backend and query_operations and any(location.get(name) for name in ("country", "region", "city", "timezone")):
             fail("unsupported_location", "Selected search backend cannot preserve location-biased results", 422)
         # Search bias has no meaning for literal document operations or time.
     if settings.get("image_settings") is not None:
@@ -1083,7 +1239,7 @@ def validate_request(payload, accepted_models, *, supported_operations=None):
     if settings.get("allowed_callers", ["direct"]) != ["direct"]:
         fail("unsupported_callers", "This endpoint accepts native direct web callers only", 422)
     external = settings.get("external_web_access", True)
-    if external is not True and external != "live":
+    if not policy_backend and external is not True and external != "live":
         fail("unsupported_web_mode", "Cached or indexed mode has no equivalent backend mapping", 422)
     context = settings.get("search_context_size", "medium")
     if context not in {"low", "medium", "high"}:
@@ -1166,14 +1322,17 @@ def bound_output(text, budget):
 
 
 class WebBackend:
-    def __init__(self, store, search, fetcher, *, accepted_models=(MODEL,), clock=None, image_search=None, pdf_renderer=None):
+    def __init__(self, store, search, fetcher, *, accepted_models=(MODEL,), clock=None, image_search=None, pdf_renderer=None, policy_backend=None, weather_backend=None):
         self.store, self.search, self.fetcher = store, search, fetcher
+        self.policy_backend = policy_backend
+        from .weather_backend import OpenMeteoWeather
+        self.weather_backend = weather_backend or OpenMeteoWeather(clock=clock, ssl_context=getattr(fetcher, "ssl_context", None))
         self.image_search = image_search
         self.pdf_renderer = pdf_renderer or PdfiumRenderer()
         self.accepted_models = tuple(accepted_models)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
-    async def _document(self, session, reference, policy):
+    async def _document(self, session, reference, policy, settings=None):
         if reference.startswith(("http:", "https:")):
             url = checked_url(reference, policy)
         else:
@@ -1182,17 +1341,35 @@ class WebBackend:
             if not source["excerpt"]:
                 return source
             url = source["url"]
-        document = await self.fetcher.fetch(url, policy)
+        retrieval_proof = None
+        if self.policy_backend is not None:
+            from .firecrawl_backend import web_mode
+            document, retrieval_proof = await self.policy_backend.fetch_native(url, policy, web_mode(settings or {}))
+        else:
+            document = await self.fetcher.fetch(url, policy)
         if document.content_type == "application/pdf":
             extracted = await self.pdf_renderer.extract(document.raw)
             source = pdf_source(document, extracted)
         else:
             source = extract_document(document)
+        if retrieval_proof is not None:
+            source["provenance"]["policy_service"] = retrieval_proof
+            if retrieval_proof.get("document_backend"):
+                source["provenance"]["backend"] = retrieval_proof["document_backend"]
         return self.store.put(session, source, document.raw)
 
-    async def handle(self, payload):
+    async def handle(self, payload, *, native_metadata=None):
         supported = _SUPPORTED | ({"image_query"} if self.image_search is not None else set())
-        session, operations, policy, context, budget, length = validate_request(payload, self.accepted_models, supported_operations=supported)
+        session, operations, policy, context, budget, length = validate_request(
+            payload, self.accepted_models, supported_operations=supported,
+            policy_backend=self.policy_backend is not None)
+        native_settings = payload.get("settings") or {}
+        if self.policy_backend is not None:
+            self.policy_backend.validate(operations, native_settings, policy)
+        for name, value in operations:
+            if name == "weather":
+                self.weather_backend.validate(value, native_settings, policy)
+        self.store.bind_native_namespace(session, native_metadata)
         if any(name == "screenshot" for name, _ in operations):
             self.pdf_renderer.ensure_available()
         # Resolve reference ownership and known index errors before any network work.
@@ -1229,9 +1406,22 @@ class WebBackend:
                     stamp = now.astimezone(timezone(offset)).isoformat()
                     pieces.append(f"Current time at UTC{value['utc_offset']}: {stamp}")
                     proof["observed_time"] = stamp
+                elif name == "weather":
+                    document, raw, upstream = await self.weather_backend.forecast(value, policy, native_settings)
+                    source = self.store.put(session, document, raw, kind="weather")
+                    pieces.append(present(source, window=20))
+                    results.append(source_result(source))
+                    proof.update(source_refs=[source["ref_id"]], upstream=upstream,
+                                 source_sha256=source["source_sha256"])
                 elif name == "search_query":
                     search_policy = policy.restrict(domain_list(value.get("domains", [])))
-                    documents, upstream = await self.search.search(value["q"], search_policy, context)
+                    if self.policy_backend is not None:
+                        from .firecrawl_backend import web_mode
+                        documents, upstream = await self.policy_backend.search_native(
+                            value["q"], search_policy, context, recency=value.get("recency"),
+                            location=native_settings.get("user_location"), mode=web_mode(native_settings))
+                    else:
+                        documents, upstream = await self.search.search(value["q"], search_policy, context)
                     proof["upstream"] = upstream
                     if not upstream.get("route_verified"):
                         pieces.append("[Search generation provider metadata is not yet verified; requested route was DeepSeek with fallbacks disabled.]")
@@ -1253,11 +1443,20 @@ class WebBackend:
                     for document in documents:
                         source = self.store.put(session, document, kind="image")
                         pieces.append(present(source, window=20))
+                        # Landing-page allowlists select the image index results;
+                        # Wikimedia assets use separate known CDN hosts and blocked domains.
+                        display_url = checked_url(source["image"]["thumbnail_url"],
+                                                  DomainPolicy((), search_policy.blocked))
+                        if urlsplit(display_url).hostname not in {
+                                "upload.wikimedia.org", "thumb.wikimedia.org", "commons.wikimedia.org"}:
+                            fail("image_search_protocol_error", "Image display URL is outside the known asset hosts", 502)
+                        pieces.append("Native Markdown display reference (remote image safety policy still applies):\n"
+                                      + native_image_markdown(display_url))
                         results.append(image_result(source)); proof["source_refs"].append(source["ref_id"])
                     if upstream.get("has_more_results"):
                         pieces.append("[The image index has further result pages; this response is limited to the configured result count.]")
                 elif name == "screenshot":
-                    source = await self._document(session, value["ref_id"], policy)
+                    source = await self._document(session, value["ref_id"], policy, native_settings)
                     if source["content_type"] != "application/pdf":
                         fail("screenshot_requires_pdf", "Screenshots require a PDF source", 415)
                     png, metadata = await self.pdf_renderer.render(self.store.raw(session, source["ref_id"]), value["pageno"])
@@ -1277,15 +1476,19 @@ class WebBackend:
                         "provenance": {"backend": "pdfium", "parent_ref": source["ref_id"],
                                        "parent_sha256": source["source_sha256"], **metadata}}, png, kind="image")
                     pieces.append(f"[{rendered['ref_id']}] {title} ({source['url']})\nRendered {metadata['width']} x {metadata['height']} PNG; sha256={metadata['sha256']}; source PDF [{source['ref_id']}].")
+                    display_path = self.store.generated_png_path(session, rendered["ref_id"])
+                    pieces.append("Native Markdown display reference for these exact retained pixels:\n"
+                                  + native_image_markdown(display_path.as_posix(), page=value["pageno"]))
                     results.append(image_result(rendered, "data:image/png;base64," + base64.b64encode(png).decode("ascii")))
-                    proof.update(source_refs=[source["ref_id"], rendered["ref_id"]], source_sha256=source["source_sha256"], image=metadata)
+                    proof.update(source_refs=[source["ref_id"], rendered["ref_id"]], source_sha256=source["source_sha256"],
+                                 image=metadata, generated_display={"native_path": str(display_path), "sha256": metadata["sha256"]})
                 else:
                     if name == "click":
                         origin = self.store.get(session, value["ref_id"])
                         reference = origin["links"][value["id"]]["url"]
                     else:
                         reference = value["ref_id"]
-                    source = await self._document(session, reference, policy)
+                    source = await self._document(session, reference, policy, native_settings)
                     at = find_lines(source["lines"], value["pattern"]) if name == "find" else None
                     pieces.append(present(source, lineno=value.get("lineno", 0), matches_at=at,
                                           window={"short": 45, "medium": 90, "long": 180}[length]))

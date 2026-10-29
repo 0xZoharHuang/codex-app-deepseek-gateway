@@ -14,8 +14,15 @@ PINNED_MODEL = "deepseek/deepseek-v4.1-flash-1017"
 TEMPLATE_MODEL = "gpt-6.1-sol"
 CONTEXT_WINDOW = 1_048_576
 AUTO_COMPACT_TOKEN_LIMIT = 650_000
-# Native guardian-v2/async_scorer/sampler.rs:40,237 at NATIVE_COMMIT.
-REQUIRED_AUXILIARY_ALIASES = ("gpt-5.6-luna",)
+# Native Guardian V2 async_scorer/sampler.rs:40,237 at NATIVE_COMMIT.
+NATIVE_AUXILIARY_ALIASES = ("gpt-5.6-luna",)
+# Official App 26.1016.8120.0 ASAR src-CSKkIr_z.js codex-app-model-routing
+# defaults: metadata/ambient helpers use gpt-6-luna; local automation and
+# visualization defaults use gpt-6.1-sol. Normal helper forks do not implement
+# startThread's provider-model fallback. These exact aliases all infer with
+# PINNED_MODEL; no wildcard OpenAI alias or alternate backend is admitted.
+APP_AUXILIARY_ALIASES = ("gpt-6-luna", "gpt-6.1-sol")
+REQUIRED_AUXILIARY_ALIASES = (*NATIVE_AUXILIARY_ALIASES, *APP_AUXILIARY_ALIASES)
 REQUEST_MODEL_IDS = (PINNED_MODEL, *REQUIRED_AUXILIARY_ALIASES)
 
 class CatalogCompatibilityError(ValueError):
@@ -88,15 +95,23 @@ def _model(template: Mapping[str, Any], *, slug: str, hidden: bool) -> dict[str,
 def build_catalog(
     bundled_catalog: Mapping[str, Any], *,
     native_version: str,
+    multi_agent_version: str = "v2",
     auxiliary_aliases: Sequence[str] = REQUIRED_AUXILIARY_ALIASES,
 ) -> dict[str, Any]:
     """Build one visible DeepSeek model plus explicitly requested native aliases.
 
-    The default alias is hardcoded by this version of Guardian V2. Additional
-    auxiliary aliases must be justified by this runtime's source or captured
-    calls. The caller also configures those exact aliases in the gateway.
+    Default aliases are fixed by Guardian V2 and the qualified desktop App.
+    App helper aliases describe the actual DeepSeek model with this runtime's
+    template; they do not borrow unavailable OpenAI metadata. Additional native
+    aliases must have matching bundled metadata. The caller configures the same
+    exact aliases in the gateway; unknown names are never matched by prefix.
+    An explicit V1 selection changes only the visible pinned model selector;
+    hidden auxiliary metadata stays native. V2 remains the default. Native
+    threads retain their recorded version, so a selection requires a fresh chat.
     No request routing, credentials, or application state are altered here.
     """
+    if not isinstance(multi_agent_version, str) or multi_agent_version not in ("v1", "v2"):
+        raise CatalogCompatibilityError("multi_agent_version must be v1 or v2")
     version = native_version.removeprefix("codex-cli ").strip()
     if version != NATIVE_VERSION:
         raise CatalogCompatibilityError(f"Unqualified native runtime: {version}")
@@ -116,7 +131,7 @@ def build_catalog(
     selectors = {"multi_agent_version": "v2", "tool_mode": "code_mode_only",
                  "shell_type": "unified_exec", "apply_patch_tool_type": "freeform",
                  "node_repl_auto_review_required": True, "node_repl_disabled": False}
-    if any(template.get(key) != expected for key, expected in selectors.items()):
+    if any(template.get(key) != expected for key, expected in selectors.items()) or template.get("supports_search_tool") is not True:
         raise CatalogCompatibilityError("Native runtime selectors differ from the qualified template")
     messages = template.get("model_messages")
     if not isinstance(messages, dict) or any(
@@ -130,8 +145,11 @@ def build_catalog(
         raise CatalogCompatibilityError("Auxiliary aliases must be a sequence of native model ids")
     if len(set(auxiliary_aliases)) != len(auxiliary_aliases):
         raise CatalogCompatibilityError("Duplicate auxiliary alias")
-    if any(alias not in models or alias == PINNED_MODEL for alias in auxiliary_aliases):
-        raise CatalogCompatibilityError("Auxiliary alias lacks matching native model metadata")
+    if any((alias not in models and alias not in APP_AUXILIARY_ALIASES)
+           or alias == PINNED_MODEL for alias in auxiliary_aliases):
+        raise CatalogCompatibilityError("Auxiliary alias lacks matching native or qualified App model metadata")
     result = [_model(template, slug=PINNED_MODEL, hidden=False)]
-    result.extend(_model(models[alias], slug=alias, hidden=True) for alias in auxiliary_aliases)
+    result[0]["multi_agent_version"] = multi_agent_version
+    result.extend(_model(template if alias in APP_AUXILIARY_ALIASES else models[alias],
+                         slug=alias, hidden=True) for alias in auxiliary_aliases)
     return {"models": result}

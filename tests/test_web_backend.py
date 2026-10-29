@@ -107,7 +107,7 @@ async def test_persistent_references_and_session_isolation(tmp_path):
         store.close()
 
 
-@pytest.mark.parametrize("operation", ["image_query", "finance", "weather", "sports"])
+@pytest.mark.parametrize("operation", ["image_query", "finance", "sports"])
 async def test_missing_backend_rejects_whole_batch_before_network(components, operation):
     backend, store, search, fetcher = components
     with pytest.raises(WebBackendError) as caught:
