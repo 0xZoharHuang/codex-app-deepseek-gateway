@@ -2,7 +2,9 @@
 
 Current target is signed App **26.1023.6621.0** / native **0.165.0-alpha.1.2**
 (`720fec862a608ae1e5878d1eecb04fb93192e93c`), with the O165 two-patch single
-producer. New-cohort qualification is in progress. The existing gate definitions
+producer loaded in the actual App. Current engineering, memory and App MCP evidence
+is recorded in the qualification ledger; an Internal Guardian defect is being repaired.
+New-cohort qualification is in progress. The existing gate definitions
 remain applicable; prior 0.163 observations below are historical and do not
 automatically qualify this App update. See [qualification-status.md](qualification-status.md).
 
@@ -20,7 +22,7 @@ original failures and then-open assertions. Current combination, per-component
 carry, bounded remaining gates and retained failures are tracked in
 [qualification-status.md](qualification-status.md).
 
-The actual signed App has now loaded N CLI `1dbf68a2...` with the original J
+Historical 0.163 evidence: the signed App loaded N CLI `1dbf68a2...` with the original J
 helper/runner/probe and installed r4 manifest `1c4da3f7...`. R4 still uses published
 CDS 0.6.6 commit `d2edfa2a49dd9879d45375e7770ff8bd2ec3d753` and its 1,307 unique
 installed software cases remain separate from App parity. Historical M/r4

@@ -1,32 +1,49 @@
 # Current qualification ledger
 
-## Current App update: O165 qualification in progress
+## Current App: actual O165 execution, incomplete release qualification
 
-The installed signed App has advanced to **26.1023.6621.0**. Its bundled native is
-**0.165.0-alpha.1.2**, upstream
-`720fec862a608ae1e5878d1eecb04fb93192e93c`. The signed App executable differs from
-the official release executable only in Authenticode fields; the source mapping
-is byte-checked outside those fields. This proves the source baseline, not a
-reproducible local build or App mechanism acceptance.
+The fixed signed App is **26.1023.6621.0**, with upstream native
+**0.165.0-alpha.1.2** at `720fec862a608ae1e5878d1eecb04fb93192e93c`.
+The actual private App has loaded the four-target O165 producer whose CLI is
+`76b5b061a4e440b95bdf446e22e0be03aeaf6a67f18511d5a7bedc8b241d675e`.
+Its setup helper completed the normal managed setup; no Defender settings,
+foreign session or foreign process was changed.
 
-The current O165 recipe in `native/build-lock.json` uses two necessary isolation
-patches and builds all four native components from one source. It does not port
-the old capacity/compaction extensions. Native 0.165's additional App RPC methods,
-feature catalogue, agent loop, permissions and context lifecycle remain upstream.
-The new candidate still requires compilation, native mechanism checks, actual App
-loading and the applicable real GUI/task/fault gates. Source parsing is not a
-runtime pass.
+The installed gateway uses source `58a15ab2ad5bb5e45987580fd37899f8b5939f96`,
+bundle manifest `75627e1ad3a02e0b39f823dba7ed9f9d3686806b32a446764c8dd16aef9dd4aa`,
+and the six pure protocol modules pinned to public CDS 0.6.7. The preceding
+installed artifact passed 1,459 unique software cases. The current artifact
+changes one product module; its 143 relevant installed cases passed, while the
+other product inputs were byte-verified unchanged. This is explicit component
+carry, not a claim that a complete new suite or App parity has passed.
 
-The r5 gateway was installed and independently passed **1,329 unique software
-cases**, with no failures, errors, skips or deselections, using the published
-CDS 0.6.7 pure protocol input. Its normal App version guard rejected the changed
-App before any launch. That software result is separate from a final O165/r5
-App qualification. Any newly changed gateway source also requires its own final
-installed qualification.
+| Current actual evidence | Result and limits |
+| --- | --- |
+| Main and native nested agents | A real App engineering task used Code Mode, native multi-level agents, follow-up, waiting and interruption. The final three source fixes passed an independent clean reconstruction: 908 original tests plus 22 held-out checks, all 930 passed with zero errors or skips. The model had prior task memory; this is a supervised runtime workflow, not a blind model benchmark. |
+| Web and extensions | The same task used actual official-document search/open/find/link following and an MCP extension. The App's own MCP list-projects call independently matched all nine private projects. A stale explicit MCP working directory was repaired in private configuration; product upgrade handling is still being checked. |
+| Memory | Native extraction and consolidation completed. A fresh App chat used the native memory search/read tools and recovered the private witness. Its initially wrong citation and subsequent independently checked correction are retained. |
+| Internal Guardian | **Open defect:** 65 asynchronous scores in the internal memory worker failed before model invocation because public thread lookup intentionally hides internal threads. A minimal owned-context repair is under targeted native test; it is not yet built into the actual App runtime. The public lookup remains restricted. |
+| Permissions and other controls | Current manual Allow Once/Deny is being reconciled. Actual new-runtime Guardian decisions, context/cold recovery, discovery, fault and lifecycle cases remain subject to their individual gates below. |
 
-The following entries describe prior fixed cohorts. Their receipts remain
-unaltered and their scope must be carried only where relevant implementation and
-effective configuration are independently shown unchanged.
+The current source tree is not a stable release. A successful engineering task,
+a software suite or an upstream-identical mechanism does not close unexecuted
+App gates. The upcoming Guardian candidate will have its own source, executable
+and App evidence; the O165 results above will retain their original identities.
+
+Private handoffs bind the current engineering oracle
+(`f672d9e1d6787c3ab79194b1d627a5b2cb0eb19f898fd94d558723b6f8d12fc8`),
+fresh memory evidence
+(`6d0f0e00b0f969e8d2b2b83b22f27bb5735d718445f63e218e38a795e2b3d015`),
+App MCP proof
+(`f6dcc24320bfd6a642fc38cdfd7995fc225b56abeff863db1d91a6b91bdbcd60`)
+and internal Guardian audit
+(`917bffe3e22e2e21f0dae8edbb4f1c0ead527083b009d515c8a4ccb5c153067a`).
+They remain private because original runtime evidence may contain local paths,
+task content and authentication metadata.
+
+The following entries describe historical fixed cohorts. Carry requires verified
+relevant source, adapter and effective configuration equality; old executions are
+never relabeled as executions of the current App.
 
 ## Historical 0.163 N/J and r4 results
 
@@ -198,7 +215,7 @@ installed suite. Historical M/r4 also completed the independent engineering task
 Those facts do not retrospectively recover the missing raw argument events from
 the two original failures or qualify unexecuted A21 foreground-cancel/fault cases.
 
-## Current deployment and versions
+## Historical 0.163 deployment and versions
 
 - Host: Windows 10 Pro 19045; official signed App 26.1016.8120.0.
 - Current actual App combination: N CLI plus original J helper/runner/probe,
