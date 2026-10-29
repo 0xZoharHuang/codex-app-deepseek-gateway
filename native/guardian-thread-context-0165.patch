@@ -1,0 +1,494 @@
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -76,6 +76,7 @@
+ use std::any::Any;
+ use std::path::PathBuf;
+ use std::sync::Arc;
++use std::sync::Weak;
+ use tokio::sync::Mutex;
+ use tokio::sync::RwLock;
+ use tokio::sync::oneshot;
+@@ -203,6 +204,42 @@
+     pub review_context_revision: u64,
+     pub messages: Vec<GuardianRootMessage>,
+     pub trusted_skill_paths: Vec<String>,
++}
++
++/// Host-installed access to the exact live thread observed by a tool callback.
++///
++/// The weak reference does not retain the runtime. Construction is restricted to
++/// core, and resolution also checks the original attachment scope and current
++/// manager membership; a copied or inherited attachment cannot authorize a
++/// different thread or manager. Public internal-thread lookup stays unchanged.
++pub struct GuardianThreadContext {
++    thread: Weak<CodexThread>,
++}
++
++impl GuardianThreadContext {
++    pub(crate) fn new(thread: &Arc<CodexThread>) -> Self {
++        Self {
++            thread: Arc::downgrade(thread),
++        }
++    }
++
++    pub async fn resolve(
++        &self,
++        expected_thread_id: ThreadId,
++        scope: &codex_extension_api::ExtensionData,
++        manager: &crate::ThreadManager,
++    ) -> Option<Arc<CodexThread>> {
++        let thread = self.thread.upgrade()?;
++        if thread.session.thread_id() != expected_thread_id
++            || scope.level_id() != expected_thread_id.to_string()
++            || !std::ptr::eq(scope, thread.thread_extension_data())
++            || !manager.owns_thread_runtime(&thread).await
++            || !thread.is_running()
++        {
++            return None;
++        }
++        Some(thread)
++    }
+ }
+ 
+ pub struct CodexThread {
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -54,6 +54,7 @@
+ pub use codex_thread::GuardianAuthorizationVersion;
+ pub use codex_thread::GuardianRootMessage;
+ pub use codex_thread::GuardianRootSnapshot;
++pub use codex_thread::GuardianThreadContext;
+ pub use codex_thread::ThreadConfigSnapshot;
+ pub use session::turn_context::TurnContext;
+ pub use thread_startup_metadata::ThreadStartupMetadata;
+diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
+--- a/codex-rs/core/src/thread_manager.rs
++++ b/codex-rs/core/src/thread_manager.rs
+@@ -979,6 +979,16 @@
+         self.state.get_thread(thread_id).await
+     }
+ 
++    // Membership is checked using an already owned runtime, never an internal-ID lookup.
++    pub(crate) async fn owns_thread_runtime(&self, thread: &Arc<CodexThread>) -> bool {
++        self.state
++            .threads
++            .read()
++            .await
++            .get(&thread.session.thread_id())
++            .is_some_and(|current| Arc::ptr_eq(current, thread))
++    }
++
+     /// Board hosts may reach internal runtimes only through a matching explicit connection.
+     pub(crate) async fn get_thread_for_board(
+         &self,
+@@ -2573,6 +2583,10 @@
+                     session_configured.rollout_path.clone(),
+                     session_source,
+                 ));
++                // Replace inherited attachments only after the genuine runtime exists.
++                thread
++                    .thread_extension_data()
++                    .insert(crate::GuardianThreadContext::new(&thread));
+                 e.insert(thread.clone());
+                 return Ok(NewThread {
+                     thread_id,
+diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
+--- a/codex-rs/core/src/thread_manager_tests.rs
++++ b/codex-rs/core/src/thread_manager_tests.rs
+@@ -3607,3 +3607,360 @@
+         1,
+     );
+ }
++
++// Genuine host callbacks must keep the thread scope that Guardian resolves.
++#[derive(Default)]
++struct GuardianThreadContextProbe {
++    manager: std::sync::Mutex<std::sync::Weak<ThreadManager>>,
++    expected: std::sync::Mutex<HashMap<ThreadId, std::sync::Weak<CodexThread>>>,
++    observed: std::sync::Mutex<Vec<ThreadId>>,
++}
++
++impl codex_extension_api::ToolLifecycleContributor for GuardianThreadContextProbe {
++    fn on_tool_start<'a>(
++        &'a self,
++        input: codex_extension_api::ToolStartInput<'a>,
++    ) -> codex_extension_api::ToolLifecycleFuture<'a> {
++        Box::pin(async move {
++            let id = ThreadId::from_string(input.thread_store.level_id()).expect("native scope ID");
++            let manager = self
++                .manager
++                .lock()
++                .expect("manager")
++                .upgrade()
++                .expect("live manager");
++            let expected = self.expected.lock().expect("expected")[&id]
++                .upgrade()
++                .expect("expected runtime");
++            let context = input
++                .thread_store
++                .get::<crate::GuardianThreadContext>()
++                .expect("host context installed before callbacks");
++            let resolved = context
++                .resolve(id, input.thread_store, &manager)
++                .await
++                .expect("actual native callback scope");
++            assert!(Arc::ptr_eq(&resolved, &expected));
++            assert!(Arc::ptr_eq(
++                &resolved.config().await,
++                &expected.config().await
++            ));
++            let history = resolved.conversation_history_snapshot().await;
++            assert_eq!(
++                history.items().collect::<Vec<_>>(),
++                input.conversation_history.items().collect::<Vec<_>>()
++            );
++            assert_eq!(
++                history.user_message_revision(),
++                input.conversation_history.user_message_revision()
++            );
++            assert_eq!(history.items().count(), 1);
++            self.observed.lock().expect("observed").push(id);
++        })
++    }
++}
++
++async fn guardian_context_test_config(root: &std::path::Path) -> Config {
++    let mut config = test_config().await;
++    config.codex_home = root.join("codex-home").abs();
++    config.cwd = config.codex_home.clone();
++    config.ephemeral = true;
++    config.memories.generate_memories = false;
++    std::fs::create_dir_all(&config.codex_home).expect("create isolated test home");
++    config
++}
++
++fn guardian_context_test_manager(
++    config: &Config,
++    extensions: Arc<codex_extension_api::ExtensionRegistry<Config>>,
++) -> Arc<ThreadManager> {
++    let auth = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
++    Arc::new(ThreadManager::new(
++        config,
++        Arc::clone(&auth),
++        build_models_manager(config, auth),
++        crate::CodexAppsToolsCache::default(),
++        SessionSource::Exec,
++        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
++        extensions,
++        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
++        None,
++        passthrough_image_store(),
++        thread_store_from_config(config, None),
++        None,
++        TEST_INSTALLATION_ID.to_owned(),
++        None,
++        None,
++    ))
++}
++
++#[tokio::test]
++async fn guardian_host_thread_context_resolves_actual_main_and_internal_tool_callbacks() {
++    let temp = tempdir().expect("test root");
++    let config = guardian_context_test_config(temp.path()).await;
++    let probe = Arc::new(GuardianThreadContextProbe::default());
++    let mut registry = codex_extension_api::ExtensionRegistryBuilder::new();
++    registry.tool_lifecycle_contributor(probe.clone());
++    let manager = guardian_context_test_manager(&config, Arc::new(registry.build()));
++    *probe.manager.lock().expect("manager") = Arc::downgrade(&manager);
++    let mut started = Vec::new();
++
++    for source in [
++        SessionSource::Exec,
++        SessionSource::Internal(InternalSessionSource::MemoryConsolidation),
++    ] {
++        let internal = source.is_internal();
++        let new = manager
++            .start_thread(StartThreadOptions {
++                environments: Some(Vec::new()),
++                session_source: Some(source),
++                ..StartThreadOptions::new(config.clone())
++            })
++            .await
++            .expect("real native runtime");
++        if internal {
++            assert!(matches!(
++                manager.get_thread(new.thread_id).await,
++                Err(error) if matches!(error.details(), codex_protocol::error::CodexErrorDetails::ThreadNotFound(id) if *id == new.thread_id)
++            ));
++        } else {
++            assert!(Arc::ptr_eq(
++                &manager
++                    .get_thread(new.thread_id)
++                    .await
++                    .expect("public main lookup"),
++                &new.thread
++            ));
++        }
++        probe
++            .expected
++            .lock()
++            .expect("expected")
++            .insert(new.thread_id, Arc::downgrade(&new.thread));
++
++        new.thread
++            .session
++            .inject_no_new_turn(
++                vec![ResponseItem::Message {
++                    status: None,
++                    encrypted_content: None,
++                    id: None,
++                    role: "user".to_owned(),
++                    content: vec![ContentItem::InputText {
++                        text: format!("native trusted history {}", new.thread_id),
++                    }],
++                    phase: None,
++                    internal_chat_message_metadata_passthrough: None,
++                }],
++                None,
++            )
++            .await;
++        let turn = new.thread.session.new_default_turn().await;
++        for source in [
++            crate::tools::context::ToolCallSource::Direct,
++            crate::tools::context::ToolCallSource::CodeMode {
++                cell_id: "guardian-scope-probe".to_owned(),
++                runtime_tool_call_id: "nested-probe".to_owned(),
++            },
++        ] {
++            let invocation = crate::tools::context::ToolInvocation {
++                session: Arc::clone(&new.thread.session),
++                turn: Arc::clone(&turn),
++                step_context: StepContext::for_test(Arc::clone(&turn)),
++                cancellation_token: tokio_util::sync::CancellationToken::new(),
++                tracker: Arc::new(tokio::sync::Mutex::new(
++                    crate::turn_diff_tracker::TurnDiffTracker::new(),
++                )),
++                call_id: "guardian-context-probe".to_owned(),
++                tool_name: codex_tools::ToolName::plain("exec_command"),
++                source,
++                payload: codex_tools::ToolPayload::Function {
++                    arguments: "{}".to_owned(),
++                },
++                environments: Default::default(),
++            };
++            crate::tools::lifecycle::notify_tool_start(&invocation, None).await;
++        }
++        started.push(new);
++    }
++    assert_eq!(probe.observed.lock().expect("observed").len(), 4);
++    for new in started {
++        new.thread
++            .shutdown_and_wait()
++            .await
++            .expect("native shutdown");
++        manager.remove_thread(&new.thread_id).await;
++    }
++}
++
++#[tokio::test]
++async fn guardian_host_thread_context_rejects_wrong_id_scope_manager_and_inherited_capability() {
++    let first_home = tempdir().expect("first home");
++    let second_home = tempdir().expect("second home");
++    let first_config = guardian_context_test_config(first_home.path()).await;
++    let second_config = guardian_context_test_config(second_home.path()).await;
++    let first_manager = guardian_context_test_manager(&first_config, empty_extension_registry());
++    let second_manager = guardian_context_test_manager(&second_config, empty_extension_registry());
++    let same_id = ThreadId::new();
++    let first = first_manager
++        .start_thread(StartThreadOptions {
++            reserved_thread_id: Some(same_id),
++            environments: Some(Vec::new()),
++            ..StartThreadOptions::new(first_config)
++        })
++        .await
++        .expect("first real runtime");
++    let first_context = first
++        .thread
++        .thread_extension_data()
++        .get::<crate::GuardianThreadContext>()
++        .expect("first host context");
++    let forged_scope = codex_extension_api::ExtensionData::new(same_id.to_string());
++    assert!(
++        first_context
++            .resolve(same_id, &forged_scope, &first_manager)
++            .await
++            .is_none()
++    );
++    assert!(
++        first_context
++            .resolve(
++                ThreadId::new(),
++                first.thread.thread_extension_data(),
++                &first_manager
++            )
++            .await
++            .is_none()
++    );
++    let mut inherited = ExtensionDataInit::new();
++    inherited.insert(crate::GuardianThreadContext::new(&first.thread));
++    let second = second_manager
++        .start_thread(StartThreadOptions {
++            reserved_thread_id: Some(same_id),
++            environments: Some(Vec::new()),
++            session_source: Some(SessionSource::Internal(
++                InternalSessionSource::MemoryConsolidation,
++            )),
++            thread_extension_init: inherited,
++            ..StartThreadOptions::new(second_config)
++        })
++        .await
++        .expect("same ID in an independent native manager");
++    assert!(
++        first_context
++            .resolve(
++                same_id,
++                first.thread.thread_extension_data(),
++                &second_manager
++            )
++            .await
++            .is_none()
++    );
++    assert!(
++        first_context
++            .resolve(
++                same_id,
++                second.thread.thread_extension_data(),
++                &first_manager
++            )
++            .await
++            .is_none()
++    );
++    let second_context = second
++        .thread
++        .thread_extension_data()
++        .get::<crate::GuardianThreadContext>()
++        .expect("fresh host replaced inherited context");
++    assert!(Arc::ptr_eq(
++        &second_context
++            .resolve(
++                same_id,
++                second.thread.thread_extension_data(),
++                &second_manager
++            )
++            .await
++            .expect("second native scope"),
++        &second.thread
++    ));
++    assert!(matches!(
++        second_manager.get_thread(same_id).await,
++        Err(error) if matches!(error.details(), codex_protocol::error::CodexErrorDetails::ThreadNotFound(id) if *id == same_id)
++    ));
++    first
++        .thread
++        .shutdown_and_wait()
++        .await
++        .expect("shutdown first");
++    second
++        .thread
++        .shutdown_and_wait()
++        .await
++        .expect("shutdown second");
++    first_manager.remove_thread(&same_id).await;
++    second_manager.remove_thread(&same_id).await;
++}
++
++#[tokio::test]
++async fn guardian_host_thread_context_rejects_removed_closed_and_dropped_runtimes() {
++    let temp = tempdir().expect("test root");
++    let config = guardian_context_test_config(temp.path()).await;
++    let manager = guardian_context_test_manager(&config, empty_extension_registry());
++    let mut retained = Vec::new();
++    for remove_before_shutdown in [true, false] {
++        let new = manager
++            .start_thread(StartThreadOptions {
++                environments: Some(Vec::new()),
++                session_source: Some(SessionSource::Internal(
++                    InternalSessionSource::MemoryConsolidation,
++                )),
++                ..StartThreadOptions::new(config.clone())
++            })
++            .await
++            .expect("real internal runtime");
++        let context = new
++            .thread
++            .thread_extension_data()
++            .get::<crate::GuardianThreadContext>()
++            .expect("host weak context");
++        let weak = Arc::downgrade(&new.thread);
++        if remove_before_shutdown {
++            let removed = manager
++                .remove_thread(&new.thread_id)
++                .await
++                .expect("owner removal");
++            assert!(new.thread.is_running());
++            assert!(
++                context
++                    .resolve(new.thread_id, new.thread.thread_extension_data(), &manager)
++                    .await
++                    .is_none()
++            );
++            drop(removed);
++        }
++        new.thread
++            .shutdown_and_wait()
++            .await
++            .expect("native shutdown");
++        assert!(
++            context
++                .resolve(new.thread_id, new.thread.thread_extension_data(), &manager)
++                .await
++                .is_none()
++        );
++        if !remove_before_shutdown {
++            assert!(manager.owns_thread_runtime(&new.thread).await);
++            manager.remove_thread(&new.thread_id).await;
++        }
++        let fake_scope = codex_extension_api::ExtensionData::new(new.thread_id.to_string());
++        retained.push((context, weak, new.thread_id, fake_scope));
++        drop(new);
++    }
++    tokio::task::yield_now().await;
++    for (context, weak, id, fake_scope) in retained {
++        assert!(
++            weak.upgrade().is_none(),
++            "attachment must not retain a runtime"
++        );
++        assert!(context.resolve(id, &fake_scope, &manager).await.is_none());
++    }
++}
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/observation.rs b/codex-rs/ext/guardian-v2/src/async_scorer/observation.rs
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/observation.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/observation.rs
+@@ -6,6 +6,7 @@
+ use std::time::SystemTime;
+ 
+ use codex_analytics::AnalyticsEventsClient;
++use codex_core::GuardianThreadContext;
+ use codex_core::context::GuardianContextMode;
+ use codex_core::context::GuardianReviewEvidence;
+ use codex_core::context::NodeReplReviewEvidence;
+@@ -177,10 +178,18 @@
+                 .thread_manager
+                 .upgrade()
+                 .ok_or_else(|| "thread manager is unavailable".to_string())?;
+-            let thread = manager
+-                .get_thread(parsed_thread_id)
+-                .await
+-                .map_err(|error| error.to_string())?;
++            let thread = match input.thread_store.get::<GuardianThreadContext>() {
++                Some(context) => context
++                    .resolve(parsed_thread_id, input.thread_store, &manager)
++                    .await
++                    .ok_or_else(|| {
++                        "native Guardian thread context is no longer valid".to_string()
++                    })?,
++                None => manager
++                    .get_thread(parsed_thread_id)
++                    .await
++                    .map_err(|error| error.to_string())?,
++            };
+             let config = thread.config().await;
+             Ok((manager, thread, config))
+         }

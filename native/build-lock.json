@@ -13,9 +13,13 @@
     {
       "file": "mcp-keyring-isolation-0165.patch",
       "sha256": "0cfe1ae48ab50ef8d930298c42cd7ee6d2de4277750cceacca7e5d2c2d0c8efc"
+    },
+    {
+      "file": "guardian-thread-context-0165.patch",
+      "sha256": "6f434a95d3e0dd34c501539c0b8b562ac8bb2efc2973edf42a3d659cf1eaca60"
     }
   ],
-  "prepared_source_sha256": "97ffe28d81b2a1c1a6f536bc89b9b47e95a33cef8c192d20c800112167ad2e96",
+  "prepared_source_sha256": "ac317c8987baaf452400c71c934c1007f829ee2bd342eb4e2a78f453d6f4b636",
   "prepared_source_files": 9513,
   "cargo_lock_sha256": "7537da7c5e154334b15ef9b59091f5fed3a8e480b77c037e3a8b7f07d1614709",
   "release_environment": {

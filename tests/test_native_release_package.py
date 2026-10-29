@@ -154,7 +154,8 @@ def test_source_index_location_rejects_escape_or_ambiguous_path(tmp_path, relati
 def single_recipe(tmp_path):
     native = tmp_path / "native"; native.mkdir()
     patches = []
-    for name in ("windows-home-namespace-0165.patch", "mcp-keyring-isolation-0165.patch"):
+    for name in ("windows-home-namespace-0165.patch", "mcp-keyring-isolation-0165.patch",
+                 "guardian-thread-context-0165.patch"):
         path = native / name; path.write_text("reviewed fixture " + name)
         patches.append({"file":name, "sha256":pack.sha(path)})
     build_spec = importlib.util.spec_from_file_location("native_build_single_fixture", ROOT / "scripts/build_native.py")
@@ -192,13 +193,20 @@ def test_single_producer_projects_exact_four_identities_without_private_paths(tm
     assert "commands" not in public and "work_dir" not in public and "target" not in public
 
 
-@pytest.mark.parametrize("corruption",["patch-bytes","patch-name","missing-target","different-upstream","different-version"])
+@pytest.mark.parametrize("corruption",["patch-bytes","patch-name","missing-guardian","guardian-bytes",
+                                        "patch-order","missing-target","different-upstream","different-version"])
 def test_single_producer_graph_rejects_unpinned_inputs(tmp_path, corruption):
     native,lock,_,_,_ = single_recipe(tmp_path)
     if corruption == "patch-bytes":
         (native / lock["patches"][0]["file"]).write_text("tampered")
     elif corruption == "patch-name":
         lock["patches"][0]["file"] = "unreviewed.patch"
+    elif corruption == "missing-guardian":
+        lock["patches"].pop()
+    elif corruption == "guardian-bytes":
+        (native / lock["patches"][2]["file"]).write_text("tampered Guardian patch")
+    elif corruption == "patch-order":
+        lock["patches"][1], lock["patches"][2] = lock["patches"][2], lock["patches"][1]
     elif corruption == "missing-target":
         lock["binaries"].pop()
     elif corruption == "different-upstream":
