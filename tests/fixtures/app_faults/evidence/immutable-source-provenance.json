@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "scope": "Unchanged passive QA modules; no native/App code or actual request data.",
+  "files": [
+    {
+      "relative": "proof_contract.py",
+      "sha256": "4a12aaee31c134eb8f7d64bd7b9236b985a53bc2f4e87da7ee999080db353790",
+      "origin_kind": "previously_qualified_private_QA_implementation",
+      "copied_byte_identical": true
+    },
+    {
+      "relative": "observers/a21_role_contract.py",
+      "sha256": "6c139350513e65e5bba4d7d164097d1ce3c2740b2d8bf7e5b8761390f98033f9",
+      "origin_kind": "previously_qualified_private_QA_implementation",
+      "copied_byte_identical": true
+    },
+    {
+      "relative": "observers/native_role_observer.py",
+      "sha256": "5be27da13cc2fdefc38e0e1fe1a17661ec2f9912c705b4634143bf99b2fc0a16",
+      "origin_kind": "previously_qualified_private_QA_implementation",
+      "copied_byte_identical": true
+    },
+    {
+      "relative": "observers/request_observer_v4.py",
+      "sha256": "2467de517c9aacad5729e6d059f8b057f32788b847e126b5e737a6aa080a38ba",
+      "origin_kind": "previously_qualified_private_QA_implementation",
+      "copied_byte_identical": true
+    },
+    {
+      "relative": "observers/guardian_assessment_tap.py",
+      "sha256": "38cd5f6e8c7661fbcd6bec66b8b69d94460c63a6c4e816bb17d3f12aa4049631",
+      "origin_kind": "previously_qualified_private_QA_implementation",
+      "copied_byte_identical": true
+    }
+  ],
+  "source_context": "PublicCodex fixedsource reference720fec; publicCDS0.6.7/cb788 protocol. These are independently authored QA observers, not extracted closed App implementations.",
+  "private_entrypoints_not_published": true,
+  "private_original_failures_not_exported": true
+}

@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "purpose": "Mock-only pureoracle and passiveobserver qualification. No App/runtime/credential/model/provider orchestration.",
+  "native_reference": {
+    "App": "26.1023.6621.0",
+    "version": "0.165.0-alpha.1.2",
+    "upstream": "720fec862a608ae1e5878d1eecb04fb93192e93c",
+    "source_FP": "39d578673f2031097dfa82fd97b5126a492ea4ba3a692b565ab5fcaef4dce33f"
+  },
+  "protocol_reference": {
+    "CDS": "0.6.7",
+    "commit": "cb788738864e97a16cde82f3c584164162ab6f7c"
+  },
+  "limits": {
+    "lifetime_seconds": 900,
+    "processed_cap": 64,
+    "event_cap": 256,
+    "live_cap": 8
+  },
+  "modules": {
+    "proof_contract.py": "4a12aaee31c134eb8f7d64bd7b9236b985a53bc2f4e87da7ee999080db353790",
+    "observers/a21_role_contract.py": "6c139350513e65e5bba4d7d164097d1ce3c2740b2d8bf7e5b8761390f98033f9",
+    "observers/native_role_observer.py": "5be27da13cc2fdefc38e0e1fe1a17661ec2f9912c705b4634143bf99b2fc0a16",
+    "observers/request_observer_v4.py": "2467de517c9aacad5729e6d059f8b057f32788b847e126b5e737a6aa080a38ba",
+    "observers/guardian_assessment_tap.py": "38cd5f6e8c7661fbcd6bec66b8b69d94460c63a6c4e816bb17d3f12aa4049631"
+  },
+  "runtime_actions_allowed": false
+}
