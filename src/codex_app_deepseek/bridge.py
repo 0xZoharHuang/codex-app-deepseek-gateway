@@ -21,7 +21,7 @@ from codex_deepseek.protocol import (
 )
 from codex_deepseek.structured import StructuredOutput
 
-from .protocol_state import ProtocolState
+from .protocol_state import ProtocolState, incoming_native_history_metadata
 from .image_transport import ImageTransportError, PayloadBudgetExceeded, FileOperationError
 from .image_maintenance import ImageMaintenance
 
@@ -556,6 +556,13 @@ def create_app(
             evidence = state.evidence_view(translated.get("input"))
             payload, registry = prepare(translated, evidence)
             adaptations = {**control_adaptations, **adapt_reasoning_context(translated, payload)}
+            try:
+                adaptations["incoming_native_history"] = incoming_native_history_metadata(
+                    body.get("input"), request.headers.getall("thread-id", []))
+            except Exception as error:
+                # Receipt-only observation must never change the forwarded outcome.
+                adaptations["incoming_native_history"] = {
+                    "schema": 1, "status": "unavailable", "error_type": type(error).__name__}
             structured = StructuredOutput(translated)
             provider = payload["provider"]["only"][0]
             if provider not in settings.allowed_providers:

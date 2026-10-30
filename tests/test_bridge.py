@@ -341,7 +341,12 @@ async def test_guardian_all_turns_keeps_hostile_reasoning_as_verbatim_assistant_
         assert receipt["requested_model"] == "gpt-5.6-luna"
         assert receipt["adaptations"] == {"reasoning_context": {
             "requested": "all_turns", "mapping": "verbatim_assistant_context_for_toolless_request",
-            "preserved_items": 3}}
+            "preserved_items": 3}, "incoming_native_history": {
+            "schema": 1, "status": "observed", "hash_encoding": "sha256-canonical-json-utf8",
+            "input_is_list": True, "input_item_count": len(inputs),
+            "count": 0, "candidate_count": 0, "omitted": 0, "ambiguous": 0, "invalid": 0,
+            "unclosed": 0, "thread_header": {"count": 0, "status": "missing", "sha256": None},
+            "records": []}}
         assert len(requests) == 1
 
 

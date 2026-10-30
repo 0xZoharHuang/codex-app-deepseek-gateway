@@ -1,6 +1,7 @@
 """Only protocol evidence and request receipts; never owns an App or native process."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -41,6 +42,89 @@ def _argument_diagnostics(events):
                 raise ValueError("Invalid tool-argument diagnostic hash")
         copied.append(dict(record))
     return {"total_count": total, "truncated": truncated, "records": copied}
+
+
+def incoming_native_history_metadata(items, thread_headers=()):
+    """Receipt-only hashes of at most eight unique, closed native call/output pairs.
+
+    Canonical JSON is sorted, compact, ensure_ascii=False, allow_nan=False,
+    encoded as strict UTF-8. Positions refer to the original incoming input list.
+    This observation never changes history attestation, routing, or forwarding.
+    """
+    def item_hash(item):
+        raw = json.dumps(item, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"), allow_nan=False).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()
+
+    headers = list(thread_headers)
+    thread = {"count": len(headers), "status": "missing", "sha256": None}
+    if len(headers) > 1:
+        thread["status"] = "ambiguous"
+    elif headers:
+        try:
+            if not isinstance(headers[0], str) or not headers[0]:
+                raise ValueError("Invalid native thread header")
+            thread.update(status="unique", sha256=hashlib.sha256(headers[0].encode("utf-8")).hexdigest())
+        except (ValueError, UnicodeError):
+            thread["status"] = "invalid"
+    result = {"schema": 1, "status": "observed", "hash_encoding": "sha256-canonical-json-utf8",
+              "input_is_list": isinstance(items, list),
+              "input_item_count": len(items) if isinstance(items, list) else 0,
+              "count": 0, "candidate_count": 0, "omitted": 0, "ambiguous": 0, "invalid": 0,
+              "unclosed": 0, "thread_header": thread, "records": []}
+    if not isinstance(items, list):
+        return result
+    types = {"function_call": "function_call_output", "custom_tool_call": "custom_tool_call_output"}
+    by_id = {}
+    for position, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("type")
+        if not isinstance(kind, str) or (kind not in types and kind not in types.values()):
+            continue
+        call_id = item.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            result["invalid"] += 1
+            continue
+        # Keep first positions and occurrence counts, never deduplicate repeated IDs.
+        pair = by_id.setdefault(call_id, [None, None, 0, 0])
+        side = 0 if kind in types else 1
+        if pair[side] is None:
+            pair[side] = position
+        pair[side + 2] += 1
+    candidates = []
+    for call_id, (call_position, output_position, call_count, output_count) in by_id.items():
+        if call_count > 1 or output_count > 1:
+            result["ambiguous"] += 1
+            continue
+        if call_count != 1 or output_count != 1:
+            result["unclosed"] += 1
+            continue
+        call, output = items[call_position], items[output_position]
+        field = "arguments" if call["type"] == "function_call" else "input"
+        if (call_position >= output_position or types[call["type"]] != output["type"]
+                or not isinstance(call.get("name"), str) or not call["name"]
+                or not isinstance(call.get(field), str) or "output" not in output
+                or call.get("status", "completed") != "completed"
+                or output.get("status", "completed") != "completed"):
+            result["invalid"] += 1
+            continue
+        candidates.append((output_position, call_position, call_id))
+    # Cheap checks cover all candidates; only the newest eight item pairs are hashed.
+    result["candidate_count"] = len(candidates)
+    result["omitted"] = max(0, len(candidates) - 8)
+    for output_position, call_position, call_id in sorted(candidates)[-8:]:
+        call, output = items[call_position], items[output_position]
+        try:
+            record = {"call_id_sha256": hashlib.sha256(call_id.encode("utf-8")).hexdigest(),
+                      "call_type": call["type"], "call_index": call_position, "output_index": output_position,
+                      "call_sha256": item_hash(call), "output_sha256": item_hash(output)}
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            result["invalid"] += 1
+            continue
+        result["records"].append(record)
+    result["count"] = len(result["records"])
+    return result
 
 
 class ProtocolState:
