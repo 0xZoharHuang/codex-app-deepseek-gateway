@@ -126,7 +126,7 @@ def single_graph(lock, native_dir):
             "Single producer must build all four native targets")
     require([row["file"] for row in lock["patches"]] == [
         "windows-home-namespace-0165.patch", "mcp-keyring-isolation-0165.patch",
-        "guardian-thread-context-0165.patch"],
+        "guardian-thread-context-0165.patch", "windows-cwd-ancestor-metadata-0165.patch"],
         "Single-producer patch topology differs")
     for row in lock["patches"]:
         require(sha(plain(native_dir / row["file"])) == row["sha256"],

@@ -155,7 +155,7 @@ def single_recipe(tmp_path):
     native = tmp_path / "native"; native.mkdir()
     patches = []
     for name in ("windows-home-namespace-0165.patch", "mcp-keyring-isolation-0165.patch",
-                 "guardian-thread-context-0165.patch"):
+                 "guardian-thread-context-0165.patch", "windows-cwd-ancestor-metadata-0165.patch"):
         path = native / name; path.write_text("reviewed fixture " + name)
         patches.append({"file":name, "sha256":pack.sha(path)})
     build_spec = importlib.util.spec_from_file_location("native_build_single_fixture", ROOT / "scripts/build_native.py")
@@ -164,7 +164,7 @@ def single_recipe(tmp_path):
             "upstream_commit":"720fec862a608ae1e5878d1eecb04fb93192e93c",
             "native_version":"0.165.0-alpha.1.2", "target":pack.TARGET,
             "rust_version":"1.99.1", "archive_sha256":"1"*64,
-            "prepared_source_sha256":"2"*64, "prepared_source_files":9513,
+            "prepared_source_sha256":"2"*64, "prepared_source_files":9514,
             "cargo_lock_sha256":"3"*64, "binaries":sorted(pack.BINARIES),
             "release_environment":copy.deepcopy(build.PROFILE), "patches":patches}
     lock_digest = hashlib.sha256(pack.canonical(lock)).hexdigest()
@@ -176,6 +176,15 @@ def single_recipe(tmp_path):
         work_dir=str(tmp_path / "private-work"), target=str(tmp_path / "private-work/target"),
         cargo_home=str(tmp_path / "private-work/cargo"))
     return native, lock, lock_digest, value, build
+
+
+def test_current_pinned_single_producer_recipe_is_admitted_by_packager():
+    # Exercise the real reviewed lock and patches, rather than only a synthetic
+    # recipe which can accidentally stay in sync with a stale three-patch rule.
+    lock = pack.load(ROOT / "native/build-lock.json")
+    graph = pack.single_graph(lock, ROOT / "native")
+    assert graph["producer_id"] == "O165"
+    assert graph["producer_sources_remain_separate"] is False
 
 
 def test_single_producer_projects_exact_four_identities_without_private_paths(tmp_path):
@@ -194,7 +203,7 @@ def test_single_producer_projects_exact_four_identities_without_private_paths(tm
 
 
 @pytest.mark.parametrize("corruption",["patch-bytes","patch-name","missing-guardian","guardian-bytes",
-                                        "patch-order","missing-target","different-upstream","different-version"])
+                                        "patch-order","missing-cwd-metadata","cwd-metadata-bytes","missing-target","different-upstream","different-version"])
 def test_single_producer_graph_rejects_unpinned_inputs(tmp_path, corruption):
     native,lock,_,_,_ = single_recipe(tmp_path)
     if corruption == "patch-bytes":
@@ -202,7 +211,11 @@ def test_single_producer_graph_rejects_unpinned_inputs(tmp_path, corruption):
     elif corruption == "patch-name":
         lock["patches"][0]["file"] = "unreviewed.patch"
     elif corruption == "missing-guardian":
-        lock["patches"].pop()
+        lock["patches"].pop(2)
+    elif corruption == "missing-cwd-metadata":
+        lock["patches"].pop(3)
+    elif corruption == "cwd-metadata-bytes":
+        (native / lock["patches"][3]["file"]).write_text("tampered cwd metadata patch")
     elif corruption == "guardian-bytes":
         (native / lock["patches"][2]["file"]).write_text("tampered Guardian patch")
     elif corruption == "patch-order":
