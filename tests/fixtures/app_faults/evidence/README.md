@@ -43,3 +43,23 @@ Never publish request/rollout bodies, original prompt/history/reasoning, OAuth f
 ## Observed legacy Windows recovery limitation
 
 On the fixed Windows/App cohort, one normal task archive produced slash and backslash identities for the same physical worktree, with a backslash payload root. Only the slash-derived snapshot ref was found. Normal GUI restoration preserved files, but a later native attach still reported pending archival. This is an observed failure, not a completed public restore/registration pass. Its final classification remains in the main qualification ledger. Neither manual Git-ref alias creation nor App queue/attachment edits are part of this reproduction or native acceptance.
+
+## Complete request fingerprints
+
+The sibling payload_fingerprint.py is a pure helper for an already observed
+immutable request body. It never reads a request stream or changes authentication
+or forwarding. An observer supplies one fresh 32-byte in-memory key per case and
+must keep that key out of receipts and logs.
+
+Compare the complete root and node maps within the same observer epoch. Only JSON
+whitespace and object key order are ignored. Earlier history, unknown fields,
+array order, scalar types, number lexemes and exact string contents remain part
+of the comparison. JSON text inside strings stays opaque. Raw byte digests remain
+separate evidence. A mismatch needs investigation; equal prompt and tool hashes
+cannot establish whole-request equality.
+
+Duplicate keys, invalid UTF-8 or Unicode, non-finite numbers, and the declared
+4 MiB / depth 128 / 100,000-node limits return not_comparable without partial
+fingerprints. This is an observation limit, not a model or gateway request limit.
+The standalone test_payload_fingerprint.py includes loss, mutation, ordering and
+privacy negative controls. Pure test success is not actual App acceptance.
