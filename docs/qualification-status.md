@@ -19,7 +19,7 @@
 | --- | --- | --- |
 | 官方 App / 独立 profile / 实际 runtime 选择 | 官方包、SID/session、原生路径、创建时间和哈希绑定；18ef 实际加载。其他 App/CDS 不被接管。 | 范围通过 |
 | 原生 AppTools / 插件 / MCP 发现 | 无 legacy 顶层替代定义；官方资源哈希核验，经原生 PluginManager 安装，真实发现及调用。 | C98/875 范围通过；新包按差异复核 |
-| Responses/SSE/工具历史/结构化输出/Code Mode | 软件与真实复杂任务有证据；未知语义拒绝。新 receipt 元数据改变的最终安装、故障历史和物理请求链仍需验证。 | 已有软件合同和正常复杂任务范围证据；最终D故障窗口待关闭 |
+| Responses/SSE/工具历史/结构化输出/Code Mode | 软件合同、真实任务和最终D故障范围分开；25个产品文件未因被动QA或文档改变。 | 逐项结果见[本轮证据](qualification-r219.md)，不以Stop代替自然错误终态 |
 | 复杂工程任务 | 真实 App 中完成多文件 Jinja 修复；908原测试+22独立检查干净重建通过。模型有先前记忆，任务有人监督，非盲测或质量等价证明。 | 工作流范围通过 |
 | 原生多级智能体与冷恢复 | 同一原 Root/child UUID、前缀和消息关系有实证；V2 loaded-only 列表与按已知路径懒恢复分开核对。V1/V2 具体生命周期不能互相替代。 | 当前0.165多级协作/原UUID冷恢复已实测；18ef仅Windows元数据/cfg(test)差异，核心线程逻辑相同并明确承接 |
 | 人工审批 / 文件网络边界 | 实际允许、拒绝和受限执行分别留证；不以 full access 通过。 | 已有范围证据；最终组合差异核对 |
@@ -34,15 +34,15 @@
 | Windows sandbox平台 | 本次为Win10 19045实际支持的沙箱，不冒充Win11 MXC，也不外推任意账户、区域或OS安全桌面。 | 固定宿主范围 |
 | Windows 默认 cwd | 18ef 原工作树一次默认 exec：SID1009、PWD/GetLocation/相对读正确，父属性可读且列目录被拒；严格ACL只新增1008 allow0x80 flags0，旧ACE/FID/字节保持。 | 原工作树范围通过 |
 | 新目录正常物化 | 正常create/attach的新parent与leaf执行前均无1008权限；一次正常默认命令后，parent仅128/noinherit，leaf及policy明确可写的旧restoredroot按原生Modify/cap/.git只读carveout物化，14节点严格after已核；完整小JSON、默认cwd、888B相对读、父list拒绝都真通过。 | 首次新目录范围通过；新父链实际执行和14路径权限复核已关闭 |
-| 原生 worktree 归档/恢复 | primary保护拒绝是预期。正常任务归档曾因缺Git身份使snapshot commit-tree128，修fixture local身份后原队列完成快照/删除，GUI恢复39B成功。新目录、secondary正向归档及slash/backslash残留仍在最终读回。 | 未关闭：GUI实体恢复已通过；Windows slash/backslash快照别名导致attach/公开restore实际失败，未手改ref或队列 |
+| 原生 worktree 归档/恢复 | 本轮正式GUI完成快照/删除、聊天归档/取消归档、原生Restore；完整文件哈希、HEAD、干净Git状态、worktree登记、同UUID及active附件一致；DeepSeek随后默认cwd相对读/哈希真实成功。 | 正式GUI完整生命周期通过；secondary restore_worktree工具的Windows路径key缺口仍未关闭，未手改ref/队列/附件 |
 | OAuth | 当前C98/875：GUI添加/Authenticate/Reconnect，HTTP服务器用户角色Deny/Allow，真实函数成功、TTL刷新、fixture-only revoke后的isError、同Root冷复用、原生CLI精确logout/remove和GUI缺席。 | 当前配置后端范围通过 |
 | OAuth 证据限制 | Consent不是browser click；680字段是固定fixture数据；无全存储模式新复测声明。启动前置失败及3条 unknown_or_expired 400/no grant全部保留。 | 限制明确 |
-| 网页搜索/open/find/click | 原生六文件与先前已验实现逐字节一致，已有实际搜索导航记录。源相等不是新版全部端到端重跑。天气、组合域名与当前旧引用冷恢复仍需最终明确。 | 已有受支持搜索/导航和天气实测；最终服务恢复后原引用单次App重开待完成。四网页模块全字节相同，旧protocol-state全部定义相同，新helper仅观测 |
-| 429/503/413/截流/取消/服务丢失/同端口认证恢复 | 原始失败不得伪装成完成，执行后断流不能重复副作用；实际MAIN请求、原native prompt、物理编号、body、receipt、状态必须联结。 | 未关闭：D正常升级后验证有限故障、真实取消、canonical同端口恢复与认证 |
-| App IAB / 计算机工具 | 原生 SDK 门、账户/主机条件与实际可用性需正向验收或官方不可用条件的有据分类。web.run/预览不替代它们，不强制feature flag。 | 未关闭：UI曾呈禁用；实际SDK getter/有效门待有界只读分类，不强制flag、不以预览代替 |
+| 网页搜索/open/find/click | 最终canonical恢复后，实际App回读原source70全部行及同一引用ID，并核对真实DeepSeek固定模型/提供方。 | 具体搜索/导航/天气和旧引用恢复范围通过；金融/体育私有云数据未接入、不计通过 |
+| 429/503/413/截流/取消/服务丢失/同端口认证恢复 | 实际MAIN、native输入、编号和效果联结；401原生刷新两次目标请求的完整typed JSON相等。 | [逐项真实结果](qualification-r219.md)；413/部分截流以Stop终止的边界保留 |
+| App IAB / 计算机工具 | 正式插件和会话node_repl注册、Sky导入成功；list_apps真实因App-owned pipe缺失报os error 2。 | 未关闭；[初始化源与实测](upstream-native-computer-use-bootstrap.md)，有效SDK门未观察；不改防护、不重写后端 |
 | 公共发布、回滚、最终清理 | 原生包和Python软件资格不等于稳定发布。只在最终机制关闭后更新公共repo、分发、回滚和清理；周额度只按最后实时查询记录。 | 尚未发布；最终生命周期、交付、Windows语义清理及最后实时周额度重置确认均待完成 |
 
-原生 Plan 的 request_user_input/问答 UI 已确认存在，当前没有 CADSG 实际问答证据；需正常 GUI 提问、选择、答案回传并还原 Default。
+原生Plan已通过正常slash入口、真实request_user_input及GUI Alpha答案回传并还原Default。内置/review通过真正Code review入口运行：turn_trigger=code_review，使用turn/start而非review/start；908项原工程测试通过。此前未提交答案的UIA尝试保留。详见[本轮证据](qualification-r219.md)。
 
 [可移植被动观测和严格校验](../tests/fixtures/app_faults/evidence/README.md)已有35纯负控及本地真实HTTP/tap验证，无模型、App或凭据调用，不计作App验收。configured_baseline仅是策略声明，不证明实际二进制。
 
