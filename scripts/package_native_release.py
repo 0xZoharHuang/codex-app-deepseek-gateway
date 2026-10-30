@@ -153,9 +153,17 @@ def single_sources(raw, lock, lock_digest, raw_digest, build):
     expected, = build.build_commands(Path("pinned-rust"), lock["binaries"])
     cache = Path(raw.get("cache_dir", raw["work_dir"]))
     require(len(raw["commands"]) == 1 and raw["commands"][0][1:] == expected[1:]
-            and raw["target"] == str(cache / "target")
             and raw["cargo_home"] == str(cache / "cargo"),
             "Single-producer build invocation differs")
+    if raw["target"] != str(cache / "target"):
+        # New builder receipts record the effective independent target directly.
+        # Reuse its exact path policy; never infer a cache alias or rewrite a receipt.
+        require(all(isinstance(raw.get(key), str) and raw[key]
+                    and Path(raw[key]).is_absolute() for key in ("target", "source", "output")),
+                "Independent target requires absolute builder target/source/output")
+        target = Path(raw["target"])
+        require(build.target_directory(cache, Path(raw["source"]), Path(raw["output"]), target) == target,
+                "Independent target differs from the standard builder path policy")
     rows = [{"name":name, "size":row["size"], "sha256":row["sha256"], "producer_id":"O165"}
             for name,row in sorted(outputs.items())]
     refs = {"schema_version":1, "kind":"single_source_native_producer",

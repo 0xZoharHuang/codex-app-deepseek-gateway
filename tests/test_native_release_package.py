@@ -381,3 +381,53 @@ def test_notice_reparse_guard_works_without_newer_junction_api(mode, attributes,
     from types import SimpleNamespace
     metadata = SimpleNamespace(st_mode=mode, st_file_attributes=attributes)
     assert pack.redirected(Path("unused-fixture-path"), metadata) is rejected
+
+
+@pytest.mark.parametrize("fifth_patch", [False, True])
+def test_single_producer_accepts_real_independent_target_without_private_projection(tmp_path, fifth_patch):
+    native, lock, _, value, build = single_recipe(tmp_path)
+    if fifth_patch:
+        patch = native / "packaged-tectonic-materialization-0165.patch"
+        patch.write_text("reviewed pinned component fixture")
+        lock["patches"].append({"file": patch.name, "sha256": pack.sha(patch)})
+        value["patches"] = copy.deepcopy(lock["patches"])
+    digest = hashlib.sha256(pack.canonical(lock)).hexdigest()
+    value["build_lock_sha256"] = digest
+    cache = tmp_path / "independent-cargo-cache"
+    (cache / "cargo").mkdir(parents=True)
+    target = tmp_path / "independent-native-target"
+    target.mkdir()
+    value.update(cache_dir=str(cache), cargo_home=str(cache / "cargo"),
+                 source=str(tmp_path / "prepared-source"), output=str(tmp_path / "native-output"),
+                 target=str(build.target_directory(cache, tmp_path / "prepared-source",
+                                                   tmp_path / "native-output", target)))
+    pack.single_graph(lock, native)
+    refs, index, public = pack.single_sources(value, lock, digest, "4" * 64, build)
+    assert refs["binaries"] == index["binary_producers"] == public["outputs"]
+    assert str(tmp_path) not in json.dumps([refs, index, public])
+
+
+@pytest.mark.parametrize("bad_target", ["missing", "source", "output", "cargo-home", "relative", "no-source-record"])
+def test_single_producer_independent_target_keeps_standard_builder_guards(tmp_path, bad_target):
+    _, lock, digest, value, build = single_recipe(tmp_path)
+    cache = tmp_path / "separate-cargo-cache"
+    (cache / "cargo").mkdir(parents=True)
+    source = tmp_path / "prepared-source"; source.mkdir()
+    output = tmp_path / "candidate-output"; output.mkdir()
+    target = tmp_path / "independent-target"; target.mkdir()
+    value.update(cache_dir=str(cache), cargo_home=str(cache / "cargo"),
+                 source=str(source), output=str(output), target=str(target))
+    if bad_target == "missing":
+        value["target"] = str(tmp_path / "not-created-target")
+    elif bad_target == "source":
+        value["target"] = str(source)
+    elif bad_target == "output":
+        value["target"] = str(output)
+    elif bad_target == "cargo-home":
+        value["target"] = str(cache / "cargo")
+    elif bad_target == "relative":
+        value["target"] = "relative-target"
+    else:
+        value.pop("source")
+    with pytest.raises(ValueError):
+        pack.single_sources(value, lock, digest, "4" * 64, build)
