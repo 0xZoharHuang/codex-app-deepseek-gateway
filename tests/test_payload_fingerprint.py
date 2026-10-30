@@ -117,6 +117,12 @@ class PayloadFingerprintTests(unittest.TestCase):
                 self.assertNotEqual(self.observe(left)["root"],
                                     self.observe(right)["root"])
 
+    def test_equivalent_JSON_escape_spellings(self):
+        left = b'{"x":"a"}'
+        right = b'{"\\u0078":"\\u0061"}'
+        self.assertNotEqual(left, right)
+        self.assertEqual(self.observe(left), self.observe(right))
+
     def test_json_inside_a_string_is_never_parsed(self):
         left = self.encode({"opaque": '{"a":1,"b":2}'})
         right = self.encode({"opaque": '{"b":2,"a":1}'})

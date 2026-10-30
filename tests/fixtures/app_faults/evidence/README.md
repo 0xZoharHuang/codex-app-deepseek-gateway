@@ -52,7 +52,8 @@ or forwarding. An observer supplies one fresh 32-byte in-memory key per case and
 must keep that key out of receipts and logs.
 
 Compare the complete root and node maps within the same observer epoch. Only JSON
-whitespace and object key order are ignored. Earlier history, unknown fields,
+whitespace and object key order are ignored; strings and keys use exact
+decoded characters, so equivalent JSON escape spellings compare equally. Earlier history, unknown fields,
 array order, scalar types, number lexemes and exact string contents remain part
 of the comparison. JSON text inside strings stays opaque. Raw byte digests remain
 separate evidence. A mismatch needs investigation; equal prompt and tool hashes

@@ -50,8 +50,10 @@ def _digest(key, domain, value):
 def fingerprint(raw: bytes, key: bytes) -> dict:
     """Hash all fields and nodes, or return sanitized not_comparable metadata.
 
-    Only JSON whitespace and object key order are ignored. A caller must reuse
-    one ephemeral in-memory key for all comparisons within the same case.
+    JSON strings and keys are compared after escape decoding, without Unicode
+    normalization. Insignificant JSON whitespace and object key order do not
+    affect equality. Numbers retain their lexical spelling. Reuse one ephemeral
+    in-memory key for all comparisons within the same case.
     """
     def rejected(reason):
         return {
