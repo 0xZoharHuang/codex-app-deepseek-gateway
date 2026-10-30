@@ -32,7 +32,7 @@ diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/cwd_metadata.rs 
 new file mode 100644
 --- /dev/null
 +++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning/cwd_metadata.rs
-@@ -0,0 +1,321 @@
+@@ -0,0 +1,356 @@
 +//! Materialize only metadata needed to enter an owned-home writable workspace.
 +//! The namespace owns the principal; existing native uninstall retains ACLs.
 +use super::Payload;
@@ -150,14 +150,20 @@ new file mode 100644
 +    use super::*;
 +    use crate::token::LocalSid;
 +    use crate::winutil::to_wide;
++    use std::os::windows::fs::OpenOptionsExt;
++    use std::os::windows::io::AsRawHandle;
 +    use windows_sys::Win32::Foundation::{HLOCAL, LocalFree};
 +    use windows_sys::Win32::Security::Authorization::{
-+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
++        ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
++        SetSecurityInfo,
 +    };
 +    use windows_sys::Win32::Security::{
 +        ACE_HEADER, DACL_SECURITY_INFORMATION, GetAce, GetLengthSid, GetSecurityDescriptorControl,
 +        PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW,
 +    };
++
++    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE};
++    use windows_sys::Win32::System::SystemServices::MAXIMUM_ALLOWED;
 +
 +    fn snapshot(path: &Path) -> (u16, Vec<Vec<u8>>) {
 +        unsafe {
@@ -209,6 +215,35 @@ new file mode 100644
 +                0
 +            );
 +            LocalFree(descriptor as HLOCAL);
++
++            // SetFileSecurityW initially drops AI even from SDDL D:PAI.
++            // Prime the same DACL through the stock root-only SetSecurityInfo
++            // path before taking the regression baseline. This changes only
++            // Windows inheritance bookkeeping, never any ACE or permission.
++            let initial = snapshot(path);
++            let directory = std::fs::OpenOptions::new()
++                .access_mode(MAXIMUM_ALLOWED)
++                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
++                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
++                .open(path)
++                .unwrap();
++            let mut current_acl = std::ptr::null_mut();
++            let mut current_descriptor = std::ptr::null_mut();
++            assert_eq!(GetSecurityInfo(
++                directory.as_raw_handle() as _, 1, DACL_SECURITY_INFORMATION,
++                std::ptr::null_mut(), std::ptr::null_mut(), &mut current_acl,
++                std::ptr::null_mut(), &mut current_descriptor,
++            ), 0);
++            let status = SetSecurityInfo(
++                directory.as_raw_handle() as _, 1, DACL_SECURITY_INFORMATION,
++                std::ptr::null_mut(), std::ptr::null_mut(), current_acl,
++                std::ptr::null_mut(),
++            );
++            LocalFree(current_descriptor as HLOCAL);
++            assert_eq!(status, 0);
++            let canonical = snapshot(path);
++            assert_eq!(canonical.1, initial.1, "fixture priming cannot change ACEs");
++            assert_eq!(canonical.0, initial.0 | 0x0400, "stock AI bookkeeping only");
 +        }
 +    }
 +
