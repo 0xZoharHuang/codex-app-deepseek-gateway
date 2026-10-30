@@ -1,249 +1,170 @@
 # Codex App DeepSeek Gateway
 
-让官方 Codex 桌面 App 使用固定版本的 DeepSeek，同时保留 App 的界面、
-原生主线程与子智能体、工具执行、审批、沙箱和会话机制。
+让官方 Codex 桌面 App 使用固定版本的 DeepSeek，并继续由 Codex 原生运行时管理任务、子智能体、工具、权限、沙箱和会话。
 
-**当前状态：开发及验收中，尚未稳定发布。** 历史固定版本已在真实 Windows App 中完成多文件
-工程修复、多级原生子智能体协作、带 MCP 和资料查证的研究任务，以及文件、diff、
-worktree、本地提交和 OAuth 的完整生命周期；剩余机制仍按台账逐项验证。
-本仓库不会用单元测试数量、模型选择器或一次成功回复来证明完整等价。
-当前组合的实测结果、保留失败和未关闭项见[当前验收台账](docs/qualification-status.md)。
+**当前仍在最终验收，尚未稳定发布。** 已关闭的机制、有限范围的通过和剩余项目分开列在[验收状态](docs/qualification-status.md)。安装版能启动、模型能回复、软件测试通过，都不能单独证明完整等价。
 
-**Windows 当前目标：** 官方 App 已更新到 26.1023.6621.0 / runtime 0.165.0-alpha.1.2。
-O165 四组件已同源构建并加载到真实 App，原生沙箱正常运行。当前 App 中的多文件
-工程任务经独立干净重建通过 930 项检查；记忆提取、整合、新会话读取和 App 内置 MCP
-也有实际证据。验收同时发现内部记忆线程的 Guardian 上下文缺口，正在做最小原生修复。
-其余权限、恢复和生命周期按台账验收，尚未宣布完整等价。
+本项目的“等价”是固定 App 在该 Windows 环境下实际支持的本地 runtime 能力。模型推理质量、模型自身模态限制和 OpenAI 私有云账户权益分别说明。
 
-**历史已验组合：** 官方签名的 0.163 App 使用独立安装的网关和 N 原生 CLI，
-沙箱 helper、runner 和 probe 保留各自已经验过的原始 J 组件。N 已在真实 App 中
-连续两次完成冷启动后的容量拒绝、原生压缩和任务继续；独立复核确认摘要只收到
-已经完成的历史前缀，未消费后缀的内容和顺序保留，同一非幂等操作没有重复。手动压缩
-也有单独的 App 操作和原生完成记录。
+~~~text
+你在官方 Codex App 中交付一个工程任务
+                  |
+      原生主任务 -> 子智能体 -> 孙智能体
+                  |
+     原生工具 / 审批 / 沙箱 / 终端 / diff
+                  |
+          原生模型请求与工具历史
+                  v
+       本机专用 DeepSeek 网关
+        | Responses / SSE 协议适配
+        | 明确的主模型、辅助模型和提供方路由
+        +---------------------> OpenRouter -> 固定 DeepSeek
+        |
+        + alpha/search -------> 显式配置的网页后端
+~~~
 
-历史 r4 网关固定依赖已发布的 CDS 0.6.6；其 1307 项安装版软件测试与上述
-App 验收分别记录。此前 M/r4 的 Jinja 多文件修复完成了 908 项官方测试和 22 项
-独立检查。前台停止、网关故障恢复、新增网页后端分支及最终发行组合仍在验收，
-这些已有结果不表示全部机制通过。
+网关负责翻译请求和结果。真正运行 shell、应用补丁、决定权限、管理原生智能体和保存任务的仍是 Codex。App 的原有界面和工具也继续来自用户本机安装的官方 App。
 
-H/I helper 隔离、K 首次普通权限刷新错误 225，以及 L 无继承实验的真实 stdin 失败
-均保留，未被 M 的成功改写。没有添加扫描例外、改变防护设置或恢复隔离文件；
-Mac 及既有 CDS 安装、运行进程不作为此 App 项目的修改对象。
+## 和 CDS 有什么关系
 
-```text
-官方 Codex App
-  ├─ 界面 / 项目 / diff / 终端
-  ├─ 原生主线程 → 子智能体 → 孙智能体
-  ├─ 原生工具 / Code Mode / 审批 / 沙箱 / 会话
-  └─ 模型及独立网页后端请求
-              |
-              v
-       本机专用网关
-         ├─ Responses、SSE、工具历史协议转换
-         ├─ 明确的主模型和辅助请求路由
-         ├─ 原生 web.run 对应的 alpha/search 后端
-         ├─ 私有图像文件传输及生命周期（开发中）
-         └─ OpenRouter → 固定 DeepSeek
-```
+[CDS](https://github.com/0xZoharHuang/codex-deepseek-runtime) 让 Codex CLI 使用 DeepSeek；本仓库让官方桌面 App 使用 DeepSeek。两者可以并行使用，安装目录、配置、会话、凭据项和进程归属独立。
 
-网关不执行 shell、不运行补丁、不决定审批、不安排子智能体，也不另写 agent loop。
-这些工作继续由 Codex 原生运行时负责。
+本项目只固定复用已发布 CDS 0.6.7 的六个纯协议模块，提交为 cb788738864e97a16cde82f3c584164162ab6f7c。没有复制 CDS 启动器、线程管理、工具执行器或 agent loop，也不会通过 CDS 启动或接管桌面 App。
 
-例如，你在 App 里交给 DeepSeek 一个工程任务，仍由原生 Codex 创建任务和子任务、
-向你申请权限、运行工具、展示 diff、保存会话并处理恢复。网关负责把这套流程中的
-模型请求和结果翻译成 DeepSeek 支持的协议；网页查询另有明确配置的数据后端。
-它不会把网页抓取、模型思考或一次请求失败伪装成已经完成的工具执行。
+## 当前固定组合
 
-## 与 CDS 的关系
-
-[CDS](https://github.com/0xZoharHuang/codex-deepseek-runtime) 面向 Codex CLI；
-本项目面向官方桌面 App，两者独立安装、状态和进程。
-仅复用其纯协议转换模块及相关数据契约，不复制启动器、进程监督器、原生线程管理
-或工具执行逻辑。当前源码固定到已发布的 CDS 0.6.7 提交
-`cb788738864e97a16cde82f3c584164162ab6f7c`，源码归档、公开 wheel 和六个纯模块均有固定 SHA256；
-依赖清单见 `release/dependencies.windows-py313.json`。前一安装产物通过 1,459 项软件
-测试；当前产物仅更改的产品模块通过 143 项安装版相关测试，其余输入逐文件确认未变。
-这些软件证据与 App 机制验收分别记录，历史运行记录保持原版本归属。
-旧配置的 `policy_origin` 不会被静默改写，切换由操作人显式确认与执行。
-
-## 固定验收组合
-
-| 组件 | 当前基线 |
+| 项目 | 固定值 |
 | --- | --- |
-| 宿主 | Windows 10 Pro 19045 |
-| 官方 App | 26.1023.6621.0，当前已安装的官方签名包 |
-| App 内置 runtime | 0.165.0-alpha.1.2 |
-| runtime 源码 | `720fec862a608ae1e5878d1eecb04fb93192e93c` |
-| 模型请求 ID | `deepseek/deepseek-v4.1-flash-1017` |
-| 官方 canonical 模型 ID | `deepseek/deepseek-v4.1-flash-20261017` |
-| 当前已加载原生候选 | O165，CLI `76b5b061a4e4…`，四组件同源；内部 Guardian 修复为待验新候选 |
-| 当前安装版网关 | source `58a15ab…`，manifest `75627e1ad3a0…`；软件证据见台账，尚无稳定发布 |
-| 历史 r4 纯协议依赖 | 已发布 CDS 0.6.6 / `d2edfa2a49dd9879d45375e7770ff8bd2ec3d753` |
-| r5 协议输入 | 已发布 CDS 0.6.7 / `cb788738864e97a16cde82f3c584164162ab6f7c`，当前源码与安装版各有独立证据 |
+| 已实测宿主 | Windows 10 Pro 19045，x64；普通交互用户 |
+| 官方 App | 26.1023.6621.0 |
+| 原生源码 | 0.165.0-alpha.1.2 / 720fec862a608ae1e5878d1eecb04fb93192e93c |
+| 当前原生候选 | O165；CLI SHA256 18ef99bac7865066e1e802521e0c0c058862956cc569a6abc193b2005fa36b7f |
+| 完整原生源码指纹 | 39d578673f2031097dfa82fd97b5126a492ea4ba3a692b565ab5fcaef4dce33f，9514 个文件 |
+| 模型请求 ID | deepseek/deepseek-v4.1-flash-1017 |
+| OpenRouter canonical 模型 ID | deepseek/deepseek-v4.1-flash-20261017 |
+| 已有安装版证据 | 产品 source 3229244；源码与安装版各 1541 项通过；当前包 manifest ff0e750049630d60e3a2537a0434b9694b7e3602cb4888f53a5355a1788c093f |
+| 最终发布包 | 尚未发布；当前开发包正在真实 App 最终验收，不能作为稳定发布下载 |
 
-一次 App 更新、runtime 更新或依赖更新都会形成新的待验证组合。旧组合的通过
-结果不会自动延伸到新版本。模型质量、模型本身的模态限制以及云端账户权益与
-本地 runtime 能力分开记录。金融报价、体育数据等私有云数据服务尚未接入，单列为
-未接入服务，不计作功能通过；网页搜索和导航仍在约定验收范围内。
+当前实测是 Win10 的原生沙箱，不代表 Win11 MXC 或系统安全桌面/UAC。当前文档不把 Windows 的验收外推到 Linux/macOS 桌面 App。CDS 的跨平台资格由其独立仓库记录。App、runtime、依赖或模型版本变化后，需要重新核对兼容性和受影响机制。
 
-## 为什么需要原生适配补丁
+## 四个必要的原生补丁
 
-真实运行暴露了 Windows 10 legacy sandbox 的共享状态问题：机器级固定沙箱
-账号和网络规则被多个 `CODEX_HOME` 共用，账号密码却分别保存在各自目录。
-新环境 provisioning 会让其他目录的旧凭据失效；只分开配置目录不足以隔离。
+补丁顺序和哈希固定在 [native/build-lock.json](native/build-lock.json)，四个原生可执行文件同源构建：
 
-当前 O165 候选只保留两类必要适配：Windows 沙箱资源命名空间与并发 ACL
-协调，以及 MCP Direct 凭据按专用 home 隔离。它保留官方的 setup、令牌、runner、
-ACL 算法和权限策略；同一 home 的原生 Secrets 主密钥契约不变。补丁顺序、
-完整源码指纹、Cargo.lock 和构建目标固定在
-[native/build-lock.json](native/build-lock.json)，四个原生组件来自同一源码和配方。
+1. Windows home 命名空间：避免多个独立 CODEX_HOME 共用固定沙箱账号和资源，保留原生 setup、token、runner、权限和生命周期。
+2. MCP Direct 凭据隔离：按本项目的 canonical home 隔离原生 Direct 凭据；同一 home 的原生 Secrets 主密钥合同保持。
+3. Guardian 内部上下文：让内部记忆和审核工作使用已持有的原生授权上下文；公共线程查询仍不暴露内部线程，不改变审批决定规则。
+4. Windows 工作树父目录元数据：在正常原生 setup 物化阶段，对当前授权 cwd 所需的自有父链补充不继承的读取属性权限。它不授予列目录或文件写权限，也不替代原生叶目录权限。
 
-旧 0.163 的容量账本、压缩恢复扩展和前台句柄修复属于历史 N/J 候选，保留其原始
-记录，不移植进 O165，也不把历史通过记录计作新版本已通过。O165 的压缩、
-错误处理、agent loop、工具调度、审批和线程机制继续使用官方 0.165 源码。
-需要修改的边界由具体故障和源码证明，不能为了通过测试重造业务流程。
+旧 0.163 的容量扩展和压缩补丁不移植进 O165。当前的压缩、审批、工具调度和原生智能体机制使用固定上游实现。构建与来源见[原生构建](docs/native-build.md)。
 
-卸载沿用原生合同：清理本项目的沙箱资源，保留用户工程与文件系统权限；
-不承诺恢复整张旧 DACL。不通过 full access、关闭审批或降低沙箱来获得通过结果。
-真实 App、权限边界、原生子智能体和故障恢复仍是发布前必过的独立门槛。
+## 安装前准备
 
-- [隔离机制与剩余验证](docs/windows-sandbox-isolation.md)
-- [首段隔离补丁的历史来源](native/windows-sandbox-isolation-source-manifest.json)
-- [完整验收矩阵](docs/acceptance-matrix.md)
-- [Python 网关和离线清单的固定输入构建](docs/gateway-release-build.md)
+使用目标 Windows 用户的普通 PowerShell。管理员账户也按非提升权限使用；不要把日常安装目录建成其他用户或提升权限主体所有。
 
-App 的 `CODEX_CLI_PATH` 和 `CODEX_HOME` 入口已经过固定版本源码核对。
-独立安装版已提供正式的 prepare/bind/configure/check/launch/status 入口；测试 helper 负责观察，不能代替实际 App 使用证据。
-原版 App 包和既有 CDS 安装保留，不修改其他工作的冻结安装。
+需要已安装并可验证签名的固定官方 App、独立 Python 3.13，以及完整、经过发布 SHA256 核验的网关离线包和原生包。此仓库不分发官方闭源 App，也不把本机复制的 Code Mode Host 打进公共原生包。
 
-## Windows 运行身份与隔离
+下面命令的文件名和参数对应当前正式入口。发布前，下载地址和可信哈希必须由最终发行记录补齐；不要把本地现算的哈希当成来源信任。
 
-使用目标账户的普通 PowerShell。账户可以是管理员，但安装后的 App 和网关按
-**非提升权限**运行；不要用“以管理员身份运行”创建其日常目录。专用 App home
-的 NTFS 所有者必须是这个用户，才能建立正确的原生资源隔离身份。正式入口
-会检查这一条件，既有目录归属不符时明确停止，不自动取得所有权或改写整棵目录权限。
+## 首次安装
 
-独立 App 使用专用配置、Electron 数据、会话、原生沙箱命名空间和网关端口。
-原版 App 包保留；CDS 的安装、配置和运行进程不作为本项目的启动或卸载对象。
-不修改全机代理、全局 PATH，也不切断其他用户的桌面。同一账户的原版 App 或其他
-独立 profile 不因存在而被关闭：入口只拒绝共享本项目 native home、Electron／浏览器
-profile 或无法核实身份的冲突；真正的并行运行仍须完成当前版本的 App 实测。遇到失败先用状态和诊断
-核对实际进程；不要按进程名称结束所有 Codex 或直接重放一次未确认的启动。
+解压网关包与原生包到不同的自有永久目录。示例采用默认安装位置，不修改全局 PATH：
 
-## 路由与凭据
+~~~powershell
+$bundle = 'C:\CADSG\gateway-release'
+$nativeInput = 'C:\CADSG\native'
+$basePython = 'C:\Path\To\IndependentPython313\python.exe'
+$installer = Join-Path $bundle 'install_gateway.ps1'
+$gatewaySha = 'ff0e750049630d60e3a2537a0434b9694b7e3602cb4888f53a5355a1788c093f'
+$rawNativeSha = '0bd930c845f94a6e46a05dc79af5a40cda172b20a4f6338ca8cfcc3c7fe07893'
 
-普通推理优先使用 OpenRouter 的官方 `deepseek` 路由。
-严格结构化输出等请求可能需要同一个固定模型的兼容提供方；只有明确列入
-`allowed_providers` 的路由才能使用。请求失败后不会隐式换模型或提供方。
-
-| 请求 | 明确路由方式 |
-| --- | --- |
-| 主任务与原生子智能体 | 固定 DeepSeek 模型 |
-| 原生辅助模型名 | `gpt-5.6-luna`、`gpt-6-luna`、`gpt-6.1-sol` 为明确的隐藏兼容别名，实际仍请求固定 DeepSeek |
-| 记忆抽取、记忆合并 | 通过原生配置明确指定固定 DeepSeek |
-| 本地压缩 | 使用原生当前模型及压缩机制 |
-| 严格 JSON schema | 仅在显式允许时选 `morph/fp8` |
-| 需要串行工具保证的请求 | 仅在显式允许时选 `primeintellect` |
-
-App 的新任务标题与已有线程描述采用不同的原生调用路径；后者不会自动回退到提供方默认模型，因此必须在模型目录和策略中明确列出这些辅助别名。用户仍可显式配置其他别名；未在实际策略中声明的请求会报错，不隐式改名。详见[App 辅助模型与升级](docs/app-auxiliary-models.md)。
-
-请求路由与实际服务商分别记录。上游没有返回身份时记为未知，不能把
-`provider.only` 当成实际服务商证据。可通过 OpenRouter generation metadata
-进行只读回查；回查不会重放推理。
-
-上游 key 仅保存在 Windows 专用凭据项 `ai.codex.app-deepseek.openrouter`。
-App 通过官方 command-backed authentication 获取另一份本地网关 token；
-正式安装配置使用已校验的私有 Python `-I -m codex_app_deepseek.cli auth-token`，避免继承的 Python 环境或当前目录改变认证模块。
-上游 key 不进入 App 提示、配置文件、命令行参数或仓库。
-
-## 安装与操作文档
-
-稳定发布前请以开发及验收资料为准。安装器只接受固定 manifest 与完整离线 wheel
-集合，并校验全部 SHA；默认不会启动网关、修改 App 配置或初始化凭据。
-
-- [安装、版本检查、启动、停止、回滚及卸载](docs/lifecycle.md)
-- [使用正式安装版启动、检查和观察私有 App](docs/installed-app-entrypoints.md)
-- [App 配置与三方回滚](docs/app-configuration.md)
-- [原生网页接口和后端边界](docs/web-runtime-path.md)
-
-安装器的 Install / Activate 结果会返回已安装命令的绝对路径。将它保存为 `$cdag`，无需修改全局 PATH。正式安装后的常用入口：
-
-```powershell
-$cdag = '<安装器返回的 command>'
+$install = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer -Action Install -ManifestPath (Join-Path $bundle 'release.json') -ManifestSha256 $gatewaySha -Wheelhouse (Join-Path $bundle 'wheels') -PythonExe $basePython | ConvertFrom-Json
+& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer -Action Activate -ReleaseId $install.release_id
+$cdag = $install.command
+$python = Join-Path (Split-Path -Parent $cdag) 'python.exe'
 & $cdag --version
 & $cdag setup-credentials
+~~~
+
+setup-credentials 在交互界面读取 OpenRouter key，保存到 Windows 专用凭据项。不要把 key 放入参数、App 提示或仓库。导入 CDS 凭据是单独显式选项，首次独立安装无需读取 CDS。
+
+正常关闭本项目使用的 App 实例，再准备和绑定原生包：
+
+~~~powershell
+$prepared = & $cdag app-prepare-runtime --native-manifest (Join-Path $nativeInput 'manifest.json') --native-manifest-sha256 $rawNativeSha | ConvertFrom-Json
+& $cdag app-bind --native-manifest $prepared.manifest --native-manifest-sha256 $prepared.manifest_sha256
+~~~
+
+prepare 核验本机官方 App 和原生包，复制匹配的官方 sidecar 到私有目录，并记录来源；它不启动 App。bind 保存明确的选择，不猜测其他安装目录。
+
+从绑定的原生版本生成保留其能力元数据的模型目录：
+
+~~~powershell
+$native = Join-Path (Split-Path -Parent $prepared.manifest) 'codex.exe'
+$bundled = Join-Path $nativeInput 'bundled-models.json'
+$catalog = Join-Path $nativeInput 'deepseek-catalog.json'
+$nativeVersion = (& $native --version).Trim()
+
+& $python -I -c "import subprocess,sys;from pathlib import Path;raw=subprocess.run([sys.argv[1],'debug','models','--bundled'],check=True,stdout=subprocess.PIPE).stdout;Path(sys.argv[2]).open('xb').write(raw)" $native $bundled
+& $python -I -c "import json,sys;from pathlib import Path;from codex_app_deepseek.catalog import build_catalog;s=json.loads(Path(sys.argv[1]).read_text(encoding='utf-8-sig'));v=build_catalog(s,native_version=sys.argv[3]);Path(sys.argv[2]).open('x',encoding='utf-8',newline='\n').write(json.dumps(v,ensure_ascii=False,indent=2)+'\n')" $bundled $catalog $nativeVersion
+
+$catalogSha = (Get-FileHash -LiteralPath $catalog -Algorithm SHA256).Hash.ToLowerInvariant()
+& $cdag app-configure --catalog $catalog --catalog-sha256 $catalogSha --port 42817
+& $cdag service-start --port 42817
+& $cdag app-check
+& $cdag app-launch --observation-seconds 120 --wait-seconds 120
+& $cdag app-status
+~~~
+
+上述 --bundled 只读该二进制内嵌目录；该分支不创建在线模型或认证管理器。目录生成与配置不是能力通过证明。app-configure 通过原生 PluginManager 安装和启用官方 AppTools，记录独立回滚所有权；不靠复刻的 legacy MCP 定义替代官方工具。
+
+默认原生 agent 模式为 V2。V1 可通过匹配目录及显式参数为新会话选择；已存在会话保留自身记录，不隐式迁移。重启后 list_agents 只列已加载原生线程，也不等于旧子会话丢失；原生已知路径可懒恢复原 UUID。
+
+详细的身份条件、独立安装目录和升级步骤见[正式入口](docs/installed-app-entrypoints.md)与[安装生命周期](docs/lifecycle.md)。
+
+## 模型和网页服务
+
+主任务、子任务和显式辅助别名都请求固定 DeepSeek。新任务标题、线程描述、记忆和审核各有原生调用路径，未知模型名报错，不隐式换名。
+
+默认 App 策略明确允许三种同模型路由：普通请求优先 deepseek；原生严格结构化场景允许 morph/fp8；显式串行工具语义允许 primeintellect。请求失败不会自动换提供方。实际服务商与请求路由分开记录，不能把 provider.only 当成实际服务商证明。
+
+原生 web.run 的执行、引用和事件机制继续保留，网页检索和抓取服务由显式后端提供。搜索、打开、页内查找、跟随链接仍属于验收范围；无法表达的模式或约束必须明确失败，不默默改成无过滤搜索。后端和凭据见[网页路径](docs/web-runtime-path.md)。Firecrawl 目前使用有额度和速率限制的官方 keyless 服务，不承诺生产 SLA；时区地理偏置、日期精度等限制见[后端合同](docs/firecrawl-search.md)，不支持的约束不会悄悄丢掉。web.run、网页预览与 App 内置浏览器/计算机交互是不同能力。
+
+模型质量、模型未具备的模态、金融报价/体育等 OpenAI 私有云数据服务和账户权益不包含在本地 runtime 等价中。App IAB/计算机工具仍需按[验收状态](docs/qualification-status.md)关闭，不能用云权益边界掩盖本地能力缺口。
+
+## 日常使用、诊断与恢复
+
+~~~powershell
 & $cdag service-start
 & $cdag diagnose
 & $cdag app-check
-& $cdag app-launch
+& $cdag app-launch --observation-seconds 120 --wait-seconds 120
 & $cdag app-status
-```
+& $cdag health --port 42817
+~~~
 
-`setup-credentials` 交互读取 key，不把 key 放入命令参数。
-`health` 只验证本地网关，不产生模型请求。`auth-token` 是 App 内部认证 helper，
-其 stdout 是本地凭据，不能将其输出复制到日志或诊断报告。
+health 只验证本地网关，不发模型请求。启动观察超时不等于进程不存在；先读 app-status 和原 run receipt，不要重复启动或按 codex.exe 名字全局结束进程。auth-token 的 stdout 是本地凭据，不应粘贴到日志。service.json 的 configured_baseline 只是策略声明，可能保留早期配置值；实际加载版本以绑定清单和 App/native 进程路径、出生时间及哈希读回为准。
 
-首次使用先按正式入口文档完成 `app-prepare-runtime`、`app-bind` 和 `app-configure`。固定 App 基线与本项目启动脚本随 wheel 交付；native manifest 及目录继续作为明确的独立发布输入。`app-configure` 使用安装版认证命令、保存自有 catalog 并登记回滚检查点。低层 `configure-app` / `restore-app` 仍可显式使用；`configure-app` 的默认目标已改为私有 App home。正式 App 启动前还需
-经过 runtime 版本、身份隔离和实际加载路径检查，不能仅凭配置写入成功继续发布。
+| 现象 | 正常处理 |
+| --- | --- |
+| App 更新后不兼容 | 保留现有会话，停止使用旧组合，重新验证固定 App/runtime/catalog；不接受未知版本继续运行。 |
+| 未知模型、字段或工具历史语义 | 查明确错误和本次请求回执；不要删字段、伪造工具成功或换模型绕过。 |
+| 主工作树不能直接归档 | 这是原生保护。归档原任务并等待清理完成；恢复任务后使用正常 Restore worktree 入口。 |
+| Git 快照/归档 commit-tree 128 | 自己的仓库需要合法 Git author/committer 身份。按用户意愿配置该仓库或自己的 Git；CADSG 不自动写全局身份，也不把失败算成功。 |
+| 工作树恢复或队列仍待完成 | 先读本次原生状态和日志；不要重复 Archive、改队列或手工删除目录。 |
 
-## 验收如何判断
+## 升级、回滚与卸载
 
-每个能力项都有独立的原始记录、断言和适用条件。开发测试、真实上游请求、
-原生 CLI 行为、App GUI 行为和最终工程结果分别记录。
+升级采用新目录安装与显式 Activate。先正常关闭本项目 App，再保留旧包、原生目录、绑定及配置检查点；为新版本重新 prepare/bind/configure/check。升级不下载或替换未知 runtime，也不覆盖其他用户的 App。
 
-已完成的两类复杂任务分别验证了工程修复和资料研究。工程任务由 DeepSeek
-修改多文件项目，原生完整测试和独立边界检查通过，原有主→子→孙关系在冷启动后
-继续工作。研究任务实际使用技能、插件、MCP、官方 App 工具和子智能体复核；
-复核发现的事实错误由模型纠正，随后通过 App 暂存并生成本地提交。
+~~~powershell
+& $cdag service-stop
+# 先通过 App 正常退出本项目实例，再执行：
+& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer -Action Rollback
+# 完整卸载使用同一已校验安装器：
+& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer -Action Uninstall
+~~~
 
-此前 M/r4 的 Jinja 任务由 DeepSeek 修复三个源码模块并写出报告。官方 908 项和独立
-22 项检查通过；测试、依赖及运行环境的固定内容未被模型或控制器改写。Windows
-离线沙箱下 asyncio 的 loopback 需求单独保留：原生默认网络拒绝和一次仅网络临时
-授权前后均有检查，没有用 full access 取代受限运行。原始权限夹具错误、超时、
-中断窗口及一个非主上下文的未关闭账本尾项仍单列，不由最终工程成功抹去。
+回滚按项目拥有的字段和检查点恢复，保留后来由用户修改的内容；冲突明确报告。卸载使用原生 sandbox uninstall 清理本项目资源，不另写账号/权限管理器。用户工程、会话、凭据和原生按合同保留的文件系统权限不会被笼统清空；不承诺复原整张历史 DACL。
 
-独立机制验证还覆盖了 Guardian 的真实允许与拒绝、App OAuth 的拒绝授权、
-过期刷新、撤销、重连和冷启动复用。历史 H 组合的原生记忆抽取、合并和新任务实际读取
-分别有运行证据；一个小图片窗口也验证了同一原图经过网关送达模型并被正确读取。
-这些结果各有适用范围，不外推到任意图像规模、压缩方式或所有云端功能。
-
-App 闭源界面也会发起模型请求。例如已有聊天的描述助手采用原生 fork 路径，
-与新任务标题不同。这个差异曾触发网关拒绝；补齐明确的辅助别名后，已在真实 App
-中验证描述生成和持久化。验收既检查开源 runtime，也检查 App 实际使用结果。
-
-完整原生卸载已接入现成的 `codex sandbox uninstall`，并在独立临时命名空间
-实际验证清理、配置回滚及 stdlib 外部收尾；没有另写账号或网络规则清理器。
-helper 缺失时的受损包卸载恢复也已在独立安装实测通过，正常 App 启动仍严格拒绝
-不完整包；这一后续修复尚未作为稳定版本发布。
-
-临时权限撤销、队列与 Steer、App 终端输入，以及三种模式下的网页搜索、打开、
-查找和跟随链接已有实测。延迟工具发现已完成真实的搜索、schema 返回及独立调用链；
-两个后台会话也验证了只停止其中一个、另一个继续自然结束。原生 V1 同一子线程
-经过关闭和 App 冷启动后继续，V2 的打断后跟进另有证据，两者分别验收。
-原生记忆、Guardian、队列等既有实测按未改变的组件合同承接，不冒称都在 N 上重跑。
-
-App 命令认证的 warm／撤销／重新授权已通过原始严格验收；认证刷新与约 321 秒的
-缓存到期分别有范围明确的实际记录，早期未通过的完整验收仍保留。前台 GUI Stop
-仍有未关闭的进程终止问题，不能用后台 Ctrl-C 或 HTTP 取消代替。网关退出与恢复、
-新增天气和域名约束分支、同一数据目录中的冷网页引用，以及最终安装版的验收仍待完成。
-此前 J 的旧网页引用冷恢复成功，不能自动替代新增后端的验证。
-
-App 内浏览器／计算机交互目前显示官方不可用提示，尚未通过正向操作验收；
-`web.run` 的 open/find/click 和浏览器预览都不等于这些能力。两次旧自定义流失败
-缺少原始帧，仍无法追溯归因；新的四类实际 App FINAL 用例不能证明旧错误的原因。
-最终依赖更新、完整安装版验收、卸载与回滚绑定、公开发布和清理仍待收尾。
-权限失败、原始 400、超时和控制器错误都保留，后续成功不改写旧结果。
-最终仍以[当前验收台账](docs/qualification-status.md)逐项关闭为准。
-
-## 数据、回滚和清理
-
-- 网关仅监听 loopback，所有服务端入口要求本地认证。
-- 配置检查点、必要协议状态和图片缓存使用专用私有目录。协议数据库可能包含任务历史，图片传输状态可能包含临时文件引用；备份和诊断时按私有工作数据处理。
-- OpenRouter key 与本地网关认证 token 只由专用凭据存储提供，不写入 App 配置、提示或图片文件。
-- 配置回滚只还原本项目拥有且未被用户改变的字段，保留后来添加的项目与设置。
-- 停止服务必须同时匹配 PID、创建时间和归属；不按进程名称全局结束 Codex。
-- 卸载保留 App 会话、用户工程和凭据，删除范围以本项目发布清单为准。
-- 原始验收数据在 `.evidence/`，构建下载在 `.artifacts/`，两者都不提交 Git。
-- 公开报告必须去除原始提示、企业资料、凭据和私有请求标识。
-
-完整验收关闭后再创建公共仓库并发布；随后按精确归属清理临时环境、核验保留的安装和证据，最后实时确认周额度。
+专用 App home、协议数据库、网页引用、图片状态和原始诊断属于私有工作数据。公开问题只提供去敏摘要与哈希。当前验收未关闭前不发布“全通过”，也不把旧组合的通过延伸到新版本。

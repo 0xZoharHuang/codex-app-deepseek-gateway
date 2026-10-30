@@ -1,479 +1,102 @@
-# Building the fixed Windows native candidate
+# 固定 Windows 原生构建
 
-The current candidate is **O165**, paired with signed App **26.1023.6621.0**.
-Its official runtime source is
-`720fec862a608ae1e5878d1eecb04fb93192e93c` / `0.165.0-alpha.1.2`.
-`native/build-lock.json` fixes the archive, patches, complete prepared-source
-fingerprint and file count, Cargo.lock, compiler/profile and all four outputs.
-Read those exact values from the lock; no binary hash or runtime acceptance
-is inferred from the source recipe.
+当前配方为 O165，对应官方 App26.1023.6621.0，upstream0.165.0-alpha.1.2。build_native.py只构建，不安装、启动App、配置沙箱或运行智能体。
 
-Only two patches are applied, in order:
+## 精确输入与当前产物
 
-1. `windows-home-namespace-0165.patch` isolates Windows sandbox identities and
-   coordinates filesystem ACL updates across cooperating homes while retaining
-   the native setup, token, ACL, runner and policy algorithms.
-2. `mcp-keyring-isolation-0165.patch` scopes native Direct MCP credential
-   load/save/delete to this project's canonical home. File and encrypted Secrets
-   storage, native refresh coordination and the same-home Secrets masterkey
-   contract remain native.
+| 输入/产物 | 固定值 |
+| --- | --- |
+| upstream commit | 720fec862a608ae1e5878d1eecb04fb93192e93c |
+| upstream tar.gz SHA256 | 37f7f01a5e404b5015b47decececba7a3f0b9526bc951d0624bd57008a972a14 |
+| 完整prepared source | 39d578673f2031097dfa82fd97b5126a492ea4ba3a692b565ab5fcaef4dce33f /9514文件 |
+| build-lock.json SHA256 | dbb9faf2a71531369435611a2bf2c1104daeb4a4461509369d12648f67e4b90d |
+| Cargo.lock SHA256 | 7537da7c5e154334b15ef9b59091f5fed3a8e480b77c037e3a8b7f07d1614709 |
+| Rust/Cargo/target | 1.99.1 / x86_64-pc-windows-msvc |
+| producer source commit | 7cc0a6f8bc69f2876d7816aeec904c30a7d3dd89 |
+| raw producer manifest SHA256 | 1c56319997c896cb8b33ed5eaf413fec57afa2d128ae44396660e03abe79010e |
+| raw distribution manifest SHA256 | 0bd930c845f94a6e46a05dc79af5a40cda172b20a4f6338ca8cfcc3c7fe07893 |
+| raw archive SHA256 | 3231dbea3c8983f8472ac58d7e8dfa4741550f1338f4339d41ff37231f86adf6 |
 
-The previous 0.163 capacity-checkpoint/retry extensions are **not transplanted**
-into this version. Official 0.165 local compaction, error handling, agent loop,
-tool scheduling, approvals and all App RPC methods remain upstream code.
-Source parsing, compilation, native checks and actual App acceptance are separate.
-The new cohort is still undergoing qualification; old N/J and r4/r5 results
-remain historical, not a full 0.165 pass.
+四个补丁严格按锁顺序：
 
-## Compile all four native targets
+| 补丁 | SHA256 |
+| --- | --- |
+| windows-home-namespace-0165.patch | 1e436f88e4201e6e33bba7d509e43265071c321006efd360215a260bf643d83b |
+| mcp-keyring-isolation-0165.patch | 0cfe1ae48ab50ef8d930298c42cd7ee6d2de4277750cceacca7e5d2c2d0c8efc |
+| guardian-thread-context-0165.patch | 6f434a95d3e0dd34c501539c0b8b562ac8bb2efc2973edf42a3d659cf1eaca60 |
+| windows-cwd-ancestor-metadata-0165.patch | 9544c5b02e0e4e3546ba24fa1931b4e9592c5cf84d9ce0e7009b57868ac3c002 |
 
-Use a Windows x64 MSVC Developer shell, Python 3.11+, Git and the fixed Rust
-1.99.1 toolchain. The builder installs no dependencies and starts no App, helper
-or sandbox. Substitute your paths; output must be empty:
+它们不重写agent loop、审批器、工具执行器、压缩或智能体持久化。父目录补丁只补必要的原生读取属性物化；public thread lookup仍保持限制。
+
+## 先单测、后冻结、再构建
+
+修改原生代码时先在该确切prepared tree运行相关Rust单测，并审查真实断言都执行；再导出patch、更新完整source指纹和锁，运行当前真实锁的Python构建/打包合同检查，最后才构建四目标。不要用“编译成功”代替尚未运行的单测，也不要先编40分钟再发现fixture失败。
+
+本次正确顺序为：最终39d源码的完整唯一cwd回归1pass/0fail/0ignored → 当前锁100个合同检查 → dbb9标准四目标producer。原失败101和旧506b producer保留。100是该固定版本的记录，不是将来需要硬凑的测试数量。
+
+在x64 MSVC Developer shell内，使用已固定的工具链和同一release profile。对现有开发prepared source示例：
 
 ~~~powershell
-python -I scripts/build_native.py --archive "<source-archive.tar.gz>" --work-dir "<new-short-build-directory>" --toolchain-bin "<Rust-1.99.1-bin-directory>" --output "<empty-candidate-directory>" --dry-run
+$env:CARGO_BUILD_JOBS = '2'
+$env:CARGO_INCREMENTAL = '0'
+$env:CARGO_PROFILE_RELEASE_INCREMENTAL = 'false'
+$env:CARGO_PROFILE_RELEASE_DEBUG = '0'
+$env:CARGO_PROFILE_RELEASE_STRIP = 'symbols'
+$env:CARGO_PROFILE_RELEASE_LTO = 'false'
+$env:CARGO_PROFILE_RELEASE_CODEGEN_UNITS = '16'
+
+# 在已核完整source指纹的 codex-rs 目录，调用固定 cargo：
+& $cargo test --locked --offline --release -p codex-windows-sandbox --lib setup_provisioning::cwd_metadata::tests::owned_worktree_parent_metadata_is_narrow_and_idempotent -- --exact --nocapture
+
+# 在网关repo，以有正确依赖的解释器运行当前锁的合同：
+& $buildPython -I -B -m pytest -q .\tests\test_native_build_metadata.py .\tests\test_native_release_package.py
 ~~~
 
-A dry run verifies inputs/tool versions and prints the plan without writing.
-Remove `--dry-run` for the foreground build.
+新准备的单测树可用现有build_native.py的prepare_source函数，从已核验archive/patch锁生成独立测试树；不要手写或伪造发布builder的owner记录。测试树与发布树需完整指纹一致，缓存路径不同则正常重编。CLI没有prepare-only选项，不应在文档或控制器里假造该参数。
 
-An explicit `--cache-dir "<existing-owned-cache-root>"` reuses that directory's
-`cargo` and `target` caches while leaving extracted source, output and ownership
-records in the selected work directory. Only use a cache owned by this project.
-The option requires an existing directory and rejects overlap with the checkout,
-current source or output, and redirected/non-directory cache entries. It does not
-copy, clean or relocate an older source tree. Omit the option for the unchanged
-default `WORK/cargo` and `WORK/target` layout. The build plan records the actual
-cache root, and packaging checks both cache paths against that plan.
+任何包括cfg(test)的字节变化都会改变完整源码指纹。必须重新冻结最终patch/锁并生成对应producer，不能把旧输出换标签、混源拼包或回拨mtime来伪装同源。
 
-The current lock selects one exact source producer for all four outputs:
+## 标准四目标构建
+
+工具准备：独立Python3.11+、Git、固定Rust1.99.1、x64MSVC linker/LIB及Windows SDK。此步骤不下载安装工具。
+
+~~~powershell
+& $buildPython -I -B .\scripts\build_native.py --archive $sourceArchive --work-dir $work --toolchain-bin $toolchainBin --output $newEmptyOutput --dry-run
+# 核对计划后，用同一组输入去掉 --dry-run：
+& $buildPython -I -B .\scripts\build_native.py --archive $sourceArchive --work-dir $work --toolchain-bin $toolchainBin --output $newEmptyOutput
+~~~
+
+输出目录必须空。工作目录必须在网关repo外；现有非空目录只能使用标准builder自己的匹配owner记录。构建真实调用：
 
 ~~~text
 cargo build --locked --release -p codex-cli -p codex-windows-sandbox --bin codex --bin codex-command-runner --bin codex-windows-sandbox-setup --bin codex-windows-managed-deny-probe
 ~~~
 
-The builder uses two jobs, below-normal priority, no incremental/debug output,
-symbol stripping, no LTO and sixteen codegen units. It verifies the full source,
-patches and archive again before copying outputs. Its raw manifest says
-`built-not-app-qualified`. No Code Mode Host from the official App is compiled
-or included in these four outputs.
+使用两jobs、below-normal优先级、无incremental/debug、无LTO、16 codegen units。只选择四个target，不用--bins。构建前后核完整树、archive、锁和patch SHA，原始manifest始终标built-not-app-qualified。
 
-## Assemble the current raw distribution
+显式--cache-dir可复用本项目已有Cargo/target缓存，不搬源路径、不清空缓存。输入锁变化只允许--transition-from-lock OLD_SHA的标准CAS：旧构建必须终态，真实现有source已匹配新锁，固定原路径/mtime，拒绝redirect/reparse/hardlink风险，按旧记录内容保存owner/report/source-manifest三份备份，再换owner。默认路径仍严格，不采用旧mtime-reference/ABA做法。不降低磁盘guard或并行占用同一cache。
 
-`scripts/package_native_release.py` accepts the current single producer directly
-from its exact builder manifest. It verifies the trusted raw manifest hash,
-current lock, four binary hashes/sizes, source fingerprint, profile and target
-invocation. It generates public provenance without the builder's absolute paths.
-No hand-authored N/J mixed-source receipt is used for O165.
+## 原始产物和打包
+
+| 文件 | SHA256 |
+| --- | --- |
+| codex.exe | 18ef99bac7865066e1e802521e0c0c058862956cc569a6abc193b2005fa36b7f |
+| codex-command-runner.exe | b411bdcc660b4f90f5ddc1cc7e1120271d3ca7916c785217d8aa34747404fd07 |
+| codex-windows-sandbox-setup.exe | ad99dad63f2c6583622b1756cceabaffd677864e456276990a34a05a72db7ef0 |
+| codex-windows-managed-deny-probe.exe | 97449b523b5053fac52b93ddd346315e22dbdf376db2494c5d0b8ee900e378b5 |
+
+正常打包只接受当前四补丁锁、完整prepared source、可信producer manifest及四目标SHA/size/profile一致：
 
 ~~~powershell
-python -I -B .\scripts\package_native_release.py --source-root "<verified-prepared-source>" --native-manifest "<candidate>\manifest.json" --native-manifest-sha256 "<trusted-hash>" --cargo "<pinned-rust>\cargo.exe" --cargo-home "<offline-cargo-cache>" --git "C:\Program Files\Git\cmd\git.exe" --output "<new-public-staging>" --evidence-dir "<new-private-evidence>"
+& $buildPython -I -B .\scripts\package_native_release.py --source-root $preparedSource --native-manifest (Join-Path $newEmptyOutput 'manifest.json') --native-manifest-sha256 $producerManifestSha --cargo $cargo --cargo-home $cargoHome --git 'C:\Program Files\Git\cmd\git.exe' --output $newPublicStage --evidence-dir $newPrivateEvidence
 ~~~
 
-Assembly requires clean committed project source for public artifacts; an explicit
-`--development-qualification` build remains a qualification archive. It resolves
-the exact target's dependency graph offline, retains available original license
-notices and fixed SPDX texts, and produces a hash-checked deterministic archive.
-Only the four self-built binaries are redistributable here. The normal
-`app-prepare-runtime` command later copies the necessary verified official
-Code Mode Host from the user's local App into a fresh runtime directory.
-Never repack that locally prepared directory as a public raw release.
+先创建输出父目录，stage/evidence自身必须是新路径。公共组装要求源码干净且已提交；development qualification不冒充公开发行。输出记录固定依赖license与来源，不导出私有请求或构建机凭据。
 
-The historical N/J mode remains explicit: use
-`--build-lock native/build-lock.N.json` and its original
-`--producer-references-sha256`. It cannot be relabeled as O165.
+当前raw归档3034个文件已逐成员对照分发目录SHA/size，无链接、越界或重复。它仍不代表完整App通过。正常app-prepare-runtime从用户本机固定官方App复制匹配sidecar；该prepared目录含闭源资源，不能重新打成公共包。
 
-The following retained record describes the old recipes and their evidence only.
-
-# Historical 0.163 N/J build and distribution
-
-This is a build step for the private runtime. It does not install, configure or start
-Codex App, a gateway, a sandbox helper, a Windows service or an agent session.
-
-The historical lock native/build-lock.N.json selects **N CLI only**: the eighteen retained M patches
-plus one replay-hash correction. The prepared source has 9,201 files and
-fingerprint
-`3be6efb7b73138f54cae24f6f6f04da5a348b02483f2a36dbeddc766689a77bc`.
-The CLI built with the fixed compiler/profile is
-`1dbf68a29a37c92816ea9eaac22b12d2dfbf9fa42017b26b9b050fc18a6da8f4`.
-The new bundle has been prepared through the normal installed App command and
-loaded by the signed App. N/r4 completed two consecutive cold capacity recoveries,
-native compaction/continuation and a separate manual GUI compaction. Independent
-source-backed review checked the entire summary-prefix vector and preserved
-suffix. This is scoped actual App evidence, not complete App acceptance or final
-r5 qualification. Compilation, preparation, native behavior and App acceptance
-remain separate gates.
-
-The retained M lock is `native/build-lock.M.json`, SHA-256
-`3259ede15d27dcc590a62f6bdeea1963357c1f3b2133d21664688cfc420ea1d9`.
-M's source fingerprint `1a365be6...` and CLI `235e1b93...` keep their original
-receipts. The historical M/r4 and current N/r4 combinations and scoped results are in
-[qualification-status.md](qualification-status.md).
-
-N changes only the capacity checkpoint hash projection so native Compacted
-parallel metadata survives another cold reconstruction. It does not alter
-history, compaction, tools, approvals or scheduling. The old capacity patch
-is retained byte for byte; the new small overlay is separately pinned.
-
-The intended runtime pairs this CLI with three original qualified J siblings.
-Their source producer is J's seventeen-patch tree
-`9c29f93e84e26b85498bee62cbaf9ae4331f2b8e01d373a60ea301d7b62d6c90`;
-the exact original lock is retained as `native/build-lock.J.json`, SHA256
-`f878eaaad7c9d8c3f1c9211ac5e221b07fb47c11c22a2e5e1b9f68311cb5ad85`.
-Record provenance per executable; the three J siblings were not built from M or N.
-
-M filters inherited handles at the existing CLI-to-foreground-helper launch,
-using NUL and the native Win32 handle list while preserving command resolution,
-UTF-16 arguments/environment, token, working directory and exit status.
-J's helper, background ACL work, runner and probe keep their original bytes.
-No agent loop, tool executor or approval engine is added.
-
-Historical K changed the helper's background launch. Its build completed but
-actual deployment encountered Winerror225. That failed deployment remains
-recorded; K is not the current build lock. Defender settings are not modified.
-
-## Inputs
-
-Use a Windows x64 MSVC Developer PowerShell or Developer Command Prompt with:
-
-- Python 3.11 or later and Git available.
-- The x64 MSVC linker and Windows SDK configured by the official Developer shell.
-- The already installed `1.99.1-x86_64-pc-windows-msvc` Rust toolchain.
-- The upstream source archive identified by `native/build-lock.N.json`.
-
-The build lock fixes upstream commit `680c4ba93ec79c292287fb9e0b627dc7a76e3b5e`,
-archive SHA-256, every listed patch SHA-256, prepared source SHA-256, Cargo.lock SHA-256,
-Rust/Cargo version and the exact selected executable filenames. Source downloads and toolchain
-installation remain ordinary developer prerequisites; this script does not install
-tools or create another downloader or process supervisor.
-
-Supply your own paths. No personal drive or user-directory path is embedded in the
-scripts. Start with a plan, replacing the angle-bracket placeholders:
-
-```powershell
-python -I scripts/build_native.py --archive "<source-archive.tar.gz>" --work-dir "<new-short-build-directory>" --toolchain-bin "<Rust-1.99.1-bin-directory>" --output "<empty-candidate-directory>" --dry-run
-```
-
-`--dry-run` checks the archive, patch files, compiler versions and Developer-shell
-prerequisites, then prints the exact plan. It creates no work directory and launches
-no build. Remove `--dry-run` to build in the foreground.
-
-## What a real build does
-
-The supplied work directory contains only this build's extracted source, Cargo cache,
-target directory and receipts. It must be outside the gateway checkout. An existing
-nonempty directory is accepted only with this script's matching build ownership
-record; an existing source tree must match the locked prepared-source checksum.
-
-The script extracts the verified archive, preserves the archive's license contents,
-applies the listed fixed patches using command-scoped Git line-ending settings, and
-checks every source file through a full-tree checksum before compiling. It does not
-change global Git configuration. The first isolation layer's workspace version
-normalization is explained in `windows-sandbox-isolation.md`. The final Cargo.lock,
-including the request-capacity-port inputs, is separately pinned by the build lock.
-
-The compiler runs these commands with two jobs, below-normal process priority,
-incremental compilation disabled, release debug information disabled, symbol stripping,
-LTO disabled and sixteen codegen units:
-
-```text
-cargo build --locked --release -p codex-cli --bin codex
-```
-
-The CLI package also defines `logs_client`; explicit targets exclude it.
-The N and retained M locks exclude helper compilation. To reproduce J's original four-target
-producer, supply `--build-lock native/build-lock.J.json` and a distinct work
-directory. A new build is a new candidate requiring its own qualification.
-
-Compiler output stays in the foreground. Source and patch checksums are checked again
-before outputs are copied. Any source change invalidates the result. The output
-directory must be empty; existing candidates are preserved.
-
-Outputs are:
-
-- `codex.exe` for the N or retained M lock; the J lock builds its listed four targets.
-- `manifest.json`, containing input provenance, compiler/profile information and each
-  executable's size and SHA-256. It explicitly says `built-not-app-qualified`.
-
-The work directory retains `build-report.json` and `source-manifest.json`. A compiler
-failure can be retried using the same matching work directory and an empty output
-directory. Modified or incomplete source is rejected; preserve it for diagnosis and
-use a new work directory. The script performs no automatic deletion.
-
-A native CLI build is not a complete App distribution. The integration also
-needs the matching official App resources and the project's independent configuration,
-credentials, gateway and acceptance records. Those remain separate deployment gates.
-
-## Exporting the patch for review
-
-To reproduce the sandbox review patch from a deliberately edited fixed source tree:
-
-```powershell
-python -I scripts/export_sandbox_patch.py --source "<prepared-source-root>" --archive "<fixed-source-archive.tar.gz>" --output "<patch-output-directory>"
-```
-
-`--source-root` remains an alias for `--source`. Both source and archive paths are
-required. Output defaults to this repository's `native` directory when omitted.
-The exporter verifies the fixed archive SHA and all external lock records, and binds
-pure-test claims to the tested module's exact SHA. Re-exporting a changed patch does
-not update `native/build-lock.N.json` automatically and does not qualify a new release.
-
-## Historical candidate K background handle inheritance
-
-K appends `windows-setup-background-handles.patch` to J's unchanged seventeen
-patches. The native read-ACL helper now starts its background child with the
-existing Win32 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` primitive. Only a newly opened
-NUL handle is inherited. The helper's UTF-16 arguments, invocation-scoped payload
-environment, native background work and existing completion behavior are retained.
-
-The production module is the existing CDS implementation, SHA-256
-`fb85f0b6d059d94a968626775b0b8cef68fc89365445041477a23271c343dc67`.
-Its local caller and a test-only fixture are the three changed source paths.
-The fixed Codex version, private App namespace derivation, tools, approvals and agent
-lifecycle are unchanged. Rust 1.99.1 and the release profile remain pinned.
-
-The pinned Rust standard library starts ordinary `Command::spawn` with handle
-inheritance enabled and no attribute list. Null standard streams leave unrelated
-inheritable pipe handles eligible for inheritance. This is verified against the
-[exact compiler source](https://github.com/rust-lang/rust/blob/58cf8f9c35b355199727627d07ae34a4e2846d67/library/std/src/sys/process/windows.rs).
-The component regression keeps a real child alive behind its own ready/release
-gate: K releases the unrelated pipe while the original null-stdio launch retains
-it. Both children subsequently exit normally, and both pipe endpoints reach EOF.
-
-On the final formatted source, the two component tests and the thirty-two
-metadata/namespace regressions passed under a Limited Windows token. Each selected
-test reported one pass, zero failures and zero ignored; the ignored child role is
-invoked only by its parent fixture. Six pure build-metadata cases passed separately.
-The component artifact is an opt0 test build with debug assertions and overflow
-checks enabled. The retained compiler-closeout observations are documented
-separately from the successful source/test results.
-
-K's four production executables and actual production/App EOF behavior still
-require qualification before changing the running J installation. These component
-results do not establish a completed production build or an App acceptance pass.
-
-## Candidate J minimal metadata path
-
-J appends `windows-native-metadata-minimal.patch` to the sixteen unchanged I
-patches. It removes the extra ancestor-metadata history ledger, historical
-identity reopening, raw-volume NTFS queries and automatic metadata revoke.
-Ordinary native ACL updates no longer reconstruct redundant standalone metadata
-entries. The existing deny-read policy reconciler and its stale-deny fix remain.
-
-Only current authorized paths select metadata targets. The live path retains
-physical home/file identity, no-reparse/no-delete-share pins, owner checks,
-root-only non-inheriting FILE_READ_ATTRIBUTES and existing ACL/setup locks.
-Before this module writes an ACL, it verifies the current local SAM alias and
-both local user SIDs. User-specific inherited denials are considered for home
-itself and its ancestors. This does not replace runner token-membership admission.
-
-The project's actual native CLI uninstall uses the upstream None-home contract:
-it removes owned sandbox resources while retaining files and filesystem
-permissions. Old metadata ledgers are left untouched and are no longer parsed
-as authorization or recovery input. No new schema, sidecar or migration engine
-is introduced. This does not promise perfect metadata ACL restoration or extend
-to the unsupported packaged/registered-service uninstall path.
-
-Thirty-two related default tests passed under a non-elevated Windows token.
-One separately authorized test verified existing local namespace subjects by
-read-only SAM queries, without grant or provisioning. These are source/unit
-results; release construction and actual App acceptance remain separate gates.
-The reduction is a functional return to native permission/lifecycle semantics,
-not proof of which Defender classifier feature caused the earlier detections.
-The compiler and release profile remain unchanged.
-
-## Historical candidate I deployment status
-
-I appends `windows-app-sandbox-coordination.patch` to H's fifteen unchanged
-patches. It fixes the native runner's real-home/coordination binding and uses the
-actual restricted token's namespace group with read-control access. It does not
-add an execution loop, tool scheduler or approval engine.
-
-The private incremental build completed once with the pinned compiler and
-profile; 59 native tests passed. The setup helper was then quarantined by
-Defender, so I is incomplete and **not App-qualified**. H's deployed helper was
-later quarantined as well. No exclusion, restore or security-policy change is
-required or performed by these build instructions. A blocked component must not
-be hidden by accepting a partial bundle at App launch.
-
-Rebuilding variants to avoid a detection is not part of this recipe. The source
-lock preserves the correction for review, while stable Windows deployment
-remains a separate unsatisfied gate.
-
-## Historical candidate H source inputs and qualification
-
-H retains the first ten F input patches byte for byte and appends, in order:
-
-1. `cadsg-request-capacity-port.patch`
-2. `windows-existing-critical-read.patch`
-3. `cadsg-680-summary-kind-compat.patch`
-4. `windows-critical-read-deny-readiness.patch`
-5. `windows-metadata-owner-policy.patch`
-
-H's historical fifteen-patch input record predates the later I build lock;
-the current N lock is described above.
-Its prepared source has 9,198 files and fingerprint
-`06573f6fde8b44074601c1128101240d9215779f3875e3dc977e9071764caef7`.
-Its Cargo.lock SHA-256 is
-`fc643e0bfc6c6a3682e5cba84daf8df7ccf1987c364498e0827d161eb607418d`.
-The fixed upstream archive is available from
-[the pinned openai/codex commit](https://codeload.github.com/openai/codex/tar.gz/680c4ba93ec79c292287fb9e0b627dc7a76e3b5e);
-verify its SHA against the lock before extraction.
-
-The source-only replay used this repository's unmodified `prepare_source()` after
-the archive and all fifteen patch checks from `main()`. It verified the full
-`source_state()` inventory, Cargo.lock, and every file against H's complete prepared
-source archive. The source tree has its own Git repository. No private production
-plan or machine-specific control path is required by the public builder.
-
-A normal build retains the complete prepared source in `WORK/source` and its full
-inventory and upstream change summary in `WORK/source-manifest.json`. Retain the
-fixed upstream archive, this build lock and all fifteen patches with that source.
-The separately assembled raw H provenance bundle also contains
-`sources/prepared-source.tar.gz`, SHA-256
-`4932d0bbae2a5433aedac1202f61305875e9eac9eee124478bc2dab9b1dca4b5`,
-with all 9,198 source file contents verified. That raw bundle includes its actual
-license, metadata and build evidence; it remains separate from this script's
-four-binary candidate output and is not a complete or App-qualified distribution.
-
-## Historical candidate D help-only recipe
-
-The former D build lock described candidate D. Its fourth patch changes only the
-module documentation and clap help strings in cli/src/sandbox_uninstall.rs, so
-help correctly describes the home-owned namespace cleanup already implemented in
-C. Cleanup business logic, permissions, dependency pins and the three sandbox
-helper sources are unchanged. The normal patch loop in build_native.py consumes
-this fourth pinned patch; the plan/output manifest records candidate_revision=D.
-
-At that historical stage, C was the deployed and previously observed artifact. D source was
-first prepared as an independent one-file overlay; no new runtime has been executed
-or deployed. The previous C lock, source inventory and original help file are
-retained. The controlled QA incremental build completed after the other owned
-CDS compilation exited, reusing the same canonical source path, Cargo/target
-directories, Rust version, profile, package selection and four explicit binaries.
-Cargo exited 0 after 613.45 seconds. Independent verification rehashed all 9,188
-source files, build controls and four outputs: only the CLI binary changed; all
-three sandbox helper hashes remain identical to C. The deployed C manifest and
-five binary files were independently rehashed and remain unchanged. The D
-candidate has not been deployed or qualified in the App. Its exact new
-`sandbox uninstall --help` was executed in a separate temporary home under the
-Limited interactive token and passed the text assertions; the home and owned
-task were removed. No uninstall, sandbox setup or agent turn was executed. See
-.evidence/native-D-independent-verification.json and native-release-build-r4.json.
-No second cold build, cargo clean, helper setup or App restart is part of this step.
-The public builder remains a reproducible from-archive entrypoint; a dry-run is not
-a claim that a separate fresh build has completed through it.
-
-
-D metadata correction: the frozen QA input retained a stale inherited changed-files
-summary that omitted the help module, although its authoritative 9,188-file
-inventory and changed_since_build_C were correct. Historical build inputs and
-manifest remain unchanged. The derived source attestation compares every path,
-size and hash to the fixed upstream archive and contains all 30 changed paths.
-The final delivery-manifest.json references that attestation, the original frozen
-SHA and the help-only validation. Future build_native.py outputs derive their
-changed_files and source_changes directly from these full inventories for the
-source manifest, build report and binary manifest. Four pure metadata tests cover
-all change kinds, the omitted-help regression, materialized license links and
-duplicate archive rejection; they do not launch Cargo or a runtime. This metadata
-correction changed no Rust source or binary and requires no Rust rebuild.
-
+真实App还要验证官方包/普通用户/实际加载路径、权限、工具、会话和故障恢复。更新工具链、App、patch、metadata或依赖都会形成新的待验证组合。早期候选和失败仅见[历史摘要](qualification-history.md)。
 
 ## Checkpoint compatibility when downgrading
 
-N writes the v3 replay hash domain while preserving the checkpoint schema,
-cache path and digest label. It can validate exactly two fixed legacy v2
-representations. A mixed old representation that matches neither form fails
-closed; matching does not edit records or guess per-slot metadata.
-
-M does not recognize N's v3 hashes. A downgrade keeps session history and project
-files, but M can reject capacity recovery if it first receives HTTP 413 with a
-v3 checkpoint. A successful ordinary completion can establish that runtime's
-current checkpoint format. Do not describe rollback as backward checkpoint
-compatibility, or edit history/checkpoints to make a mismatch disappear.
-
-
-## Assemble the raw native release
-
-The compiler output alone is not a redistributable native bundle. In particular,
-the locally prepared runtime also contains a Code Mode Host copied from the
-official installed App. That local sidecar is not an input to the public archive.
-
-`scripts/package_native_release.py` assembles the already attested N CLI and
-three retained J binaries without compiling or running any native component.
-It verifies the mixed-producer source-index hash and keeps the N and J source
-identities separate; `source_sha256` is not relabeled as the N-only tree hash.
-
-The packager requires the original raw manifest, source index, producer references,
-N/J/M lock receipts, the exact prepared N source, the fixed offline Cargo cache,
-and this source checkout. It checks that the J recipe is an exact prefix of N's
-recipe, their Cargo.lock and target inputs agree, and N's extra overlays change
-only the explicitly reviewed Rust files. One offline, locked metadata resolution
-therefore provides a shared external-dependency superset. It includes workspace
-build/test dependencies and is not described as a list of crates actually linked.
-
-Original available crate LICENSE/NOTICE/COPYING/COPYRIGHT files, declared license
-expressions, authors and source references are retained. Crates omitting these
-files retain available README notices and their declared attribution; no missing
-copyright owner is invented. Canonical SPDX texts use the exact source and
-hashes in `native/license-data.json`. Unexpected license identifiers, missing
-declared files, outside-cache paths or executable/container bytes in a notice
-fail assembly. No downloader or new toolchain is used.
-
-Run from the intended publisher's verified Windows build environment. Substitute
-all paths and trusted hashes; the output and private evidence directories must
-not exist:
-
-~~~powershell
-python -I -B .\scripts\package_native_release.py `
-  --build-lock .\native\build-lock.N.json `
-  --source-root C:\NativeBuild\prepared-source `
-  --native-manifest C:\VerifiedRawNative\manifest.json `
-  --native-manifest-sha256 <trusted-raw-manifest-sha256> `
-  --producer-references-sha256 <trusted-producer-reference-sha256> `
-  --cargo C:\PinnedRust\bin\cargo.exe `
-  --cargo-home C:\NativeBuild\cargo `
-  --git 'C:\Program Files\Git\cmd\git.exe' `
-  --output C:\NewNativeDelivery\raw `
-  --evidence-dir C:\PrivateNativeEvidence\new-run
-~~~
-
-Normal assembly requires a clean committed gateway source and takes its epoch
-from that commit. `--development-qualification` permits an explicit local
-candidate and produces a `.qualification.tar.gz`; it is not a public release
-source. A changed committed recipe, producer or native binary needs new
-qualification rather than a filename-only update.
-
-The new output contains exactly these self-built binaries:
-
-- `codex.exe`, from N.
-- `codex-command-runner.exe`, from J.
-- `codex-windows-sandbox-setup.exe`, from J.
-- `codex-windows-managed-deny-probe.exe`, from J.
-
-It also contains the raw manifest, upstream LICENSE/NOTICE, crate notices,
-source/patch/Cargo.lock provenance, original producer receipts and an inventory.
-Every file is copied into a new independent file; no input ACL is copied and
-no hard link couples the release to a running installation. The archive is
-built from this explicit new staging tree and is read back by member name,
-size and SHA256. Unknown files, extra native outputs, prepared manifests,
-private provenance files and altered binaries are refused. The private
-Cargo metadata/stderr remains in the separate evidence directory.
-
-The existing public `app-prepare-runtime` consumes an extracted raw bundle and
-obtains its required sidecar from the user's verified official App package.
-Its normal no-existing-App guard still applies. Consumer validation must use a
-fresh extracted copy after the owned App has closed; never add that sidecar to
-the immutable public raw staging or repack a prepared runtime directory.
-Preparation alone does not bind, configure, start or qualify the App.
-
-The initial private archive and targeted packaging regressions are development
-qualification. Final clean-source assembly, installed-version binding and the
-remaining actual App gates still precede stable publication.
-
-## Incremental rebuild of an owned source tree
-
-Fresh extraction changes every source timestamp and can force Cargo to rebuild unchanged workspace crates. For a new reviewed input lock, retain the existing build source at the same absolute path and prepare its exact new locked bytes. Use --transition-from-lock PREVIOUS_LOCK_SHA256 together with a new, empty --output directory. The builder requires the prior run to be terminal and keeps the same source path, Cargo cache and release profile. It verifies the complete new source fingerprint and Cargo.lock, saves the old owner/report/source manifest byte-for-byte, then changes only the build-owner record under an OS file lock.
-
-This does not rewrite source or backdate timestamps. Actual edits keep their normal fresh timestamps so Cargo invalidates changed inputs; unchanged files retain their existing timestamps. Without this explicit option, the existing cross-input work-directory guard still rejects the transition. Inspect an interrupted or already selected run instead of replaying the transition option.
+本节只说明历史0.163 M/N与CDS相关容量扩展，不把旧配方用于O165。历史N修正缺省/显式默认元数据的重放哈希并写入v3检查点；旧M不保证在下一次容量拒绝时消费它。回滚保留历史，不表示旧二进制理解新格式。不得手改检查点、拼历史或换producer标签绕过不兼容。O165使用上游压缩与恢复实现，按自身版本验收。
