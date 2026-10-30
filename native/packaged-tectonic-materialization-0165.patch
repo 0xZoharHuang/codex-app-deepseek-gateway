@@ -1,0 +1,694 @@
+--- a/codex-rs/windows-sandbox-rs/src/app_package.rs
++++ b/codex-rs/windows-sandbox-rs/src/app_package.rs
+@@ -88,7 +88,7 @@
+     Ok(has_identity)
+ }
+ 
+-fn staged_package_root(name: &[u16]) -> Result<PathBuf> {
++pub(crate) fn staged_package_root(name: &[u16]) -> Result<PathBuf> {
+     let mut staged = vec![0u16; 32768];
+     let mut length = staged.len() as u32;
+     let status =
+--- a/codex-rs/windows-sandbox-rs/src/elevated_impl.rs
++++ b/codex-rs/windows-sandbox-rs/src/elevated_impl.rs
+@@ -153,6 +153,15 @@
+             proxy_enforced,
+             crate::WindowsSandboxProxySettingsMode::Reconcile,
+         )?;
++        let command = crate::helper_materialization::known_app_executable::materialize_command(
++            command,
++            &permissions,
++            codex_home,
++            cwd,
++            read_roots_override,
++            &deny_read_paths_override,
++        )?;
++
+         // Build capability SID for ACL grants.
+         let caps = load_or_create_cap_sids(codex_home)?;
+         let (sid_for_null, cap_sids) = if permissions.uses_write_capabilities_for_cwd(cwd, &env_map)
+--- a/codex-rs/windows-sandbox-rs/src/helper_materialization.rs
++++ b/codex-rs/windows-sandbox-rs/src/helper_materialization.rs
+@@ -3,6 +3,7 @@
+ //! the service and startup handshake independently verify the installed image.
+ 
+ mod copy;
++pub(crate) mod known_app_executable;
+ use copy::CopyOutcome;
+ use copy::copy_from_source_if_needed;
+ 
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/helper_materialization/known_app_executable.rs
+@@ -0,0 +1,272 @@
++//! Materialize one version-pinned App executable through the existing helper store.
++//! This does not implement a compiler or alter permissions, arguments or retries.
++
++use std::fs::{self, File};
++use std::io::Read;
++use std::os::windows::fs::MetadataExt;
++use std::path::{Component, Path, PathBuf};
++use std::time::{Duration, Instant};
++
++use crate::private_acl_lock::PrivateLockDirectory;
++
++use anyhow::{Context, Result, ensure};
++use sha2::{Digest, Sha256};
++
++use crate::app_package::{registered_core_requested, staged_package_root};
++use crate::logging::log_note;
++use crate::resolved_permissions::ResolvedWindowsSandboxPermissions;
++use crate::winutil::to_wide;
++
++use super::{copy::copy_from_source_if_needed, helper_bin_dir};
++
++const PACKAGE: &str = "OpenAI.Codex_26.1023.6621.0_x64__2p2nqsd0c76g0";
++const RELATIVE_EXE: &str = "app/resources/tectonic/tectonic.exe";
++const SHA256: &str = "5c4826fc9436a6d919598958e03e3ba72d2b3ee29ae90c8c9d66580da484c26f";
++const REPARSE_POINT: u32 = 0x400;
++
++fn checked_path(path: &Path) -> Result<&Path> {
++    let path = dunce::simplified(path);
++    ensure!(
++        path.is_absolute(),
++        "component permission path is not absolute"
++    );
++    ensure!(
++        !path
++            .components()
++            .any(|part| matches!(part, Component::ParentDir)),
++        "ambiguous component permission path"
++    );
++    Ok(path)
++}
++
++// Use component boundaries, retain non-Unicode names, and do not require a deny
++// path or the as-yet-uncreated destination to exist.
++fn contains(root: &Path, path: &Path) -> Result<bool> {
++    let root = checked_path(root)?;
++    let path = checked_path(path)?;
++    let mut parts = path.components();
++    Ok(root.components().all(|component| {
++        parts.next().is_some_and(|part| {
++            component
++                .as_os_str()
++                .as_encoded_bytes()
++                .eq_ignore_ascii_case(part.as_os_str().as_encoded_bytes())
++        })
++    }))
++}
++
++fn same_path(left: &Path, right: &Path) -> Result<bool> {
++    Ok(contains(left, right)? && contains(right, left)?)
++}
++
++fn allowed(
++    path: &Path,
++    extra_denied: &[PathBuf],
++    can_read: &impl Fn(&Path) -> Result<bool>,
++) -> Result<bool> {
++    checked_path(path)?;
++    for denied in extra_denied {
++        if contains(denied, path)? {
++            return Ok(false);
++        }
++        // If a deny alias exists, also respect its resolved identity.
++        match dunce::canonicalize(denied) {
++            Ok(resolved) if contains(&resolved, path)? => return Ok(false),
++            Ok(_) => {}
++            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
++            Err(error) => return Err(error).context("resolve component deny path"),
++        }
++    }
++    can_read(path)
++}
++
++fn digest(path: &Path) -> Result<String> {
++    let mut file = File::open(path).context("open pinned App component")?;
++    let mut hash = Sha256::new();
++    let mut buffer = [0u8; 64 * 1024];
++    loop {
++        let count = file
++            .read(&mut buffer)
++            .context("hash pinned App component")?;
++        if count == 0 {
++            break;
++        }
++        hash.update(&buffer[..count]);
++    }
++    Ok(format!("{:x}", hash.finalize()))
++}
++
++fn verify_leaf(path: &Path, expected_sha: &str) -> Result<()> {
++    let metadata = fs::symlink_metadata(path).context("inspect pinned component file")?;
++    ensure!(
++        metadata.is_file() && metadata.file_attributes() & REPARSE_POINT == 0,
++        "pinned component file was redirected"
++    );
++    let canonical = dunce::canonicalize(path).context("resolve pinned component file")?;
++    ensure!(
++        same_path(path, &canonical)?,
++        "pinned component path was redirected"
++    );
++    ensure!(
++        digest(path)? == expected_sha,
++        "pinned App component SHA-256 mismatch"
++    );
++    Ok(())
++}
++
++fn copy_verified_locked(source: &Path, destination: &Path, expected_sha: &str) -> Result<()> {
++    verify_leaf(source, expected_sha)?;
++    match fs::symlink_metadata(destination) {
++        Ok(_) => verify_leaf(destination, expected_sha)?,
++        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
++        Err(error) => return Err(error).context("inspect pinned component cache"),
++    }
++    // Reuse native atomic copying and destination-inherited namespace RX.
++    // Never call an outer resolver that can fall back to source execution.
++    copy_from_source_if_needed(source, destination).context("materialize pinned App component")?;
++    verify_leaf(source, expected_sha)?;
++    verify_leaf(destination, expected_sha)
++}
++
++fn copy_verified(source: &Path, destination: &Path, expected_sha: &str) -> Result<()> {
++    // Reuse the native owner-private, non-delete-shared lock store. A distinct
++    // home/component key prevents two cold App previews replacing a live image.
++    let key = crate::path_normalization::canonical_path_key(destination);
++    let name = format!("app-component-{:x}.lock", Sha256::digest(key.as_bytes()));
++    let locks = PrivateLockDirectory::open()?;
++    let result = (|| -> Result<()> {
++        let lock = locks.open_leaf(&name)?;
++        let deadline = Instant::now() + Duration::from_secs(10);
++        loop {
++            match lock.try_lock() {
++                Ok(()) => break,
++                Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
++                    std::thread::sleep(Duration::from_millis(5));
++                }
++                Err(std::fs::TryLockError::WouldBlock) => {
++                    anyhow::bail!("timed out waiting for pinned App component materialization");
++                }
++                Err(std::fs::TryLockError::Error(error)) => {
++                    return Err(error).context("lock pinned App component");
++                }
++            }
++        }
++        copy_verified_locked(source, destination, expected_sha)
++        // Dropping this exact file releases the lock on success and every error.
++    })();
++    let _ = locks.try_cleanup(&name); // Existing native cleanup refuses live split locks.
++    result
++}
++
++fn resolve_pinned(
++    source: &Path,
++    package_root: &Path,
++    codex_home: &Path,
++    read_roots_override: Option<&[PathBuf]>,
++    extra_denied: &[PathBuf],
++    can_read: impl Fn(&Path) -> Result<bool>,
++    expected_sha: &str,
++) -> Result<Option<PathBuf>> {
++    let expected = package_root.join(RELATIVE_EXE);
++    if !same_path(source, &expected)? {
++        return Ok(None);
++    }
++    ensure!(
++        read_roots_override.is_none(),
++        "pinned App component requires the native root-read policy, not read-root overrides"
++    );
++    ensure!(
++        allowed(source, extra_denied, &can_read)?,
++        "original App component is denied"
++    );
++    let canonical = dunce::canonicalize(source).context("resolve pinned App component")?;
++    ensure!(
++        same_path(&canonical, &expected)?,
++        "pinned App component escaped its registered path"
++    );
++    ensure!(
++        allowed(&canonical, extra_denied, &can_read)?,
++        "resolved App component is denied"
++    );
++
++    let bin = helper_bin_dir(codex_home);
++    let metadata = fs::symlink_metadata(&bin).context("inspect native helper store")?;
++    ensure!(
++        metadata.is_dir() && metadata.file_attributes() & REPARSE_POINT == 0,
++        "native helper store was redirected"
++    );
++    let canonical_home = dunce::canonicalize(codex_home).context("resolve native home")?;
++    let canonical_bin = dunce::canonicalize(&bin).context("resolve native helper store")?;
++    ensure!(
++        same_path(&canonical_bin, &canonical_home.join(".sandbox-bin"))?,
++        "native helper store escaped its home"
++    );
++    let destination = canonical_bin.join(format!("tectonic-{expected_sha}.exe"));
++    ensure!(
++        allowed(&destination, extra_denied, &can_read)?,
++        "materialized App component is denied"
++    );
++    copy_verified(&canonical, &destination, expected_sha)?;
++    Ok(Some(destination))
++}
++
++/// Called after ordinary native setup has secured the helper store, and before
++/// the first SpawnRequest. Only argv[0] can change. No process has run or failed.
++pub(crate) fn materialize_command(
++    mut command: Vec<String>,
++    permissions: &ResolvedWindowsSandboxPermissions,
++    codex_home: &Path,
++    cwd: &Path,
++    read_roots_override: Option<&[PathBuf]>,
++    extra_denied: &[PathBuf],
++) -> Result<Vec<String>> {
++    if registered_core_requested() {
++        return Ok(command);
++    }
++    let Some(program) = command.first() else {
++        return Ok(command);
++    };
++    let source = PathBuf::from(program);
++    if !source.is_absolute()
++        || !source.file_name().is_some_and(|name| {
++            name.as_encoded_bytes()
++                .eq_ignore_ascii_case(b"tectonic.exe")
++        })
++    {
++        return Ok(command);
++    }
++    if checked_path(&source).is_err() {
++        return Ok(command); // Ordinary noncanonical commands retain native behavior.
++    }
++    let package_root = match staged_package_root(&to_wide(PACKAGE)) {
++        Ok(root) => root,
++        Err(_) => return Ok(command), // No known installed package; no adaptation claimed.
++    };
++    if let Some(destination) = resolve_pinned(
++        &source,
++        &package_root,
++        codex_home,
++        read_roots_override,
++        extra_denied,
++        |path| permissions.can_read_for_materialization(path, cwd),
++        SHA256,
++    )? {
++        let effective = destination
++            .to_str()
++            .context("non-Unicode materialized executable")?;
++        log_note(
++            &format!(
++                "pinned App executable materialized: original={} effective={} sha256={SHA256}",
++                source.display(),
++                destination.display()
++            ),
++            Some(&codex_home.join(".sandbox")),
++        );
++        command[0] = effective.to_owned();
++    }
++    Ok(command)
++}
++
++#[cfg(test)]
++#[path = "known_app_executable_tests.rs"]
++mod tests;
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/helper_materialization/known_app_executable_tests.rs
+@@ -0,0 +1,300 @@
++use super::*;
++use std::cell::Cell;
++use std::process::Command;
++use tempfile::{TempDir, tempdir};
++
++struct Fixture {
++    _temp: TempDir,
++    root: PathBuf,
++    home: PathBuf,
++    source: PathBuf,
++    sha: String,
++}
++
++impl Fixture {
++    fn new() -> Result<Self> {
++        let temporary = tempdir()?;
++        let root = temporary.path().join("package");
++        let home = temporary.path().join("home");
++        let source = root.join(RELATIVE_EXE);
++        fs::create_dir_all(source.parent().unwrap())?;
++        fs::create_dir_all(helper_bin_dir(&home))?;
++        fs::write(&source, b"pinned component test bytes")?;
++        let sha = digest(&source)?;
++        Ok(Self {
++            _temp: temporary,
++            root,
++            home,
++            source,
++            sha,
++        })
++    }
++
++    fn resolve(&self) -> Result<PathBuf> {
++        Ok(resolve_pinned(
++            &self.source,
++            &self.root,
++            &self.home,
++            None,
++            &[],
++            |_| Ok(true),
++            &self.sha,
++        )?
++        .expect("known component"))
++    }
++
++    fn destination(&self) -> PathBuf {
++        helper_bin_dir(&self.home).join(format!("tectonic-{}.exe", self.sha))
++    }
++
++    fn cache_empty(&self) -> bool {
++        fs::read_dir(helper_bin_dir(&self.home))
++            .unwrap()
++            .next()
++            .is_none()
++    }
++}
++
++#[test]
++fn known_component_is_byte_identical_and_reuses_verified_cache() -> Result<()> {
++    let f = Fixture::new()?;
++    let first = f.resolve()?;
++    assert_eq!(fs::read(&first)?, fs::read(&f.source)?);
++    assert_eq!(digest(&first)?, f.sha);
++    let time = fs::metadata(&first)?.modified()?;
++    assert_eq!(f.resolve()?, first);
++    assert_eq!(fs::metadata(first)?.modified()?, time);
++    Ok(())
++}
++
++#[test]
++fn same_name_and_bytes_outside_registered_path_are_not_selected() -> Result<()> {
++    let f = Fixture::new()?;
++    let other = f.home.join("tectonic.exe");
++    fs::copy(&f.source, &other)?;
++    let called = Cell::new(false);
++    assert!(
++        resolve_pinned(
++            &other,
++            &f.root,
++            &f.home,
++            None,
++            &[],
++            |_| {
++                called.set(true);
++                Ok(true)
++            },
++            &f.sha,
++        )?
++        .is_none()
++    );
++    assert!(!called.get() && f.cache_empty());
++    Ok(())
++}
++
++#[test]
++fn source_hash_mismatch_does_not_create_cache() -> Result<()> {
++    let f = Fixture::new()?;
++    fs::write(&f.source, b"changed source")?;
++    assert!(f.resolve().is_err());
++    assert!(f.cache_empty());
++    Ok(())
++}
++
++#[test]
++fn same_size_newer_but_wrong_cache_is_rejected_without_overwrite() -> Result<()> {
++    let f = Fixture::new()?;
++    let poisoned = vec![b'x'; fs::metadata(&f.source)?.len() as usize];
++    fs::write(f.destination(), &poisoned)?;
++    assert!(f.resolve().is_err());
++    assert_eq!(fs::read(f.destination())?, poisoned);
++    Ok(())
++}
++
++#[test]
++fn original_policy_deny_cannot_be_bypassed_by_copy() -> Result<()> {
++    let f = Fixture::new()?;
++    assert!(
++        resolve_pinned(
++            &f.source,
++            &f.root,
++            &f.home,
++            None,
++            &[],
++            |_| Ok(false),
++            &f.sha,
++        )
++        .is_err()
++    );
++    assert!(f.cache_empty());
++    Ok(())
++}
++
++#[test]
++fn destination_policy_deny_prevents_copy() -> Result<()> {
++    let f = Fixture::new()?;
++    let target = f.destination();
++    assert!(
++        resolve_pinned(
++            &f.source,
++            &f.root,
++            &f.home,
++            None,
++            &[],
++            |path| Ok(!same_path(path, &target)?),
++            &f.sha,
++        )
++        .is_err()
++    );
++    assert!(f.cache_empty());
++    Ok(())
++}
++
++#[test]
++fn extra_deny_ancestor_and_uncreated_destination_are_enforced() -> Result<()> {
++    for destination_deny in [false, true] {
++        let f = Fixture::new()?;
++        let denied = if destination_deny {
++            f.destination() // Intentionally nonexistent, with no canonicalization escape.
++        } else {
++            f.source.parent().unwrap().to_path_buf()
++        };
++        assert!(
++            resolve_pinned(
++                &f.source,
++                &f.root,
++                &f.home,
++                None,
++                &[denied],
++                |_| Ok(true),
++                &f.sha,
++            )
++            .is_err()
++        );
++        assert!(f.cache_empty());
++    }
++    Ok(())
++}
++
++#[test]
++fn case_and_component_boundaries_do_not_overdeny_sibling_paths() -> Result<()> {
++    let f = Fixture::new()?;
++    let denied = f.source.parent().unwrap().with_file_name("TECTONIC-other");
++    assert!(
++        resolve_pinned(
++            &f.source,
++            &f.root,
++            &f.home,
++            None,
++            &[denied],
++            |_| Ok(true),
++            &f.sha,
++        )?
++        .is_some()
++    );
++    let uppercase = PathBuf::from(f.root.to_str().unwrap().to_ascii_uppercase());
++    assert!(contains(&uppercase, &f.source)?);
++    Ok(())
++}
++
++#[test]
++fn ambiguous_extra_deny_is_an_error_never_silently_ignored() -> Result<()> {
++    let f = Fixture::new()?;
++    let denied = f.home.join("missing").join("..").join("other");
++    assert!(
++        resolve_pinned(
++            &f.source,
++            &f.root,
++            &f.home,
++            None,
++            &[denied],
++            |_| Ok(true),
++            &f.sha,
++        )
++        .is_err()
++    );
++    assert!(f.cache_empty());
++    Ok(())
++}
++
++#[test]
++fn explicit_read_override_including_empty_is_not_unrestricted() -> Result<()> {
++    for roots in [vec![], vec![PathBuf::from(r"C:\")]] {
++        let f = Fixture::new()?;
++        assert!(
++            resolve_pinned(
++                &f.source,
++                &f.root,
++                &f.home,
++                Some(&roots),
++                &[],
++                |_| Ok(true),
++                &f.sha,
++            )
++            .is_err()
++        );
++        assert!(f.cache_empty());
++    }
++    Ok(())
++}
++
++#[test]
++fn redirected_helper_directory_is_rejected() -> Result<()> {
++    let f = Fixture::new()?;
++    let bin = helper_bin_dir(&f.home);
++    let other = f.home.join("other");
++    fs::create_dir(&other)?;
++    fs::remove_dir(&bin)?;
++    let output = Command::new("cmd")
++        .args(["/C", "mklink", "/J"])
++        .arg(&bin)
++        .arg(&other)
++        .output()?;
++    ensure!(
++        output.status.success(),
++        "fixture junction could not be created"
++    );
++    let result = f.resolve();
++    fs::remove_dir(&bin)?; // Remove the test junction, leaving its target intact.
++    assert!(result.is_err());
++    assert!(fs::read_dir(other)?.next().is_none());
++    Ok(())
++}
++
++#[test]
++fn ordinary_command_arguments_are_preserved() -> Result<()> {
++    let f = Fixture::new()?;
++    let original = vec!["ordinary.exe".into(), "a b".into(), "--".into(), "x".into()];
++    let permissions = ResolvedWindowsSandboxPermissions::try_from_permission_profile(
++        &codex_protocol::models::PermissionProfile::read_only(),
++    )?;
++    assert_eq!(
++        materialize_command(original.clone(), &permissions, &f.home, &f.home, None, &[],)?,
++        original
++    );
++    Ok(())
++}
++
++#[test]
++fn missing_native_store_is_not_created_by_component_copy() -> Result<()> {
++    let f = Fixture::new()?;
++    fs::remove_dir(helper_bin_dir(&f.home))?;
++    assert!(f.resolve().is_err());
++    assert!(!helper_bin_dir(&f.home).exists());
++    Ok(())
++}
++
++#[test]
++fn concurrent_cold_materializations_share_one_verified_cache() -> Result<()> {
++    let f = Fixture::new()?;
++    std::thread::scope(|scope| -> Result<()> {
++        let workers: Vec<_> = (0..8).map(|_| scope.spawn(|| f.resolve())).collect();
++        for worker in workers {
++            let destination = worker.join().expect("materialization worker")?;
++            assert_eq!(digest(&destination)?, f.sha);
++        }
++        Ok(())
++    })?;
++    assert_eq!(fs::read_dir(helper_bin_dir(&f.home))?.count(), 1);
++    Ok(())
++}
+--- a/codex-rs/windows-sandbox-rs/src/resolved_permissions.rs
++++ b/codex-rs/windows-sandbox-rs/src/resolved_permissions.rs
+@@ -114,6 +114,15 @@
+             anyhow::bail!("elevated Windows sandbox requires effective `:root` read access");
+         }
+         Ok(())
++    }
++
++    /// Check the existing read policy before moving a pinned executable into
++    /// the native helper store. A helper copy must not bypass a read carveout.
++    pub(crate) fn can_read_for_materialization(&self, path: &Path, cwd: &Path) -> Result<bool> {
++        let denied = ReadDenyMatcher::try_new_for_local_paths(&self.file_system, cwd)
++            .map_err(anyhow::Error::msg)?
++            .is_some_and(|matcher| matcher.is_local_path_read_denied(path));
++        Ok(!denied && self.file_system.can_read_local_path_with_cwd(path, cwd))
+     }
+ 
+     pub(crate) fn has_full_disk_read_access(&self) -> bool {
+@@ -680,4 +689,40 @@
+                 .contains("full-disk filesystem writes, which cannot be enforced")
+         );
+     }
++    #[test]
++    fn materialization_reads_keep_native_exact_and_glob_deny_precedence() -> Result<()> {
++        let temp = TempDir::new()?;
++        let cwd = temp.path();
++        let allowed = cwd.join("allowed.exe");
++        let denied = cwd.join("denied.exe");
++        let secret = cwd.join("secret.env");
++        for file in [&allowed, &denied, &secret] {
++            std::fs::write(file, b"fixture")?;
++        }
++        let profile = permission_profile_with_entries(vec![
++            FileSystemSandboxEntry::new(
++                FileSystemPath::Special {
++                    value: FileSystemSpecialPath::Root,
++                },
++                FileSystemAccessMode::Read,
++            ),
++            FileSystemSandboxEntry::new(
++                FileSystemPath::Path {
++                    path: AbsolutePathBuf::from_absolute_path(&denied)?.into(),
++                },
++                FileSystemAccessMode::Deny,
++            ),
++            FileSystemSandboxEntry::new(
++                FileSystemPath::GlobPattern {
++                    pattern: cwd.join("**/*.env").to_string_lossy().into_owned(),
++                },
++                FileSystemAccessMode::Deny,
++            ),
++        ]);
++        let permissions = ResolvedWindowsSandboxPermissions::try_from_permission_profile(&profile)?;
++        assert!(permissions.can_read_for_materialization(&allowed, cwd)?);
++        assert!(!permissions.can_read_for_materialization(&denied, cwd)?);
++        assert!(!permissions.can_read_for_materialization(&secret, cwd)?);
++        Ok(())
++    }
+ }
+--- a/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated.rs
++++ b/codex-rs/windows-sandbox-rs/src/unified_exec/backends/elevated.rs
+@@ -195,6 +195,15 @@
+         proxy_settings_mode,
+     )?;
+ 
++    let command = crate::helper_materialization::known_app_executable::materialize_command(
++        command,
++        &permissions,
++        codex_home,
++        cwd,
++        read_roots_override,
++        &deny_read_paths_override,
++    )?;
++
+     let sandbox_creds = elevated.sandbox_creds;
+     let request = RunnerTransportRequest {
+         permissions,

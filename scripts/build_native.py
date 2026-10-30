@@ -148,7 +148,7 @@ def prepare_source(archive: Path, source: Path, lock: dict, git: str) -> None:
     require(sha(source / "codex-rs" / "Cargo.lock") == lock["cargo_lock_sha256"], "Cargo.lock checksum mismatch")
 
 
-def cache_directory(work: Path, source: Path, output: Path, selected: Path | None) -> Path:
+def cache_directory(work: Path, source: Path, output: Path, selected: Path | None, *, external_target: bool = False) -> Path:
     """Select an operator-owned cache without moving source or deployment state."""
     cache = selected.resolve() if selected is not None else work
     if selected is None:
@@ -160,7 +160,7 @@ def cache_directory(work: Path, source: Path, output: Path, selected: Path | Non
             continue
         require(cache != protected and cache not in protected.parents and protected not in cache.parents,
                 "cache directory must not overlap the checkout, current source or output")
-    for name in ("cargo", "target"):
+    for name in (("cargo",) if external_target else ("cargo", "target")):
         child = cache / name
         require(not child.is_symlink() and not (hasattr(child, "is_junction") and child.is_junction()),
                 "cache entries must not be redirected")
@@ -168,7 +168,23 @@ def cache_directory(work: Path, source: Path, output: Path, selected: Path | Non
     return cache
 
 
-def build_environment(work: Path, toolchain: Path, cache_dir: Path | None = None) -> dict[str, str]:
+def target_directory(cache: Path, source: Path, output: Path, selected: Path | None) -> Path:
+    """An explicit ordinary Cargo target directory; never infer a redirected root."""
+    if selected is None:
+        return cache / "target"
+    absolute = selected.absolute()
+    for part in (absolute, *absolute.parents):
+        require(not part.is_symlink() and not (hasattr(part, "is_junction") and part.is_junction()),
+                "explicit target directory must not traverse a redirect")
+    target = absolute.resolve()
+    require(target.is_dir(), "explicit target directory must already exist")
+    for protected in (REPO.resolve(), source.resolve(), output.resolve(), (cache / "cargo").resolve()):
+        require(target != protected and target not in protected.parents and protected not in target.parents,
+                "target directory must not overlap source, output, checkout or Cargo home")
+    return target
+
+
+def build_environment(work: Path, toolchain: Path, cache_dir: Path | None = None, *, target_dir: Path | None = None) -> dict[str, str]:
     cache = cache_dir if cache_dir is not None else work
     environment = dict(os.environ)
     for key in list(environment):
@@ -178,9 +194,40 @@ def build_environment(work: Path, toolchain: Path, cache_dir: Path | None = None
         }:
             environment.pop(key)
     environment.update(PROFILE)
-    environment.update({"CARGO_HOME": str(cache / "cargo"), "CARGO_TARGET_DIR": str(cache / "target"),
+    environment.update({"CARGO_HOME": str(cache / "cargo"), "CARGO_TARGET_DIR": str(target_dir if target_dir is not None else cache / "target"),
                         "RUSTC": str(toolchain / "rustc.exe"), "RUSTDOC": str(toolchain / "rustdoc.exe")})
     return environment
+
+def preflight_windows_msvc(environment: dict[str, str], target: str) -> dict:
+    """Compile/link (never run) a tiny probe before source or output mutation."""
+    import tempfile
+
+    macros = {"x86_64-pc-windows-msvc": "_M_X64", "aarch64-pc-windows-msvc": "_M_ARM64"}
+    require(target in macros, "unsupported MSVC preflight target")
+    compiler = shutil.which("cl.exe", path=environment.get("PATH", ""))
+    require(compiler is not None, "MSVC cl.exe is unavailable; open a complete Developer shell")
+    source = ("#include <stddef.h>\n#include <windows.h>\n"
+              f"#ifndef {macros[target]}\n#error Wrong MSVC target architecture\n#endif\n"
+              "int main(void) { return GetCurrentProcessId() == 0; }\n")
+    with tempfile.TemporaryDirectory(prefix="cadsg-msvc-preflight-") as temporary:
+        root = Path(temporary)
+        src, obj, exe = [root / name for name in ("probe.c", "probe.obj", "probe.exe")]
+        src.write_text(source, encoding="ascii")
+        try:
+            result = subprocess.run(
+                [compiler, "/nologo", "/MT", "/TC", str(src), f"/Fo{obj}", f"/Fe{exe}",
+                 "/link", "kernel32.lib"],
+                cwd=root, env=dict(environment), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise ValueError(f"MSVC/SDK preflight could not complete: {type(error).__name__}") from None
+        detail = (result.stdout + result.stderr)[-2500:]
+        require(result.returncode == 0, f"MSVC/Windows SDK compile-link preflight failed:\n{detail}")
+        require(all(path.is_file() and path.stat().st_size > 0 for path in (obj, exe)),
+                "MSVC/SDK preflight did not produce a complete object and executable")
+    return {"status": "compile-link-passed", "target": target, "probe_program_executed": False}
+
 
 def build_record_path(path: Path, *, existing: bool = False) -> Path:
     """Do not follow redirected build metadata or mutate hardlinked records."""
@@ -292,6 +339,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--toolchain-bin", type=Path, required=True, help="Installed Rust 1.99.1 bin directory")
     parser.add_argument("--output", type=Path, help="Empty candidate output directory; defaults to WORK/candidate")
     parser.add_argument("--cache-dir", type=Path, help="Explicit existing owned Cargo/target cache root; defaults to WORK")
+    parser.add_argument("--target-dir", type=Path, help="Explicit existing owned CARGO_TARGET_DIR, separate from Cargo home")
     parser.add_argument("--transition-from-lock", help="Explicit CAS of a terminal owned build to this lock, only when its existing prepared source matches exactly; select a new empty --output")
     parser.add_argument("--build-lock", type=Path, default=REPO / "native/build-lock.json", help="Explicit pinned source/target lock; defaults to the current CLI candidate")
     parser.add_argument("--dry-run", action="store_true", help="Verify inputs/tool versions and print the plan without writing")
@@ -304,7 +352,8 @@ def main(argv: list[str] | None = None) -> int:
             "use a separate build directory outside the gateway checkout")
     require(output != source and source not in output.parents and output not in source.parents,
             "candidate output must not overlap the source directory")
-    cache = cache_directory(work, source, output, args.cache_dir)
+    cache = cache_directory(work, source, output, args.cache_dir, external_target=args.target_dir is not None)
+    target = target_directory(cache, source, output, args.target_dir)
     lock_path = args.build_lock.resolve()
     lock = json.loads(lock_path.read_text(encoding="utf8"))
     require(lock["schema_version"] == 1 and lock["release_environment"] == PROFILE, "unsupported build lock/profile")
@@ -330,7 +379,7 @@ def main(argv: list[str] | None = None) -> int:
             "candidate_revision": lock.get("candidate_revision"),
             "archive": str(archive), "archive_sha256": lock["archive_sha256"], "patches": lock["patches"],
             "source": str(source), "source_sha256": lock["prepared_source_sha256"],
-            "work_dir": str(work), "cache_dir": str(cache), "target": str(cache / "target"), "cargo_home": str(cache / "cargo"),
+            "work_dir": str(work), "cache_dir": str(cache), "target": str(target), "cargo_home": str(cache / "cargo"),
             "output": str(output), "profile": PROFILE, "below_normal_priority": True, "commands": commands, "rustc": rust, "cargo": cargo,
             "linker": linker, "runtime_executed": False, "app_qualified": False}
     marker = work / "build-owner.json"
@@ -345,9 +394,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.transition_from_lock is not None:
         require(marker.is_file(), "input transition requires an existing owned build")
         plan["transition_from_lock"] = args.transition_from_lock
+    plan["msvc_sdk_preflight"] = {"status": "not-executed-in-dry-run"}
     if args.dry_run:
         print(json.dumps(plan, indent=2))
         return 0
+    environment = build_environment(work, toolchain, cache, target_dir=target)
+    plan["msvc_sdk_preflight"] = preflight_windows_msvc(environment, lock["target"])
     work.mkdir(parents=True, exist_ok=True)
     if not marker.exists():
         atomic(marker, {"schema_version": 1, "build_lock_sha256": plan["build_lock_sha256"]})
@@ -364,7 +416,6 @@ def main(argv: list[str] | None = None) -> int:
         summary = {"changed_files": [change["path"] for change in changes], "source_changes": changes}
         report.update(summary)
         atomic(work / "source-manifest.json", {**before, **summary})
-        environment = build_environment(work, toolchain, cache)
         # Foreground subprocesses, exactly as in an ordinary developer shell; no service or runner.
         for command in commands:
             phase = {"command": command, "status": "building"}
@@ -384,7 +435,7 @@ def main(argv: list[str] | None = None) -> int:
         output.mkdir(parents=True, exist_ok=True)
         binaries = []
         for name in lock["binaries"]:
-            compiled = cache / "target" / "release" / name
+            compiled = target / "release" / name
             expected = sha(compiled)
             temporary = output / (name + ".partial")
             shutil.copy2(compiled, temporary)

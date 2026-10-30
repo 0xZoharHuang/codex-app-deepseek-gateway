@@ -1,5 +1,10 @@
 # 当前机制验收状态
 
+## R222: LaTeX remains an open App gate
+
+DeepSeek created/edited a native LaTeX project, but compilation failed before source processing with CreateProcessAsUserW error 5. The pinned materialization candidate has 15 targeted Rust tests and 114 Python build/packaging checks passed. It has not been deployed or proved by actual App compilation/PDF preview. The installed CLI remains 18ef99ba. See [R222 evidence](qualification-r222.md).
+
+
 本页描述固定 Windows App/runtime 组合的本地机制，不是模型能力榜单。当前尚未稳定发布；结论按机制、实际组合和证据边界区分，软件测试数量不代替 App 验收。
 
 ## 当前版本

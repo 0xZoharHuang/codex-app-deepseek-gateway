@@ -1,5 +1,10 @@
 # 固定 Windows 原生构建
 
+## Pending five-patch recipe (R222)
+
+The current public lock is 5bfdec0bc745a3a31e209078b1424d9f063d1eea73918eb394c8eae59f01648b, source 3830ef7a9318ff1c6016ecaa6840805250c527c9a2b75b1e77b6b9c334210548 / 9516 files. This candidate adds pinned native Tectonic materialization. It is not deployed: four-patch producer and binary hashes below still describe the installed runtime. Packaging accepts complete known four- or five-patch O165 sequences. The builder adds real MSVC/SDK compile/link preflight and optional --target-dir separate from Cargo home. See [R222 evidence](qualification-r222.md).
+
+
 当前配方为 O165，对应官方 App26.1023.6621.0，upstream0.165.0-alpha.1.2。build_native.py只构建，不安装、启动App、配置沙箱或运行智能体。
 
 ## 精确输入与当前产物

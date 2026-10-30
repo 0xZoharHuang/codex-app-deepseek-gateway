@@ -21,10 +21,14 @@
     {
       "file": "windows-cwd-ancestor-metadata-0165.patch",
       "sha256": "9544c5b02e0e4e3546ba24fa1931b4e9592c5cf84d9ce0e7009b57868ac3c002"
+    },
+    {
+      "file": "packaged-tectonic-materialization-0165.patch",
+      "sha256": "e9585d91f7aa3db567c067a628040be8b4de2e594533e2af224a369731085fd7"
     }
   ],
-  "prepared_source_sha256": "39d578673f2031097dfa82fd97b5126a492ea4ba3a692b565ab5fcaef4dce33f",
-  "prepared_source_files": 9514,
+  "prepared_source_sha256": "3830ef7a9318ff1c6016ecaa6840805250c527c9a2b75b1e77b6b9c334210548",
+  "prepared_source_files": 9516,
   "cargo_lock_sha256": "7537da7c5e154334b15ef9b59091f5fed3a8e480b77c037e3a8b7f07d1614709",
   "release_environment": {
     "CARGO_BUILD_JOBS": "2",

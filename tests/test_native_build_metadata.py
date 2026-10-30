@@ -166,7 +166,8 @@ def test_current_0165_recipe_is_a_single_four_target_native_producer():
     assert lock["release_environment"] == build.PROFILE
     assert [row["file"] for row in lock["patches"]] == [
         "windows-home-namespace-0165.patch", "mcp-keyring-isolation-0165.patch",
-        "guardian-thread-context-0165.patch", "windows-cwd-ancestor-metadata-0165.patch"]
+        "guardian-thread-context-0165.patch", "windows-cwd-ancestor-metadata-0165.patch",
+        "packaged-tectonic-materialization-0165.patch"]
     for row in lock["patches"]:
         assert build.sha(native / row["file"]) == row["sha256"]
     command, = build.build_commands(Path("pinned-rust"),lock["binaries"])
