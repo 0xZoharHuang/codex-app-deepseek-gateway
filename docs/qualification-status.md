@@ -29,7 +29,7 @@
 | 记忆提取、整合、新会话读取 | 当前原生阶段有实证；曾有模型引用错误，修正与独立检查均留存。 | 具体阶段通过；不称模型永不出错 |
 | 原生自动/手动压缩与冷继续 | 自动触发输入、完整调用/结果配对、原生 replacement 历史和冷继续分开核验。当前0.165不移植旧私有容量扩展。 | 当前已验机制与源相等承接，最终证据索引待发布 |
 | App 客户端 Queue / Steer / goal / 终端 | 客户端Queue与原生Steer已有实际输入、原生输出、调用ID及归属证据；预置文本和单纯UIA返回不算成功。 | 客户端范围通过；Steer、goal暂停/正常恢复、客户端Queue、两个终端选择性中止及原B自然完成均有具体实测 |
-| server queue API | server queue数据库为空只是状态观察，不能算队列API已被调用。若固定App未暴露该入口，单列未暴露条件。 | 未关闭：App确有6个thread/queue方法客户端，受native版本功能和codex-app-server-queued-follow-ups门控制；实际条件及API消费待核，空DB不能证明不可用或通过 |
+| server queue API | 原生消费点Pg对目标key实际返回false，已有SDK client；客户端Queue/Steer仍有正向实测。未手工调用SDK、强制门或把空DB当证据。 | 当前有效条件已观察；本次未走server queue API，不计正向执行通过，也不推断地区/账户原因。见[本轮补充](qualification-r220.md) |
 | Windows UAC / secure desktop | 当前真实UAC人工同意与拒绝未实测，不由source相等或普通App审批推出；本次不借此新造UAC/privateRPC流程。 | 未实测，条件边界明确 |
 | Windows sandbox平台 | 本次为Win10 19045实际支持的沙箱，不冒充Win11 MXC，也不外推任意账户、区域或OS安全桌面。 | 固定宿主范围 |
 | Windows 默认 cwd | 18ef 原工作树一次默认 exec：SID1009、PWD/GetLocation/相对读正确，父属性可读且列目录被拒；严格ACL只新增1008 allow0x80 flags0，旧ACE/FID/字节保持。 | 原工作树范围通过 |
@@ -39,8 +39,8 @@
 | OAuth 证据限制 | Consent不是browser click；680字段是固定fixture数据；无全存储模式新复测声明。启动前置失败及3条 unknown_or_expired 400/no grant全部保留。 | 限制明确 |
 | 网页搜索/open/find/click | 最终canonical恢复后，实际App回读原source70全部行及同一引用ID，并核对真实DeepSeek固定模型/提供方。 | 具体搜索/导航/天气和旧引用恢复范围通过；金融/体育私有云数据未接入、不计通过 |
 | 429/503/413/截流/取消/服务丢失/同端口认证恢复 | 实际MAIN、native输入、编号和效果联结；401原生刷新两次目标请求的完整typed JSON相等。 | [逐项真实结果](qualification-r219.md)；413/部分截流以Stop终止的边界保留 |
-| App IAB / 计算机工具 | 正式插件和会话node_repl注册、Sky导入成功；list_apps真实因App-owned pipe缺失报os error 2。 | 未关闭；[初始化源与实测](upstream-native-computer-use-bootstrap.md)，有效SDK门未观察；不改防护、不重写后端 |
-| 公共发布、回滚、最终清理 | 原生包和Python软件资格不等于稳定发布。只在最终机制关闭后更新公共repo、分发、回滚和清理；周额度只按最后实时查询记录。 | 尚未发布；最终生命周期、交付、Windows语义清理及最后实时周额度重置确认均待完成 |
+| App IAB / 计算机工具 | 原生Xb消费点对IAB/CUA实际均返回false，正常设置入口禁用。临时Windows入口实验仅完成node_repl注册和Sky导入，list_apps缺App管道报os error2，已收回。 | 当前有效条件已观察；正向控制未通过，不以web.run/预览或云权益边界替代。见[源与实测](upstream-native-computer-use-bootstrap.md) |
+| 公共发布、回滚、最终清理 | 相同25个产品文件的新干净提交离线包可复现；正式安装入口完成A/B激活回退、真实服务健康、三方配置回滚、运行中卸载、重装和精确清退，用户新增设置/文件保留。未绑定另一App或重复移除原生沙箱。 | Python服务安装生命周期范围通过；整体App稳定发布、最终有边界清理及最后实时周额度确认仍待完成。见[本轮补充](qualification-r220.md) |
 
 原生Plan已通过正常slash入口、真实request_user_input及GUI Alpha答案回传并还原Default。内置/review通过真正Code review入口运行：turn_trigger=code_review，使用turn/start而非review/start；908项原工程测试通过。此前未提交答案的UIA尝试保留。详见[本轮证据](qualification-r219.md)。
 

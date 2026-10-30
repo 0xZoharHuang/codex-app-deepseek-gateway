@@ -27,3 +27,7 @@ The minimal upstream repair is to initialize each new backend from the already c
 [Computer Use](https://learn.chatgpt.com/docs/computer-use) requires official plugin/native approvals and uses the active visible Windows desktop. [Feature availability](https://learn.chatgpt.com/docs/pricing) marks it region-limited, including API-key access. These do not establish this host's effective eligibility.
 
 This is neither a desktop-control pass nor automatic cloud-entitlement exclusion. A verified normal native bootstrap or signed App fix remains necessary.
+
+## Later original-consumer observation
+
+A separate diagnostic using the normal feature mode observed both original Browser Use and Computer Use consumer returns as Boolean false, with unchanged source and no SDK reevaluation/override. It does not determine region, account, rollout or policy cause. The temporary opt-in was removed before ordinary startup. See [the scoped results](qualification-r220.md).
