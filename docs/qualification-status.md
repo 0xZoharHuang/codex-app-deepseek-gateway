@@ -1,5 +1,9 @@
 # 当前机制验收状态
 
+## R224: actual App history and Hooks closed; protocol source qualified
+
+Actual GUI fork, Edit/Send history reversion, same-UUID cold recovery with inherited web references, normal Hooks and diff/Undo/Reapply passed their exact scopes. Central schema/auto-tool adaptation passed native source tasks, strict negative controls and V2 normal-input carry; installed rollout is pending. Full CDS runner failures were triaged, and the exact 47 prerequisite-dependent cases passed with correct test prerequisites; two installed-adapter cases await the matching QA wheel. A real Guardian V2 background WebSocket capability defect was found and is being fixed at its native transport boundary. See [R224 qualification and preserved failures](qualification-r224.md). Overall stable release remains open.
+
 ## R223: native interface audit continues
 
 Native Command/McpTool Hooks passed the exact API lifecycle and filesystem scope; actual App Hooks and Undo remain pending. Native outputSchema passed after a real read in the preceding turn, but two same-turn automatic-tool tasks failed their nonce/read oracle. Direct provider probes reproduce the distinction; no production routing change or auto-to-required substitution was made. A new source audit reconfirmed the closed App worktree restore identity defect. See [R223 evidence and limits](qualification-r223.md). Overall stable qualification remains open.
