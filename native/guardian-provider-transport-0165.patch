@@ -1,0 +1,91 @@
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs
+@@ -148,6 +148,9 @@
+     }
+ 
+     fn start_refill(self: &Arc<Self>, guard: OwnedMutexGuard<()>) -> Option<JoinHandle<()>> {
++        if !self.config.provider.info().supports_websockets {
++            return None;
++        }
+         let mut retry_after = self
+             .retry_after
+             .lock()
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs
+@@ -82,6 +82,74 @@
+     fn drop(&mut self) {
+         self.task.abort();
+     }
++}
++
++#[tokio::test]
++async fn provider_without_websockets_scores_over_http_without_opening_pool() -> Result<()> {
++    // This is a real local transport test: no model, account, skip macro, or
++    // forced cooldown substitutes for the provider's configured capability.
++    let http = responses::start_mock_server().await;
++    let events = vec![
++        responses::ev_output_text_delta("low"),
++        responses::ev_completed("http-only-score"),
++    ];
++    let http_mock =
++        responses::mount_sse_sequence(&http, vec![responses::sse(events.clone()); 2]).await;
++    let ws =
++        responses::start_websocket_server(vec![Vec::new(); INITIAL_WEBSOCKET_CONNECTIONS]).await;
++    let gateway = Gateway::new(&http.uri(), ws.uri()).await?;
++    gateway.allowed_opens.store(usize::MAX, Ordering::SeqCst);
++
++    let mut config = sampler_config(format!("{}/v1", gateway.url));
++    let mut info = config.provider.info().clone();
++    // The existing factory fixture is websocket-capable. Keep this explicit so
++    // a future fixture-default change cannot silently disable the true controls.
++    assert!(info.supports_websockets);
++    info.name = "Owned HTTP-only native provider".to_owned();
++    info.supports_websockets = false;
++    config.provider = create_model_provider(info, config.provider.auth_manager());
++    assert!(!config.provider.info().supports_websockets);
++    let sampler = LunaSampler::new(config);
++
++    assert!(sampler.connections.replenish().is_none());
++    tokio::time::timeout(Duration::from_secs(5), sampler.prewarm()).await?;
++    assert!(
++        sampler
++            .connections
++            .idle_connections
++            .lock()
++            .unwrap()
++            .is_empty()
++    );
++
++    for turn in ["http-only-first", "http-only-second"] {
++        assert_eq!(
++            tokio::time::timeout(Duration::from_secs(5), sampler.sample(sample_request(turn)))
++                .await??,
++            "low",
++        );
++        assert!(sampler.connections.replenish().is_none());
++        assert!(
++            sampler
++                .connections
++                .idle_connections
++                .lock()
++                .unwrap()
++                .is_empty()
++        );
++        assert_eq!(gateway.opens.load(Ordering::SeqCst), 0);
++    }
++    let requests = http_mock.requests();
++    assert_eq!(requests.len(), 2);
++    for request in requests {
++        assert_eq!(request.path(), "/v1/responses");
++        assert_eq!(
++            request.header("x-openai-subagent").as_deref(),
++            Some("guardian")
++        );
++    }
++    ws.shutdown().await;
++    Ok(())
+ }
+ 
+ #[tokio::test]

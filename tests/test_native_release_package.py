@@ -383,14 +383,15 @@ def test_notice_reparse_guard_works_without_newer_junction_api(mode, attributes,
     assert pack.redirected(Path("unused-fixture-path"), metadata) is rejected
 
 
-@pytest.mark.parametrize("fifth_patch", [False, True])
-def test_single_producer_accepts_real_independent_target_without_private_projection(tmp_path, fifth_patch):
+@pytest.mark.parametrize("patch_count", [4, 5, 6])
+def test_single_producer_accepts_real_independent_target_without_private_projection(tmp_path, patch_count):
     native, lock, _, value, build = single_recipe(tmp_path)
-    if fifth_patch:
-        patch = native / "packaged-tectonic-materialization-0165.patch"
+    for name in ["packaged-tectonic-materialization-0165.patch",
+                 "guardian-provider-transport-0165.patch"][:patch_count - 4]:
+        patch = native / name
         patch.write_text("reviewed pinned component fixture")
         lock["patches"].append({"file": patch.name, "sha256": pack.sha(patch)})
-        value["patches"] = copy.deepcopy(lock["patches"])
+    value["patches"] = copy.deepcopy(lock["patches"])
     digest = hashlib.sha256(pack.canonical(lock)).hexdigest()
     value["build_lock_sha256"] = digest
     cache = tmp_path / "independent-cargo-cache"

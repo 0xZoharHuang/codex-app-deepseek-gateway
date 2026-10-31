@@ -25,9 +25,13 @@
     {
       "file": "packaged-tectonic-materialization-0165.patch",
       "sha256": "e9585d91f7aa3db567c067a628040be8b4de2e594533e2af224a369731085fd7"
+    },
+    {
+      "file": "guardian-provider-transport-0165.patch",
+      "sha256": "2d7504fcbfc86918c72eef7629760d590914b78c7bf705042e05f62749bacefe"
     }
   ],
-  "prepared_source_sha256": "3830ef7a9318ff1c6016ecaa6840805250c527c9a2b75b1e77b6b9c334210548",
+  "prepared_source_sha256": "5d10fd97306cd2d11a1bc5d4ae2327468240bb650639cc93c39d19b2b7b58edb",
   "prepared_source_files": 9516,
   "cargo_lock_sha256": "7537da7c5e154334b15ef9b59091f5fed3a8e480b77c037e3a8b7f07d1614709",
   "release_environment": {

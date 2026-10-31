@@ -1,13 +1,20 @@
 # 固定 Windows 原生构建
 
-## Pending five-patch recipe (R222)
+## P6 构建前资格（R224，尚未晋升）
 
-The current public lock is 5bfdec0bc745a3a31e209078b1424d9f063d1eea73918eb394c8eae59f01648b, source 3830ef7a9318ff1c6016ecaa6840805250c527c9a2b75b1e77b6b9c334210548 / 9516 files. This candidate adds pinned native Tectonic materialization. It is not deployed: four-patch producer and binary hashes below still describe the installed runtime. Packaging accepts complete known four- or five-patch O165 sequences. The builder adds real MSVC/SDK compile/link preflight and optional --target-dir separate from Cargo home. See [R222 evidence](qualification-r222.md).
+当前 active lock 仍为五补丁 P5：5bfdec0bc745a3a31e209078b1424d9f063d1eea73918eb394c8eae59f01648b，完整源 3830ef7a9318ff1c6016ecaa6840805250c527c9a2b75b1e77b6b9c334210548 /9516 文件。P5 已经通过正式安装入口加载，CLI 为 ebec4115b77c4710feb71d9d460d893bb6cb164c2fbee906087783d83ac685fa；其真实 App LaTeX 范围证据见 [R222](qualification-r222.md)，不表示整体 App 已通过。
 
+P6 在 P5 后追加 guardian-provider-transport-0165.patch（SHA256 2d7504fcbfc86918c72eef7629760d590914b78c7bf705042e05f62749bacefe）。独立从已核验官方 720fec archive 重放六个补丁，得到完整源 5d10fd97306cd2d11a1bc5d4ae2327468240bb650639cc93c39d19b2b7b58edb /9516 文件；Cargo.lock 不变。此阶段只有来源重放和构建/打包软件资格，尚未生成新四目标产物、部署或进行 P6 App 验收。
+
+打包器只接受完整且有序的已知四、五、六补丁栈；不允许跳过 Tectonic 后直接添加 P6，或接受未知补丁。显式 --build-lock 在输入、staging、archive 使用同一精确锁和 SHA，而不是借用 active lock 的 patch 白名单。所有声明 patch 及原始锁都必须完整携带且校验相等。active lock 的晋升须由已确认旧 lease/构建终态的操作者统一完成；使用私有候选锁不意味着可以提前改现有 owner/source/target。
+
+本轮 139 项离线构建/打包检查通过；其中 main 集成使用明确的模拟 Cargo metadata 和测试输出，不调用 Cargo、编译器、App 或模型，不能当作真实 producer。标准 builder 本身没有 patch 数量硬编码，仍只允许一条锁定的四目标 Cargo 命令。
+
+下面四补丁产物表保留为**历史 P4 记录**，不能用于选择当前或 P6 二进制。
 
 当前配方为 O165，对应官方 App26.1023.6621.0，upstream0.165.0-alpha.1.2。build_native.py只构建，不安装、启动App、配置沙箱或运行智能体。
 
-## 精确输入与当前产物
+## 精确输入与历史 P4 产物
 
 | 输入/产物 | 固定值 |
 | --- | --- |
@@ -37,7 +44,7 @@ The current public lock is 5bfdec0bc745a3a31e209078b1424d9f063d1eea73918eb394c8e
 
 修改原生代码时先在该确切prepared tree运行相关Rust单测，并审查真实断言都执行；再导出patch、更新完整source指纹和锁，运行当前真实锁的Python构建/打包合同检查，最后才构建四目标。不要用“编译成功”代替尚未运行的单测，也不要先编40分钟再发现fixture失败。
 
-本次正确顺序为：最终39d源码的完整唯一cwd回归1pass/0fail/0ignored → 当前锁100个合同检查 → dbb9标准四目标producer。原失败101和旧506b producer保留。100是该固定版本的记录，不是将来需要硬凑的测试数量。
+历史 P4 当时的顺序为：最终39d源码的完整唯一cwd回归1pass/0fail/0ignored → 当前锁100个合同检查 → dbb9标准四目标producer。原失败101和旧506b producer保留。100是该固定版本的记录，不是将来需要硬凑的测试数量。
 
 在x64 MSVC Developer shell内，使用已固定的工具链和同一release profile。对现有开发prepared source示例：
 
@@ -65,6 +72,13 @@ $env:CARGO_PROFILE_RELEASE_CODEGEN_UNITS = '16'
 
 工具准备：独立Python3.11+、Git、固定Rust1.99.1、x64MSVC linker/LIB及Windows SDK。此步骤不下载安装工具。
 
+显式候选示例（变量须由操作者核对；不要把私有锁误认为已晋升的 active lock）：
+
+~~~powershell
+& $buildPython -I -B .\scripts\build_native.py --archive $sourceArchive --work-dir $work --toolchain-bin $toolchainBin --output $newEmptyOutput --cache-dir $cargoCache --target-dir $cargoTarget --build-lock $candidateBuildLock --dry-run
+# 旧工作目录换输入时，还须标准 --transition-from-lock OLD_SHA，且真实源已完整匹配新锁。
+~~~
+
 ~~~powershell
 & $buildPython -I -B .\scripts\build_native.py --archive $sourceArchive --work-dir $work --toolchain-bin $toolchainBin --output $newEmptyOutput --dry-run
 # 核对计划后，用同一组输入去掉 --dry-run：
@@ -81,7 +95,7 @@ cargo build --locked --release -p codex-cli -p codex-windows-sandbox --bin codex
 
 显式--cache-dir可复用本项目已有Cargo/target缓存，不搬源路径、不清空缓存。输入锁变化只允许--transition-from-lock OLD_SHA的标准CAS：旧构建必须终态，真实现有source已匹配新锁，固定原路径/mtime，拒绝redirect/reparse/hardlink风险，按旧记录内容保存owner/report/source-manifest三份备份，再换owner。默认路径仍严格，不采用旧mtime-reference/ABA做法。不降低磁盘guard或并行占用同一cache。
 
-## 原始产物和打包
+## 历史 P4 产物和通用打包
 
 | 文件 | SHA256 |
 | --- | --- |
@@ -90,10 +104,10 @@ cargo build --locked --release -p codex-cli -p codex-windows-sandbox --bin codex
 | codex-windows-sandbox-setup.exe | ad99dad63f2c6583622b1756cceabaffd677864e456276990a34a05a72db7ef0 |
 | codex-windows-managed-deny-probe.exe | 97449b523b5053fac52b93ddd346315e22dbdf376db2494c5d0b8ee900e378b5 |
 
-正常打包只接受当前四补丁锁、完整prepared source、可信producer manifest及四目标SHA/size/profile一致：
+正常打包只接受显式选定的完整已知补丁锁、完整prepared source、可信producer manifest及四目标SHA/size/profile一致：
 
 ~~~powershell
-& $buildPython -I -B .\scripts\package_native_release.py --source-root $preparedSource --native-manifest (Join-Path $newEmptyOutput 'manifest.json') --native-manifest-sha256 $producerManifestSha --cargo $cargo --cargo-home $cargoHome --git 'C:\Program Files\Git\cmd\git.exe' --output $newPublicStage --evidence-dir $newPrivateEvidence
+& $buildPython -I -B .\scripts\package_native_release.py --source-root $preparedSource --native-manifest (Join-Path $newEmptyOutput 'manifest.json') --native-manifest-sha256 $producerManifestSha --build-lock $candidateBuildLock --cargo $cargo --cargo-home $cargoHome --git 'C:\Program Files\Git\cmd\git.exe' --output $newPublicStage --evidence-dir $newPrivateEvidence
 ~~~
 
 先创建输出父目录，stage/evidence自身必须是新路径。公共组装要求源码干净且已提交；development qualification不冒充公开发行。输出记录固定依赖license与来源，不导出私有请求或构建机凭据。

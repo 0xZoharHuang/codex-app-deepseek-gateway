@@ -127,8 +127,10 @@ def single_graph(lock, native_dir):
     base_patches = [
         "windows-home-namespace-0165.patch", "mcp-keyring-isolation-0165.patch",
         "guardian-thread-context-0165.patch", "windows-cwd-ancestor-metadata-0165.patch"]
+    tectonic_patches = base_patches + ["packaged-tectonic-materialization-0165.patch"]
+    guardian_transport_patches = tectonic_patches + ["guardian-provider-transport-0165.patch"]
     require([row["file"] for row in lock["patches"]] in (
-        base_patches, base_patches + ["packaged-tectonic-materialization-0165.patch"]),
+        base_patches, tectonic_patches, guardian_transport_patches),
         "Single-producer patch topology differs")
     for row in lock["patches"]:
         require(sha(plain(native_dir / row["file"])) == row["sha256"],
@@ -333,12 +335,23 @@ def collect_licenses(metadata, output, allowed_roots, *, repo=REPO):
     return index
 
 
-def validate_tree(root):
+def validate_tree(root, *, build_lock=None):
     root = Path(root); inventory = {}
     manifest = load(root / "manifest.json")
     single = manifest.get("candidate_revision") == "O165"
-    cohort_lock = "build-lock.json" if single else "build-lock.N.json"
-    admitted_patches = {row["file"] for row in load(REPO / "native" / cohort_lock)["patches"]}
+    if build_lock is not None:
+        # Honor the exact explicitly selected producer lock through staging and
+        # archiving too; an unpromoted candidate must not borrow the active lock.
+        require(single, "Explicit staging lock requires a single-source producer")
+        selected = plain(build_lock)
+        cohort = load(selected)
+        single_graph(cohort, REPO / "native")
+        require(manifest.get("build_lock_sha256") == sha(selected),
+                "Staging manifest differs from the explicit build lock")
+    else:
+        cohort_lock = "build-lock.json" if single else "build-lock.N.json"
+        cohort = load(REPO / "native" / cohort_lock)
+    admitted_patches = {row["file"]: row["sha256"] for row in cohort["patches"]}
     for p in sorted(root.rglob("*")):
         require(not p.is_symlink() and not (hasattr(p, "is_junction") and p.is_junction()),
                 "Release staging contains a redirected entry")
@@ -355,6 +368,9 @@ def validate_tree(root):
         patch = name.startswith("provenance/patches/") and name[len("provenance/patches/"):] in admitted_patches
         require(name == "manifest.json" or name in BINARIES or name in {"LICENSE", "NOTICE"}
                 or name.startswith("licenses/") or provenance or patch, "Unexpected public native file")
+        if patch:
+            require(sha(p) == admitted_patches[name[len("provenance/patches/"):]],
+                    "Staged native patch checksum differs from the selected build lock")
         if name not in BINARIES:
             with p.open("rb") as f:
                 magic = f.read(4)
@@ -367,14 +383,20 @@ def validate_tree(root):
     require({"LICENSE", "NOTICE", "licenses/codex-LICENSE", "licenses/codex-NOTICE",
              "licenses/rust/index.json", "provenance/producer-references.json"} <= inventory.keys(),
             "Native licenses or producer receipts are missing")
+    if build_lock is not None:
+        require({"provenance/patches/" + name for name in admitted_patches} <= inventory.keys(),
+                "Staged native patch set is incomplete for the explicit build lock")
+        original = plain(root / "provenance/O165-original-build-lock.json")
+        require(sha(original) == sha(selected),
+                "Staged original build lock differs from the explicit build lock")
     return inventory
 
 
-def make_archive(root, archive, epoch):
+def make_archive(root, archive, epoch, *, build_lock=None):
     """Exact file allowlist; never archive the input/prepared runtime directory."""
     root, archive = Path(root), Path(archive)
     require(not archive.exists() and not archive.is_relative_to(root), "Archive must be new and outside staging")
-    inventory = validate_tree(root)
+    inventory = validate_tree(root, build_lock=build_lock)
     with archive.open("xb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", filename="", mtime=epoch) as compressed:
         with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as stream:
             for name, record in sorted(inventory.items()):
@@ -544,11 +566,11 @@ def main():
         require(sha(native / row["file"]) == row["sha256"], "Native patch changed during packaging")
     require(git("rev-parse", "HEAD") == commit and bool(git("status", "--porcelain=v1", "-uall")) == dirty,
             "Gateway source state changed during packaging")
-    inventory = validate_tree(output)
+    inventory = validate_tree(output, build_lock=lock_path if single else None)
     write(output / "provenance/distribution-inventory.json", inventory)
     suffix = ".qualification.tar.gz" if args.development_qualification else ".tar.gz"
     archive = output.parent / (output.name + suffix)
-    packed = make_archive(output, archive, epoch)
+    packed = make_archive(output, archive, epoch, build_lock=lock_path if single else None)
     report = {"status":"raw_native_assembled_not_App_qualified", "output":str(output), "archive":str(archive),
               "archive_identity":packed, "manifest_sha256":sha(output / "manifest.json"),
               "raw_binary_count":len(outputs), "external_crates":len(licenses["packages"]),

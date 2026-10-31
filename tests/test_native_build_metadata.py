@@ -164,10 +164,19 @@ def test_current_0165_recipe_is_a_single_four_target_native_producer():
     assert lock["target"] == "x86_64-pc-windows-msvc"
     assert set(lock["binaries"]) == set(build.NATIVE_TARGETS) and len(lock["binaries"]) == 4
     assert lock["release_environment"] == build.PROFILE
-    assert [row["file"] for row in lock["patches"]] == [
+    five = [
         "windows-home-namespace-0165.patch", "mcp-keyring-isolation-0165.patch",
         "guardian-thread-context-0165.patch", "windows-cwd-ancestor-metadata-0165.patch",
         "packaged-tectonic-materialization-0165.patch"]
+    six = five + ["guardian-provider-transport-0165.patch"]
+    names = [row["file"] for row in lock["patches"]]
+    assert names in (five, six)
+    expected_source = {
+        5: "3830ef7a9318ff1c6016ecaa6840805250c527c9a2b75b1e77b6b9c334210548",
+        6: "5d10fd97306cd2d11a1bc5d4ae2327468240bb650639cc93c39d19b2b7b58edb",
+    }
+    assert lock["prepared_source_sha256"] == expected_source[len(names)]
+    assert lock["prepared_source_files"] == 9516
     for row in lock["patches"]:
         assert build.sha(native / row["file"]) == row["sha256"]
     command, = build.build_commands(Path("pinned-rust"),lock["binaries"])
