@@ -152,8 +152,13 @@ def serve(home: Path, port: int):
         fetcher = PublicDocumentFetcher(ssl_context=context)
         policy_backend = None
         if config.web_search_backend == "firecrawl":
-            from .firecrawl_backend import FirecrawlBackend
+            from .firecrawl_backend import FirecrawlBackend, FirecrawlImageSearch
             policy_backend = FirecrawlBackend(ssl_context=context, fetcher=fetcher)
+        image_search = None
+        if config.image_search_backend == "firecrawl":
+            image_search = FirecrawlImageSearch(policy_backend)
+        elif config.image_search_backend == "wikimedia_commons":
+            image_search = WikimediaImageSearch(ssl_context=context)
         backend = WebBackend(
             web_store,
             OpenRouterSearch(lambda: read(UPSTREAM_TARGET), ssl_context=context, proxy_url=config.upstream_proxy)
@@ -161,8 +166,7 @@ def serve(home: Path, port: int):
             fetcher,
             policy_backend=policy_backend,
             accepted_models=config.accepted_models,
-            image_search=WikimediaImageSearch(ssl_context=context)
-                         if config.image_search_backend == "wikimedia_commons" else None,
+            image_search=image_search,
         )
         bridge_options = {"web_backend": backend}
         if transport_factory is not None:

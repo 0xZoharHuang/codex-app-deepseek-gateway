@@ -514,7 +514,7 @@ async def test_commons_is_explicitly_selected_and_image_settings_are_honored(com
     with pytest.raises(WebBackendError) as caught:
         await backend.handle(request({'image_query':[{'q':'waterfall'}]}))
     assert caught.value.code=='backend_not_configured'
-    class Images:
+    class Images(WikimediaImageSearch):
         async def search(self,q,policy,*,max_results,caption):
             assert q=='waterfall' and max_results==2 and caption is False
             return WikimediaImageSearch.extract(commons_response(),policy,max_results=max_results,caption=caption),{'has_more_results':True}

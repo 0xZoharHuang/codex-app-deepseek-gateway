@@ -21,7 +21,7 @@ from codex_deepseek.windows_asyncio import install_proactor_cleanup_backport
 from .web_backend import (
     DomainPolicy, PublicDocumentFetcher, PublicResolver, RetrievedDocument,
     WebBackendError, _single_attempt, checked_url, fail, integer, strict_json,
-    utc_now, domain_list, matches,
+    utc_now, domain_list, matches, encoded,
 )
 
 API_ORIGIN = "https://api.firecrawl.dev"
@@ -127,14 +127,10 @@ class FirecrawlBackend:
     def validate(self, operations, settings, policy):
         mode = web_mode(settings)
         queries = [(name, value) for name, value in operations
-                   if name in {"search_query", "image_query"}]
+                   if name == "search_query"]
         if queries:
             location_bias(settings.get("user_location"))
         for name, value in queries:
-            if name == "image_query":
-                if value.get("recency") is not None or mode != "live" or settings.get("user_location"):
-                    fail("unsupported_image_policy", "The configured image index cannot express this search policy", 422)
-                continue
             recency_filter(value.get("recency"), self.clock())
             selected = policy.restrict(domain_list(value.get("domains", [])))
             domain_filters(selected)
@@ -318,3 +314,100 @@ class FirecrawlBackend:
         if mode != "live":
             fail("invalid_web_mode", "Invalid explicitly selected web mode")
         return await self.fetcher.fetch(initial, policy), {"backend": "public_http", "external_web_access": "live"}
+
+
+class FirecrawlImageSearch:
+    """Explicit official image-index metadata; never fetch pages or image bytes."""
+    NAME = "firecrawl"
+    INDEX_LABEL = "Image search index: Firecrawl web image search (explicit backend; source licences not verified)."
+
+    def __init__(self, service):
+        self.service = service
+
+    @staticmethod
+    def validate_native(value, settings, policy):
+        web_mode(settings)
+        location_bias(settings.get("user_location"))
+        domain_filters(policy)
+        if value.get("recency") is not None:
+            fail("unsupported_image_recency", "Firecrawl tbs filters web results, not image results", 422)
+
+    @staticmethod
+    def display_url(document, policy):
+        return checked_url(document["image"]["thumbnail_url"], DomainPolicy((), policy.blocked))
+
+    async def search_native(self, value, policy, settings, *, max_results=4, caption=True):
+        self.validate_native(value, settings, policy)
+        integer(max_results, "image max_results", 0, 20)
+        if type(caption) is not bool:
+            fail("invalid_request", "image caption must be boolean")
+        mode = web_mode(settings)
+        location = settings.get("user_location")
+        bias = location_bias(location)
+        filters = domain_filters(policy)
+        local = {"backend": self.NAME, "image_index": "Firecrawl web image search",
+                 "external_web_access": mode, "location_bias": bias,
+                 "country_bias": location["country"].upper() if location and location.get("country") else None,
+                 "target_page_fetch_requested": False, "pixel_content_retrieved": False,
+                 "content_origin": "search_index_metadata", "index_freshness_claimed": False,
+                 "automatic_retries": 0, "route_policy": "explicit_firecrawl_only"}
+        if max_results == 0 or filters is None:
+            return [], {**local, "request_performed": False, "local_policy_empty": filters is None}
+        payload = {"query": value["q"], "limit": max_results, "sources": ["images"],
+                   "highlights": False, **filters}
+        if bias:
+            payload["location"] = bias
+        if location and location.get("country"):
+            payload["country"] = location["country"].upper()
+        data, proof = await self.service._post("/v2/search", payload)
+        proof = {**proof, **local}
+        with service_evidence(proof):
+            group = data.get("data")
+            records = group.get("images") if isinstance(group, dict) else None
+            if not isinstance(records, list) or len(records) > max_results or set(group) - {"images"}:
+                fail("image_search_protocol_error", "Firecrawl returned an unexpected image result group", 502)
+            documents = []
+            asset_policy = DomainPolicy((), policy.blocked)
+            for record in records:
+                if not isinstance(record, dict):
+                    fail("image_search_protocol_error", "Firecrawl returned malformed image metadata", 502)
+                landing = checked_url(record.get("url"), policy)
+                image_url = checked_url(record.get("imageUrl"), asset_policy)
+                title = record.get("title")
+                if not isinstance(title, str) or not title or len(title) > 20000:
+                    fail("image_search_protocol_error", "Firecrawl image title is missing or invalid", 502)
+                width, height = record.get("imageWidth"), record.get("imageHeight")
+                for dimension in (width, height):
+                    if dimension is not None and (type(dimension) is not int or dimension < 1):
+                        fail("image_search_protocol_error", "Firecrawl image dimensions are invalid", 502)
+                image = {"url": landing, "content_url": image_url, "original_content_url": image_url,
+                         "thumbnail_url": image_url, "title": title, "show_url": True,
+                         "attribution": "Source metadata returned by Firecrawl; author/licence not supplied"}
+                if width is not None:
+                    image["width"] = width
+                if height is not None:
+                    image["height"] = height
+                if width is not None and height is not None:
+                    image["content_size"] = {"width": width, "height": height}
+                description = record.get("description")
+                if description is not None and (not isinstance(description, str) or len(description) > 100000):
+                    fail("image_search_protocol_error", "Firecrawl image description is invalid", 502)
+                if caption and description:
+                    image["caption"] = description
+                lines = [self.INDEX_LABEL, title,
+                         "Image URL is source-provided metadata; image bytes, MIME and licence were not verified."]
+                if caption and description:
+                    lines.append("Source-provided description: " + description)
+                if width is not None and height is not None:
+                    lines.append(f"Source-reported dimensions: {width} x {height}")
+                else:
+                    lines.append("Complete image dimensions were not supplied.")
+                documents.append({"url": landing, "requested_url": landing, "title": title,
+                    "content_type": "application/vnd.firecrawl.image-metadata+json",
+                    "retrieved_at": utc_now(), "source_sha256": sha256(encoded(record).encode()).hexdigest(),
+                    "lines": lines, "links": [{"id": 0, "url": landing, "text": title}],
+                    "excerpt": True, "page_count": None, "image": image,
+                    "provenance": {**proof, "dimensions_source": "service metadata only",
+                                   "remote_image_safety_policy_applies": True}})
+            proof.update(route_verified=True, data_service_identity="firecrawl", request_performed=True)
+            return documents, proof

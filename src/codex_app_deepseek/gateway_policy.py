@@ -139,8 +139,10 @@ def load_service_config(home: Path) -> ServiceConfig:
     if web_search not in ("openrouter_exa", "firecrawl"):
         raise ServiceConfigError("web_search_backend must be openrouter_exa or firecrawl")
     image_search = config.get("image_search_backend")
-    if image_search not in (None, "wikimedia_commons"):
-        raise ServiceConfigError("image_search_backend must be null or wikimedia_commons")
+    if image_search not in (None, "wikimedia_commons", "firecrawl"):
+        raise ServiceConfigError("image_search_backend must be null, wikimedia_commons or firecrawl")
+    if image_search == "firecrawl" and web_search != "firecrawl":
+        raise ServiceConfigError("Firecrawl image search requires the explicitly configured Firecrawl web backend")
     image_policy = config.get("image_transport")
     if image_policy is not None:
         from .image_transport import TransportPolicy

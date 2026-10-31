@@ -1041,6 +1041,25 @@ class WikimediaImageSearch:
     ENDPOINT = "https://commons.wikimedia.org/w/api.php"
     USER_AGENT = "CodexAppDeepSeekGateway/0.1 (https://github.com/0xZoharHuang; interoperability)"
 
+    INDEX_LABEL = "Image search index: Wikimedia Commons public file repository (explicitly selected backend)."
+
+    @staticmethod
+    def validate_native(value, settings, policy):
+        from .firecrawl_backend import web_mode
+        if value.get("recency") is not None or web_mode(settings) != "live" or settings.get("user_location"):
+            fail("unsupported_image_policy", "The Commons image index cannot express this search policy", 422)
+
+    @staticmethod
+    def display_url(document, policy):
+        url = checked_url(document["image"]["thumbnail_url"], DomainPolicy((), policy.blocked))
+        if urlsplit(url).hostname not in {"upload.wikimedia.org", "thumb.wikimedia.org", "commons.wikimedia.org"}:
+            fail("image_search_protocol_error", "Image display URL is outside the known asset hosts", 502)
+        return url
+
+    async def search_native(self, value, policy, settings, *, max_results=4, caption=True):
+        self.validate_native(value, settings, policy)
+        return await self.search(value["q"], policy, max_results=max_results, caption=caption)
+
     def __init__(self, *, ssl_context=None, timeout=25):
         self.ssl_context = ssl_context or ssl.create_default_context()
         self.timeout = timeout
@@ -1371,6 +1390,9 @@ class WebBackend:
         if self.policy_backend is not None:
             self.policy_backend.validate(operations, native_settings, policy)
         for name, value in operations:
+            if name == "image_query":
+                self.image_search.validate_native(value, native_settings,
+                    policy.restrict(domain_list(value.get("domains", []))))
             if name == "weather":
                 self.weather_backend.validate(value, native_settings, policy)
         self.store.bind_native_namespace(session, native_metadata)
@@ -1438,22 +1460,16 @@ class WebBackend:
                 elif name == "image_query":
                     search_policy = policy.restrict(domain_list(value.get("domains", [])))
                     options = (payload.get("settings") or {}).get("image_settings") or {}
-                    documents, upstream = await self.image_search.search(value["q"], search_policy,
+                    documents, upstream = await self.image_search.search_native(value, search_policy, native_settings,
                         max_results=options.get("max_results", 4), caption=options.get("caption", True))
                     proof["upstream"] = upstream
-                    pieces.append("Image search index: Wikimedia Commons public file repository (explicitly selected backend).")
+                    pieces.append(self.image_search.INDEX_LABEL)
                     if not documents:
                         pieces.append("No image records returned for this query and its filters in the bounded index result page.")
                     for document in documents:
+                        display_url = self.image_search.display_url(document, search_policy)
                         source = self.store.put(session, document, kind="image")
                         pieces.append(present(source, window=20))
-                        # Landing-page allowlists select the image index results;
-                        # Wikimedia assets use separate known CDN hosts and blocked domains.
-                        display_url = checked_url(source["image"]["thumbnail_url"],
-                                                  DomainPolicy((), search_policy.blocked))
-                        if urlsplit(display_url).hostname not in {
-                                "upload.wikimedia.org", "thumb.wikimedia.org", "commons.wikimedia.org"}:
-                            fail("image_search_protocol_error", "Image display URL is outside the known asset hosts", 502)
                         pieces.append("Native Markdown display reference (remote image safety policy still applies):\n"
                                       + native_image_markdown(display_url))
                         results.append(image_result(source)); proof["source_refs"].append(source["ref_id"])

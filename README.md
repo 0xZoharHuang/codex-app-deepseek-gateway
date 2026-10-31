@@ -170,3 +170,12 @@ health 只验证本地网关，不发模型请求。启动观察超时不等于�
 回滚按项目拥有的字段和检查点恢复，保留后来由用户修改的内容；冲突明确报告。卸载使用原生 sandbox uninstall 清理本项目资源，不另写账号/权限管理器。用户工程、会话、凭据和原生按合同保留的文件系统权限不会被笼统清空；不承诺复原整张历史 DACL。
 
 专用 App home、协议数据库、网页引用、图片状态和原始诊断属于私有工作数据。公开问题只提供去敏摘要与哈希。当前验收未关闭前不发布“全通过”，也不把旧组合的通过延伸到新版本。
+
+
+## 显式 Firecrawl 图片元数据
+
+在本项目的 gateway.json 中同时设置 web_search_backend 和 image_search_backend 为 firecrawl，才选择官方 Firecrawl 图片索引。现有 null/Wikimedia 选择保持不变，请求失败不会切换提供方；本路由不读取额外账号或 key。
+
+图片查询保留原 query 和 domain policy，以真正的 location/country 服务字段表达城市偏置。文本 recency 使用文档规定的 tbs；图片 recency 和搜索 timezone 仍在网络请求前明确报错。live/cached/indexed 图片查询只读取搜索索引元数据，不传 scrapeOptions、不抓取目标页面、不下载图片；这不承诺归档快照或索引新鲜度。后续 open/fetch 继续执行各自的 cached/indexed 访问限制。
+
+Firecrawl 图片 URL 是未信任元数据和原生 Markdown 引用，执行公共 URL 语法及 blocked-domain 校验。未知尺寸、作者、许可均不编造，不把 Wikimedia 的开放许可或 CDN 信任转给 Firecrawl；Wikimedia 自己的来源/CDN 检查保留。Codex App 的 remote-image/url_safe/authentication 控制不变，元数据或 Markdown 返回本身不等于 rich rendering 已验收。

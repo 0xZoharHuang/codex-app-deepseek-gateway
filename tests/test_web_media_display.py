@@ -123,7 +123,7 @@ async def test_display_publication_failure_is_failed_receipt_not_render_success(
  assert outcome=="failed" and "generated_display" not in json.loads(evidence)
 async def test_commons_tool_text_uses_actual_thumbnail_without_local_download(components):
  backend,store,_,fetcher=components
- class Images:
+ class Images(wb.WikimediaImageSearch):
   async def search(self,q,policy,*,max_results,caption):
    data=commons_response();data["query"]["pages"][0]["imageinfo"][0]["extmetadata"]["ObjectName"]={"value":"](<https://evil.invalid>)"}
    return wb.WikimediaImageSearch.extract(data,policy,max_results=max_results,caption=caption),{}
@@ -149,7 +149,7 @@ def test_native_markdown_fixed_caption_and_encoded_remote_delimiters():
 ])
 async def test_query_landing_allowlist_is_distinct_from_known_asset_cdn_policy(components,asset_host,blocked,expected):
  backend,store,_,fetcher=components
- class Images:
+ class Images(wb.WikimediaImageSearch):
   async def search(self,q,policy,*,max_results,caption):
    data=commons_response()
    item=data["query"]["pages"][0]["imageinfo"][0]
@@ -170,7 +170,7 @@ async def test_query_landing_allowlist_is_distinct_from_known_asset_cdn_policy(c
 
 async def test_backend_display_rejects_foreign_asset_even_if_backend_skips_extract(components):
  backend,_,_,_=components
- class Images:
+ class Images(wb.WikimediaImageSearch):
   async def search(self,q,policy,*,max_results,caption):
    source=wb.WikimediaImageSearch.extract(commons_response(),policy,max_results=max_results,caption=caption)[0]
    source["image"]["thumbnail_url"]="https://foreign-cdn.example/image.jpg"
