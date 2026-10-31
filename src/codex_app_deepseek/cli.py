@@ -15,7 +15,6 @@ from contextlib import ExitStack, contextmanager
 import urllib.request
 
 from . import __version__
-from codex_deepseek.windows_asyncio import install_proactor_cleanup_backport
 from .credentials import CredentialUnavailable,LOCAL_TARGET,UPSTREAM_TARGET,initialize,read,write
 
 
@@ -89,6 +88,7 @@ def image_transport_factory(home: Path, config: ServiceConfig):
 
 
 async def image_cache_operation(home: Path, operation: str, *, all_unpinned: bool = False):
+    from codex_deepseek.windows_asyncio import install_proactor_cleanup_backport
     import aiohttp
     import truststore
     home = resolve_service_home(home)

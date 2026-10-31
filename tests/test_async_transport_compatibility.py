@@ -49,6 +49,49 @@ print("IMPORT_ONLY_UNCHANGED")
     assert result.stdout.strip() == "IMPORT_ONLY_UNCHANGED"
 
 
+def test_real_independent_bootstrap_imports_cli_without_CDS_and_rejects_regression(tmp_path):
+    import zipfile
+    package = Path(cli.__file__).resolve().parent
+    paths = [path for path in package.rglob("*") if path.is_file()
+             and path.suffix in {".py", ".json", ".ps1"}]
+    def make_wheel(name, buggy):
+        wheel = tmp_path / name
+        with zipfile.ZipFile(wheel, "w") as archive:
+            for path in paths:
+                raw = path.read_bytes()
+                if buggy and path == package / "cli.py":
+                    raw = raw.replace(b"from . import __version__\n",
+                        b"from . import __version__\nfrom codex_deepseek.windows_asyncio import install_proactor_cleanup_backport\n", 1)
+                archive.writestr("codex_app_deepseek/" + path.relative_to(package).as_posix(), raw)
+        return wheel
+    program = r"""
+import importlib.abc,sys
+class NoCDS(importlib.abc.MetaPathFinder):
+ def find_spec(self,fullname,path=None,target=None):
+  if fullname=="codex_deepseek" or fullname.startswith("codex_deepseek."):
+   raise RuntimeError("Bootstrap unexpectedly imported CDS before dependencies were installed")
+sys.meta_path.insert(0,NoCDS())
+sys.path.insert(0,sys.argv[1])
+from codex_app_deepseek.lifecycle import install
+from codex_app_deepseek.cli import resolve_service_home
+assert callable(install) and callable(resolve_service_home)
+assert not any(name=="codex_deepseek" or name.startswith("codex_deepseek.") for name in sys.modules)
+print("BOOTSTRAP_ONLY_STDLIB_NO_CDS")
+"""
+    python = str(Path(sys._base_executable).resolve())
+    for buggy in [False, True]:
+        wheel = make_wheel("broken.whl" if buggy else "fixed.whl", buggy)
+        result = subprocess.run([python, "-I", "-S", "-B", "-X", "utf8", "-W", "error",
+                                 "-c", program, str(wheel)], cwd=tmp_path,
+                                capture_output=True, text=True, encoding="utf-8", timeout=30)
+        if buggy:
+            assert result.returncode != 0
+            assert "Bootstrap unexpectedly imported CDS before dependencies were installed" in result.stderr
+        else:
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert result.stdout.strip() == "BOOTSTRAP_ONLY_STDLIB_NO_CDS"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("owner", ["bridge", "image-cli", "firecrawl", "metadata",
                                   "weather", "document", "search", "images"])
@@ -61,7 +104,8 @@ async def test_each_http_owner_calls_guard_before_transport_creation(owner, tmp_
     def guard():
         calls.append(owner)
         raise error
-    monkeypatch.setattr(module, "install_proactor_cleanup_backport", guard)
+    helper_owner = compatibility if owner == "image-cli" else module
+    monkeypatch.setattr(helper_owner, "install_proactor_cleanup_backport", guard)
     sessions = []
     def forbidden_session(*args, **kwargs):
         sessions.append(owner)
