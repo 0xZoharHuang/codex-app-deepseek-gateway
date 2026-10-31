@@ -12,6 +12,7 @@ from typing import Callable, Mapping, Any
 from urllib.parse import urlsplit
 
 import aiohttp
+from codex_deepseek.windows_asyncio import install_proactor_cleanup_backport
 from codex_deepseek.protocol import MODEL
 
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
@@ -189,6 +190,7 @@ async def read_generation_evidence(
             # Exception strings can contain proxy credentials; retain only the type.
             return None, None, {"kind": "transport_error", "exception_type": type(error).__name__}, None
 
+    install_proactor_cleanup_backport()
     connector = aiohttp.TCPConnector(ssl=ssl_context or ssl.create_default_context())
     async with aiohttp.ClientSession(
         connector=connector, timeout=aiohttp.ClientTimeout(total=timeout),

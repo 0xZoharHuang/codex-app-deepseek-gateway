@@ -31,6 +31,7 @@ from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 import uuid
 
 import aiohttp
+from codex_deepseek.windows_asyncio import install_proactor_cleanup_backport
 from aiohttp.abc import AbstractResolver
 from bs4 import BeautifulSoup
 
@@ -228,6 +229,7 @@ class PublicDocumentFetcher:
     async def fetch(self, url, policy, *, index_check=None):
         initial = checked_url(url, policy)
         current, redirects = initial, []
+        install_proactor_cleanup_backport()
         connector = aiohttp.TCPConnector(ssl=self.ssl_context, resolver=PublicResolver(), use_dns_cache=False)
         try:
             async with aiohttp.ClientSession(connector=connector, trust_env=False,
@@ -615,6 +617,7 @@ class OpenRouterSearch:
                    "stream": False, "store": False}
         evidence = {"requested_model": MODEL, "requested_provider": "deepseek", "requested_engine": "exa",
                     "response_id": None, "observed_model": None, "observed_provider": None, "automatic_retries": 0}
+        install_proactor_cleanup_backport()
         try:
             async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=self.ssl_context),
                     trust_env=False, cookie_jar=aiohttp.DummyCookieJar(), middlewares=(_single_attempt,),
@@ -1128,6 +1131,7 @@ class WikimediaImageSearch:
                   "gsrsearch": query, "gsrnamespace": 6, "gsrlimit": max_results,
                   "prop": "imageinfo", "iiprop": "url|size|mime|timestamp|extmetadata", "iiurlwidth": 960,
                   "maxlag": 5}
+        install_proactor_cleanup_backport()
         try:
             async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=self.ssl_context),
                     trust_env=False, cookie_jar=aiohttp.DummyCookieJar(), middlewares=(_single_attempt,),

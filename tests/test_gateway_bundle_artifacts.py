@@ -85,3 +85,64 @@ def test_run_timeout_has_bounded_redacted_cause(monkeypatch):
         builder.run(["DO_NOT_LOG_COMMAND"], cwd=".", env={"SERVICE_TOKEN": "secret_value"})
     assert "waiting" in str(failure.value) and "secret_value" not in str(failure.value)
     assert "DO_NOT_LOG_COMMAND" not in str(failure.value)
+
+
+def cds_boundary_fixture(tmp_path):
+    import json
+    import zipfile
+    modules = {name: ("fixture-" + name).encode() for name in
+               ["protocol.py", "formats.py", "structured.py", "protocol_errors.py", "search.py", "__init__.py"]}
+    helper = b"fixture-reviewed-helper"
+    license_path = "codex_deepseek_runtime-0.6.8.dist-info/licenses/licenses/cpython-proactor-PSF.txt"
+    license_bytes = b"fixture-complete-PSF-license"
+    lock = {"protocol_boundary": {"source_commit": "fixed", "pure_files": {
+                name: hashlib.sha256(value).hexdigest() for name, value in modules.items()}},
+            "transport_compatibility": {"source_commit": "fixed", "files": {
+                "windows_asyncio.py": hashlib.sha256(helper).hexdigest()}, "license_files": {
+                license_path: hashlib.sha256(license_bytes).hexdigest()}}}
+    members = {"codex_deepseek/" + name: value for name, value in modules.items()}
+    members["codex_deepseek/windows_asyncio.py"] = helper
+    members[license_path] = license_bytes
+    return lock, members
+
+
+def test_protocol_and_single_transport_helper_and_license_are_all_verified(tmp_path):
+    import zipfile
+    lock, members = cds_boundary_fixture(tmp_path)
+    wheel = tmp_path / "fixed.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name, value in members.items(): archive.writestr(name, value)
+    builder.verify_cds_dependency(wheel, lock)
+
+
+@pytest.mark.parametrize("change", ["protocol", "helper", "license", "missing_helper", "missing_license",
+                                  "empty_license_boundary", "extra_helper", "source_commit"])
+def test_transport_boundary_rejects_tampering_or_missing_licensing(tmp_path, change):
+    import zipfile
+    lock, members = cds_boundary_fixture(tmp_path)
+    helper = "codex_deepseek/windows_asyncio.py"
+    license_path = next(iter(lock["transport_compatibility"]["license_files"]))
+    if change == "protocol": members["codex_deepseek/protocol.py"] = b"changed"
+    elif change == "helper": members[helper] = b"changed"
+    elif change == "license": members[license_path] = b"incomplete"
+    elif change == "missing_helper": del members[helper]
+    elif change == "missing_license": del members[license_path]
+    elif change == "empty_license_boundary": lock["transport_compatibility"]["license_files"] = {}
+    elif change == "extra_helper": lock["transport_compatibility"]["files"]["service.py"] = "0" * 64
+    else: lock["transport_compatibility"]["source_commit"] = "another"
+    wheel = tmp_path / "bad.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name, value in members.items(): archive.writestr(name, value)
+    expected = {
+        "protocol": (ValueError, "Pinned pure CDS protocol differs"),
+        "helper": (ValueError, "Pinned CDS transport helper differs"),
+        "license": (ValueError, "Pinned CDS transport helper license differs"),
+        "missing_helper": (KeyError, "windows_asyncio.py"),
+        "missing_license": (KeyError, "cpython-proactor-PSF.txt"),
+        "empty_license_boundary": (ValueError, "Unexpected CDS transport license boundary"),
+        "extra_helper": (ValueError, "Unexpected CDS transport helper boundary"),
+        "source_commit": (ValueError, "Transport helper source differs"),
+    }
+    exception, message = expected[change]
+    with pytest.raises(exception, match=message):
+        builder.verify_cds_dependency(wheel, lock)

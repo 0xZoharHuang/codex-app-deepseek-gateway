@@ -31,7 +31,7 @@
 
 [CDS](https://github.com/0xZoharHuang/codex-deepseek-runtime) 让 Codex CLI 使用 DeepSeek；本仓库让官方桌面 App 使用 DeepSeek。两者可以并行使用，安装目录、配置、会话、凭据项和进程归属独立。
 
-当前源码验收候选固定复用 CDS 0.6.8 的六个纯协议模块，来源为公开提交 [4d99981](https://github.com/0xZoharHuang/codex-deepseek-runtime/commit/4d99981baaa493b0c4e7b1febbdb167e6c44de91)。依赖轮子由固定源码离线构建并逐文件校验，锁文件如实标记为源码构建候选，尚未声明为正式发布资产。没有复制 CDS 启动器、线程管理、工具执行器或 agent loop，也不会通过 CDS 启动或接管桌面 App。
+当前源码固定复用已发布 CDS 0.6.8 的六个纯协议模块，以及一个经验证的进程内 Windows Proactor 清理 helper，来源为固定公开提交 [1684b7f](https://github.com/0xZoharHuang/codex-deepseek-runtime/commit/1684b7f136b59b04ca7a1895d0754f30f88f5a45)。六个协议模块与旧依赖逐字节相同；该 helper 只在明确的 HTTP 生命周期入口调用，不在导入时应用，不修改共享 Python 文件或事件循环策略。依赖轮子、helper 和 PSF 许可证均按锁文件校验。没有复制 CDS 启动器、线程管理、工具执行器或 agent loop，也不会通过 CDS 启动或接管桌面 App。
 
 ## 当前固定组合
 

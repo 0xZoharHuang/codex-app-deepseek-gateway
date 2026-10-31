@@ -15,6 +15,7 @@ from contextlib import ExitStack, contextmanager
 import urllib.request
 
 from . import __version__
+from codex_deepseek.windows_asyncio import install_proactor_cleanup_backport
 from .credentials import CredentialUnavailable,LOCAL_TARGET,UPSTREAM_TARGET,initialize,read,write
 
 
@@ -95,6 +96,7 @@ async def image_cache_operation(home: Path, operation: str, *, all_unpinned: boo
     factory = image_transport_factory(home, config)
     if factory is None:
         raise ServiceConfigError("Configure image_transport explicitly before using its maintenance commands")
+    install_proactor_cleanup_backport()
     context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=60)
     async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=context), timeout=timeout,

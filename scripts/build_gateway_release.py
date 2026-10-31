@@ -172,6 +172,28 @@ def build_one(python, source, output, env, log):
     require(actual == expected, "Wheel payload differs from its exact source snapshot")
     return wheel, expected
 
+def verify_cds_dependency(path, lock):
+    """Verify only the admitted protocol and transport helper wheel members."""
+    with zipfile.ZipFile(path) as archive:
+        for name, expected in lock["protocol_boundary"]["pure_files"].items():
+            require(hashlib.sha256(archive.read("codex_deepseek/" + name)).hexdigest() == expected,
+                    "Pinned pure CDS protocol differs")
+        compatibility = lock["transport_compatibility"]
+        require(compatibility["source_commit"] == lock["protocol_boundary"]["source_commit"],
+                "Transport helper source differs from pinned protocol source")
+        require(set(compatibility["files"]) == {"windows_asyncio.py"},
+                "Unexpected CDS transport helper boundary")
+        for name, expected in compatibility["files"].items():
+            require(hashlib.sha256(archive.read("codex_deepseek/" + name)).hexdigest() == expected,
+                    "Pinned CDS transport helper differs")
+        require(set(compatibility["license_files"]) == {
+                    "codex_deepseek_runtime-0.6.8.dist-info/licenses/licenses/cpython-proactor-PSF.txt"},
+                "Unexpected CDS transport license boundary")
+        for name, expected in compatibility["license_files"].items():
+            require(hashlib.sha256(archive.read(name)).hexdigest() == expected,
+                    "Pinned CDS transport helper license differs")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", type=Path, default=Path(__file__).resolve().parents[1])
@@ -207,9 +229,7 @@ def main(argv=None):
     require(".".join(tool_proof["python_version"].split(".")[:2]) == lock["target"]["python_version"], "Build Python differs from the target lock")
     for row, path in dependencies:
         if row["distribution"] == "codex-deepseek-runtime":
-            with zipfile.ZipFile(path) as archive:
-                for name, expected in lock["protocol_boundary"]["pure_files"].items():
-                    require(hashlib.sha256(archive.read("codex_deepseek/" + name)).hexdigest() == expected, "Pinned pure CDS protocol differs")
+            verify_cds_dependency(path, lock)
     output.mkdir()
     work = output / ".build"; work.mkdir()
     logs = output / ".logs"; logs.mkdir()

@@ -14,6 +14,7 @@ from typing import Callable
 from urllib.parse import urlsplit, unquote
 
 import aiohttp
+from codex_deepseek.windows_asyncio import install_proactor_cleanup_backport
 from aiohttp import web
 from codex_deepseek.protocol import (
     MODEL, PROVIDER, SERIAL_PROVIDER, STRUCTURED_PROVIDER,
@@ -457,6 +458,7 @@ def create_app(
                 or parsed.hostname not in {"127.0.0.1", "::1"}
                 or parsed.username or parsed.password or parsed.fragment):
             raise ValueError("Production upstream must be the fixed OpenRouter Responses endpoint")
+    install_proactor_cleanup_backport()
     app = web.Application(client_max_size=settings.max_body_bytes)
     session_key = web.AppKey("upstream_session", aiohttp.ClientSession)
     maintenance_key = web.AppKey("image_maintenance", ImageMaintenance)

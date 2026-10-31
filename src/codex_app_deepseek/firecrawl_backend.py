@@ -16,6 +16,7 @@ import ssl
 from urllib.parse import urlsplit
 
 import aiohttp
+from codex_deepseek.windows_asyncio import install_proactor_cleanup_backport
 
 from .web_backend import (
     DomainPolicy, PublicDocumentFetcher, PublicResolver, RetrievedDocument,
@@ -144,6 +145,7 @@ class FirecrawlBackend:
     async def _post(self, endpoint, payload):
         if endpoint not in {"/v2/search", "/v2/scrape"}:
             raise ValueError("Unrecognized fixed Firecrawl endpoint")
+        install_proactor_cleanup_backport()
         connector = aiohttp.TCPConnector(
             ssl=self.ssl_context, resolver=PublicResolver(), use_dns_cache=False)
         request_hash = sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"),

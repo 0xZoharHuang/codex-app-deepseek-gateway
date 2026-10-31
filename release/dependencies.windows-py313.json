@@ -161,21 +161,23 @@
     {
       "distribution": "codex-deepseek-runtime",
       "filename": "codex_deepseek_runtime-0.6.8-py3-none-any.whl",
-      "sha256": "fd26450f13ed03cb549438e097802b4ed4b5a0476e463b9ab94c5082eabe42bd",
+      "sha256": "a4f52d6d82745c8b0acf17d6e7f595184e5cea1f55d7ac4443d4626dc0a5bd30",
       "source": {
         "type": "fixed_public_source_archive_local_wheel",
-        "source_commit": "4d99981baaa493b0c4e7b1febbdb167e6c44de91",
-        "archive_url": "https://codeload.github.com/0xZoharHuang/codex-deepseek-runtime/tar.gz/4d99981baaa493b0c4e7b1febbdb167e6c44de91",
-        "archive_sha256": "34d9261c03e1c31156506ec963cc8c07227e08d50486b25efbea1acbcbb59c03",
-        "source_date_epoch": 1793440910,
+        "source_commit": "1684b7f136b59b04ca7a1895d0754f30f88f5a45",
+        "archive_url": "https://codeload.github.com/0xZoharHuang/codex-deepseek-runtime/tar.gz/1684b7f136b59b04ca7a1895d0754f30f88f5a45",
+        "archive_sha256": "9551d221a96b580253057bf752f4b68b32de9e883a5d6becb3e7bb76cdb45738",
+        "source_date_epoch": 1793467477,
         "build_backend": "setuptools.build_meta",
         "build_tools": {
           "setuptools": "84.2.0",
           "wheel": "0.48.0"
         },
-        "artifact_sha256": "fd26450f13ed03cb549438e097802b4ed4b5a0476e463b9ab94c5082eabe42bd",
+        "artifact_sha256": "a4f52d6d82745c8b0acf17d6e7f595184e5cea1f55d7ac4443d4626dc0a5bd30",
         "reproducibility": "two_independent_local_wheels_equal",
-        "public_release_ready": false
+        "public_release_ready": true,
+        "artifact_url": "https://github.com/0xZoharHuang/codex-deepseek-runtime/releases/download/v0.6.8/codex_deepseek_runtime-0.6.8-py3-none-any.whl",
+        "release_tag": "v0.6.8"
       },
       "version": "0.6.8"
     },
@@ -625,7 +627,7 @@
     }
   ],
   "protocol_boundary": {
-    "source_commit": "4d99981baaa493b0c4e7b1febbdb167e6c44de91",
+    "source_commit": "1684b7f136b59b04ca7a1895d0754f30f88f5a45",
     "pure_files": {
       "protocol.py": "f878a1091a48ecd195c5616d481f68c846f67ba533d6b12b1cb68a452850094a",
       "formats.py": "3f8f027b56731c30ec0ffb518da9a09671059b364785a8e39688fb1052ea8f47",
@@ -639,5 +641,14 @@
   "target": {
     "platform": "win_amd64",
     "python_version": "3.13"
+  },
+  "transport_compatibility": {
+    "source_commit": "1684b7f136b59b04ca7a1895d0754f30f88f5a45",
+    "files": {
+      "windows_asyncio.py": "d2778f52c6978dd61c70e0d6c384f012d654bad72ff7119c2baf1e7ae67441a5"
+    },
+    "license_files": {
+      "codex_deepseek_runtime-0.6.8.dist-info/licenses/licenses/cpython-proactor-PSF.txt": "018bb8be8699b84bd2357128c7f1bd7d77af6ce5bbac143cb0cabb9a8ca3031d"
+    }
   }
 }

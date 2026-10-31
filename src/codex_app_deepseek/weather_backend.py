@@ -13,6 +13,7 @@ import ssl
 import unicodedata
 from urllib.parse import urlencode
 import aiohttp
+from codex_deepseek.windows_asyncio import install_proactor_cleanup_backport
 from .web_backend import (
     DomainPolicy, PublicResolver, WebBackendError, _single_attempt,
     checked_url, fail, integer, strict_json, string,
@@ -88,6 +89,7 @@ class OpenMeteoWeather:
         url = endpoint + "?" + urlencode(parameters)
         record = {"url": url, "attempts": 1, "response_status": None}
         proof["requests"].append(record)
+        install_proactor_cleanup_backport()
         connector = aiohttp.TCPConnector(ssl=self.ssl_context, resolver=PublicResolver(),
                                         use_dns_cache=False)
         try:
