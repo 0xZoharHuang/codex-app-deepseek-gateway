@@ -1,5 +1,9 @@
 # 当前机制验收状态
 
+## R223: native interface audit continues
+
+Native Command/McpTool Hooks passed the exact API lifecycle and filesystem scope; actual App Hooks and Undo remain pending. Native outputSchema passed after a real read in the preceding turn, but two same-turn automatic-tool tasks failed their nonce/read oracle. Direct provider probes reproduce the distinction; no production routing change or auto-to-required substitution was made. A new source audit reconfirmed the closed App worktree restore identity defect. See [R223 evidence and limits](qualification-r223.md). Overall stable qualification remains open.
+
 ## R222: native LaTeX repaired and exercised in the actual App
 
 The five-patch runtime is actually loaded in the normal official App via installed prepare/bind/configure/launch. DeepSeek reached the original compiler, recovered from a retained cold timeout, obtained a genuine missing-source error, restored/updated the project and compiled successfully. Actual GUI preview and native PDF export were independently read back: three pages and exact new nonce. This closes that LaTeX scope; first-cold latency, native fork/revert, strict outputSchema, hooks and the other matrix gates remain separate. Validation: 15 native tests, 122 build/package checks, one real four-binary producer and real App evidence. See [R222 evidence](qualification-r222.md).
