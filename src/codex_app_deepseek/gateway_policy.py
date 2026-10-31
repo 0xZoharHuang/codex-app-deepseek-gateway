@@ -152,7 +152,7 @@ def load_service_config(home: Path) -> ServiceConfig:
         except (TypeError, ValueError):
             raise ServiceConfigError("image_transport has missing or invalid policy fields") from None
     origin = config.get("policy_origin")
-    if origin is not None and origin != DEFAULT_POLICY_ORIGIN:
+    if origin is not None and origin not in (DEFAULT_POLICY_ORIGIN, LEGACY_POLICY_ORIGIN_067):
         raise ServiceConfigError("gateway.json has an unrecognized policy_origin")
     return ServiceConfig(models, providers, proxy, **metadata,
                          image_search_backend=image_search, web_search_backend=web_search,
@@ -162,12 +162,25 @@ def load_service_config(home: Path) -> ServiceConfig:
 
 
 # This is the complete route set reachable in pinned protocol.prepare() at
-# published CDS 0.6.7 / cb78873: DeepSeek, strict/peer+hosted Morph, explicit serial Prime.
+# fixed CDS 0.6.8 / 4d99981: DeepSeek, strict/peer+hosted Morph, explicit serial Prime.
 # It is metadata, not a second routing implementation.
 DEFAULT_PROVIDERS = ("deepseek", "morph/fp8", "primeintellect")
 DEFAULT_POLICY_ORIGIN = {
     "policy_id": "codex-app-680c4-full-runtime-v1",
     "native_version": NATIVE_VERSION,
+    "protocol_commit": "4d99981baaa493b0c4e7b1febbdb167e6c44de91",
+    "provider_reasons": {
+        "deepseek": "official_default",
+        "morph/fp8": "strict_json_schema_or_native_peer_history_with_hosted_tools",
+        "primeintellect": "explicit_parallel_tool_calls_false",
+    },
+}
+
+# A known initialization origin remains valid after a protocol-only upgrade.
+# Its original bytes are retained; this does not widen any route or model policy.
+LEGACY_POLICY_ORIGIN_067 = {
+    "policy_id": "codex-app-680c4-full-runtime-v1",
+    "native_version": "0.165.0-alpha.1.2",
     "protocol_commit": "cb788738864e97a16cde82f3c584164162ab6f7c",
     "provider_reasons": {
         "deepseek": "official_default",

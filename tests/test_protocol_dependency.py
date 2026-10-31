@@ -8,9 +8,9 @@ import subprocess
 import sys
 from codex_app_deepseek import gateway_policy
 
-COMMIT="cb788738864e97a16cde82f3c584164162ab6f7c"
-ARCHIVE="5168af937541a6f19158e42ff809b5cbcc4656b574fa478ef451805ee08bf7e4"
-PURE_HASHES={'protocol.py': '58264666a72b3614348d3ccf74a094b0472a23e72d829237a4cf168b923af9ad', 'formats.py': '3f8f027b56731c30ec0ffb518da9a09671059b364785a8e39688fb1052ea8f47', 'structured.py': '8f54e9a5ad190bcfdd9d580adc00b184d5d440cd7376f5c5465a9a6c2e1c9d8a', 'protocol_errors.py': '446636771b39e39d36065a4ace549f4c5608d1f9005ff2723c75a573e1129452', 'search.py': '438a157d92e0c1e717fbfe7c9f7856df1edf38cf3d9a0d63188636e693500030', '__init__.py': '54a6b6d025f3e0b5213085e4aea4e383907e27cc46a03dcc35002b337e13e33e'}
+COMMIT="4d99981baaa493b0c4e7b1febbdb167e6c44de91"
+ARCHIVE="34d9261c03e1c31156506ec963cc8c07227e08d50486b25efbea1acbcbb59c03"
+PURE_HASHES={'protocol.py': 'f878a1091a48ecd195c5616d481f68c846f67ba533d6b12b1cb68a452850094a', 'formats.py': '3f8f027b56731c30ec0ffb518da9a09671059b364785a8e39688fb1052ea8f47', 'structured.py': '8f54e9a5ad190bcfdd9d580adc00b184d5d440cd7376f5c5465a9a6c2e1c9d8a', 'protocol_errors.py': '446636771b39e39d36065a4ace549f4c5608d1f9005ff2723c75a573e1129452', 'search.py': '438a157d92e0c1e717fbfe7c9f7856df1edf38cf3d9a0d63188636e693500030', '__init__.py': '50781f55b6e19ac086738732a2cc50fc6cd62a4fa8823fe0a40f4f085641e6c4'}
 
 def test_gateway_wheel_pins_fixed_protocol_archive_and_actual_installed_version():
     requires=metadata.requires("codex-app-deepseek-gateway")
@@ -22,15 +22,20 @@ def test_gateway_wheel_pins_fixed_protocol_archive_and_actual_installed_version(
     rows = [row for row in lock["dependencies"] if row["distribution"] == "codex-deepseek-runtime"]
     assert len(rows) == 1
     row = rows[0]
-    assert row["version"] == "0.6.7" and row["filename"] == "codex_deepseek_runtime-0.6.7-py3-none-any.whl"
-    assert row["sha256"] == "762352fe471c3242dca0172d015a0d3cc86927b25aaa4312b36fad0148c7bb35"
-    assert row["source"]["type"] == "github_release_wheel" and row["source"]["public_release_ready"] is True
+    assert row["version"] == "0.6.8" and row["filename"] == "codex_deepseek_runtime-0.6.8-py3-none-any.whl"
+    assert row["sha256"] == "fd26450f13ed03cb549438e097802b4ed4b5a0476e463b9ab94c5082eabe42bd"
+    assert row["source"]["type"] == "fixed_public_source_archive_local_wheel"
+    assert row["source"]["public_release_ready"] is False
     assert row["source"]["source_commit"] == COMMIT
     assert row["source"]["archive_url"] == expected_archive and row["source"]["archive_sha256"] == ARCHIVE
-    assert row["source"]["artifact_url"] == "https://github.com/0xZoharHuang/codex-deepseek-runtime/releases/download/v0.6.7/" + row["filename"]
+    assert "artifact_url" not in row["source"] and "release_tag" not in row["source"]
+    assert row["source"]["source_date_epoch"] == 1793440910
+    assert row["source"]["build_backend"] == "setuptools.build_meta"
+    assert row["source"]["build_tools"] == {"setuptools": "84.2.0", "wheel": "0.48.0"}
+    assert row["source"]["reproducibility"] == "two_independent_local_wheels_equal"
     assert row["source"]["artifact_sha256"] == row["sha256"]
     assert lock["protocol_boundary"] == {"source_commit": COMMIT, "pure_files": PURE_HASHES}
-    assert metadata.version("codex-deepseek-runtime")=="0.6.7"
+    assert metadata.version("codex-deepseek-runtime")=="0.6.8"
     assert gateway_policy.DEFAULT_POLICY_ORIGIN["protocol_commit"]==COMMIT
     for name,digest in PURE_HASHES.items():
         module=importlib.import_module("codex_deepseek"+("."+name[:-3] if name!="__init__.py" else ""))

@@ -556,6 +556,9 @@ def create_app(
             evidence = state.evidence_view(translated.get("input"))
             payload, registry = prepare(translated, evidence)
             adaptations = {**control_adaptations, **adapt_reasoning_context(translated, payload)}
+            output_mapping = getattr(registry, "structured_output_mapping", None)
+            if output_mapping is not None:
+                adaptations["structured_output_mapping"] = dict(output_mapping)
             try:
                 adaptations["incoming_native_history"] = incoming_native_history_metadata(
                     body.get("input"), request.headers.getall("thread-id", []))

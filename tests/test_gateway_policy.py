@@ -22,6 +22,7 @@ def test_versioned_app_default_covers_actual_pinned_prepare_routes(tmp_path):
     config, receipt = gp.ensure_app_policy(tmp_path / "new")
     assert receipt["status"] == "created_fixed_app_policy"
     assert config.policy_origin["provider_reasons"]["primeintellect"] == "explicit_parallel_tool_calls_false"
+    assert config.policy_origin["protocol_commit"] == "4d99981baaa493b0c4e7b1febbdb167e6c44de91"
 
 
 def test_config_snapshot_parses_and_hashes_same_single_read(tmp_path, monkeypatch):
@@ -130,3 +131,53 @@ def test_old_pinned_origin_requires_explicit_operator_transition_without_rewrite
     assert path.read_bytes() == raw
     assert state.read_bytes() == b"unchanged fixture state"
     assert sorted(item.name for item in home.iterdir()) == ["gateway.json", "state-preserved.bin"]
+
+
+def test_exact_previous_initialization_origin_is_preserved_on_protocol_only_upgrade(tmp_path):
+    home = tmp_path / "gateway"; home.mkdir()
+    value = gp.default_app_policy()
+    value["policy_origin"] = json.loads(json.dumps(gp.LEGACY_POLICY_ORIGIN_067))
+    value["upstream_proxy"] = "http://127.0.0.1:3128"
+    value["web_search_backend"] = "firecrawl"
+    raw = (json.dumps(value, indent=4) + "\n").encode()
+    path = home / "gateway.json"; path.write_bytes(raw)
+    state = home / "unrelated-state.bin"; state.write_bytes(b"preserved")
+    config, receipt = gp.ensure_app_policy(home)
+    assert config.policy_origin == gp.LEGACY_POLICY_ORIGIN_067
+    assert config.policy_origin["protocol_commit"] == "cb788738864e97a16cde82f3c584164162ab6f7c"
+    assert config.config_sha256 == hashlib.sha256(raw).hexdigest()
+    assert receipt["status"] == "existing_policy_preserved"
+    assert receipt["origin"] == value["policy_origin"]
+    assert path.read_bytes() == raw and state.read_bytes() == b"preserved"
+    assert config.allowed_providers == tuple(gp.DEFAULT_PROVIDERS)
+    assert config.accepted_models == tuple(gp.REQUEST_MODEL_IDS)
+
+
+@pytest.mark.parametrize("change", ["native_version", "policy_id", "protocol_commit", "reason", "extra"])
+def test_previous_origin_compatibility_rejects_any_unrecognized_metadata(tmp_path, change):
+    home = tmp_path / "gateway"; home.mkdir()
+    value = gp.default_app_policy()
+    origin = json.loads(json.dumps(gp.LEGACY_POLICY_ORIGIN_067))
+    if change == "reason":
+        origin["provider_reasons"]["deepseek"] = "different"
+    elif change == "extra":
+        origin["future_behavior"] = True
+    else:
+        origin[change] = "different"
+    value["policy_origin"] = origin
+    raw = json.dumps(value).encode(); path = home / "gateway.json"; path.write_bytes(raw)
+    with pytest.raises(gp.ServiceConfigError, match="unrecognized policy_origin"):
+        gp.ensure_app_policy(home)
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("field", ["allowed_providers", "accepted_models"])
+def test_previous_origin_does_not_expand_a_narrowed_policy(tmp_path, field):
+    home = tmp_path / "gateway"; home.mkdir()
+    value = gp.default_app_policy()
+    value["policy_origin"] = json.loads(json.dumps(gp.LEGACY_POLICY_ORIGIN_067))
+    value[field].pop()
+    raw = json.dumps(value).encode(); path = home / "gateway.json"; path.write_bytes(raw)
+    with pytest.raises(gp.ServiceConfigError, match="policy lacks"):
+        gp.ensure_app_policy(home)
+    assert path.read_bytes() == raw

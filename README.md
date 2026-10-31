@@ -31,7 +31,7 @@
 
 [CDS](https://github.com/0xZoharHuang/codex-deepseek-runtime) 让 Codex CLI 使用 DeepSeek；本仓库让官方桌面 App 使用 DeepSeek。两者可以并行使用，安装目录、配置、会话、凭据项和进程归属独立。
 
-本项目只固定复用已发布 CDS 0.6.7 的六个纯协议模块，提交为 cb788738864e97a16cde82f3c584164162ab6f7c。没有复制 CDS 启动器、线程管理、工具执行器或 agent loop，也不会通过 CDS 启动或接管桌面 App。
+当前源码验收候选固定复用 CDS 0.6.8 的六个纯协议模块，来源为公开提交 [4d99981](https://github.com/0xZoharHuang/codex-deepseek-runtime/commit/4d99981baaa493b0c4e7b1febbdb167e6c44de91)。依赖轮子由固定源码离线构建并逐文件校验，锁文件如实标记为源码构建候选，尚未声明为正式发布资产。没有复制 CDS 启动器、线程管理、工具执行器或 agent loop，也不会通过 CDS 启动或接管桌面 App。
 
 ## 当前固定组合
 
