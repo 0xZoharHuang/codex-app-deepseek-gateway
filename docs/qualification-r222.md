@@ -2,11 +2,17 @@
 
 Stable App support is NOT QUALIFIED.
 
-Actual DeepSeek App create_latex_project and source editing succeeded on official
-Windows App 26.1023.6621.0 / native 0.165.0-alpha.1.2. Both incomplete and complete
-three-file projects failed before source processing: CreateProcessAsUserW error 5
-for packaged Tectonic. open_in_codex opened the project; successful compilation
-and PDF preview have not been proved.
+The actual official App now loads the five-patch native candidate and has passed
+the LaTeX failure/repair, preview and PDF-export scope described below. Other
+local-runtime gates remain open; this is not stable App qualification.
+
+## Original failure retained
+
+Actual DeepSeek App create_latex_project and source editing initially succeeded on
+Windows App 26.1023.6621.0 / native 0.165.0-alpha.1.2. In the prior four-patch
+candidate, both incomplete and complete three-file projects failed before source
+processing: CreateProcessAsUserW error 5 for packaged Tectonic. open_in_codex
+opened the project, but compilation and PDF preview had not then been proved.
 
 An ordinary limited-user process with original App package identity ran the
 original compiler's --version. Native restricted launch failed; a byte-identical
@@ -32,9 +38,9 @@ Only argv[0] changes; arguments, cwd, environment, token, network, approval,
 transport and actual App compilation remain native. There is no second compiler
 or agent loop. Known mismatches fail; unknown executables retain native handling.
 
-The installed four-patch CLI is still
-18ef99bac7865066e1e802521e0c0c058862956cc569a6abc193b2005fa36b7f.
-This source recipe is not a deployed runtime.
+The original four-patch CLI 18ef99ba remains retained for rollback. The five-patch
+runtime is now actually loaded through the installed product's formal interfaces;
+its actual App evidence is recorded below.
 
 ## Completed targeted qualification
 
@@ -71,12 +77,12 @@ retirement ledger, retains hardlinks/timestamps and pauses at a C free-space
 floor. No Cargo may start with a partial cache. Source, credentials, App profile,
 data home and installed native images are outside the move.
 
-## Remaining real App proof
+## Required real App proof and its disposition
 
-Build/package/admit one exact four-binary producer from the five-patch source.
-Verify main and separate LaTeX preview app-server executable paths and SHA.
-In the real DeepSeek App, obtain a missing-source compile error, restore sources,
-compile the multi-file project and read back its PDF in the actual App preview.
+The required five-patch four-binary producer, formal admission, main and separate
+preview-server identity checks, actual missing-source failure/repair, compilation
+and App preview were completed as recorded below. The first cold compilation
+timeout remains part of the evidence.
 
 The worktree tool restoration defect, native IAB/computer-use/server queue gates,
 secure-desktop boundary and other [open qualification items](qualification-status.md)
@@ -87,7 +93,8 @@ are not closed by this patch or unit tests.
 The standard five-patch, four-target producer completed successfully in one Cargo
 invocation (56m08s). Its raw manifest SHA256 is
 85781c2d9951f4ed77b261addb07d3964a3b7e223a9b39d7e20951affff57a0a.
-The installed App still uses the previous runtime; this is not App qualification.
+That producer result alone was not App qualification. Formal preparation, binding,
+configuration and actual App loading were subsequently verified below.
 
 | Native output | SHA256 |
 | --- | --- |
@@ -122,3 +129,58 @@ and supported Command/McpTool lifecycle hooks plus blocked zero-effect tool use
 and actual GUI file Undo. Prior subagent, Guardian and Plan-question tests do not
 substitute for these distinct paths. Prompt/Agent hook protocol enum entries
 are not executable handlers in this pinned runtime and are not added as tests.
+
+## Actual normal App result after the formal native upgrade
+
+The installed product completed prepare-runtime, bind, configure and app-launch
+as the intended non-elevated admin desktop user. Preparation correctly rejected
+the initial SSH/elevated context and an existing dedicated App profile; neither
+guard was bypassed. The original App was closed once using its own File/Quit
+menu. Its complete recorded process family exited. The UI observer then returned
+NoSuchProcess after the effect; that observer failure is retained, not a second
+Quit attempt.
+
+The App configuration SHA256 stayed
+cbf8819cbcb2ee4b245b8840550835c5fc457365bafbb3993048a023d8ab8b7f,
+the existing gateway PID/birth stayed unchanged, and the same immutable catalog
+and enabled native App Tools were reused. Normal launch used no debug switches
+or temporary computer-use flags. The signed official App actually loaded CLI
+ebec4115b77c4710feb71d9d460d893bb6cb164c2fbee906087783d83ac685fa.
+
+DeepSeek resumed the original owned App thread and performed three native
+compile_latex_document calls:
+
+1. The first complete-project cold compile timed out. The real error was
+   compile-failed / Compilation timed out / command timed out. It was not
+   replaced by a success claim.
+2. After the model temporarily moved one included source file, the original
+   compiler returned a genuine LaTeX missing-source diagnostic for
+   sections/evidence.tex. The original file was restored byte-for-byte.
+3. The model appended a new acceptance marker to that restored source and the
+   native tool returned success. main.tex and scope.tex were unchanged; no
+   temporary hold file remained.
+
+Passive process evidence separately identified all three dedicated preview
+servers by CODEX_INTERNAL_ORIGINATOR_OVERRIDE=codex_latex_preview, their exact
+new CLI hash, and registered-Core being unset. Their native runners and actual
+Tectonic processes matched the expected runner/compiler hashes. Native logs
+recorded the pinned original-to-effective compiler path adaptation.
+
+The actual App LaTeX editor rendered the resulting three-page PDF. Its PDF text
+layer contained the new nonce, independently of the source editor and chat.
+The native Download/PDF GUI action exported a real 41,924-byte PDF. pypdf 6.21.1
+independently parsed all three pages and found the exact nonce on the last page;
+an independent PDF renderer also displayed that page. PDF SHA256:
+316569c9f80ae344f6981c7a28988da4cfe850a6a56c358e68906cd0ac17feaa.
+The controller did not compile or alter the document.
+
+The native compilation tool returns status, not a filesystem PDF path; the PDF
+is held by the App preview until exported. The model correctly declined to invent
+a path. A prompt mistakenly requested ticker_canary.py; the actual protected
+control is ticker.ps1. This preparation mistake and its real file-not-found
+result are retained separately from runtime failures. An independent readback
+confirmed README.md (888 bytes) and ticker.ps1 (1,398 bytes) stayed unchanged.
+
+This closes the narrowly defined native LaTeX warm failure/repair, App preview,
+export and independent PDF readback scope. It does not prove a timeout-free
+first cold resource load, nor close unrelated runtime gates or stable release.

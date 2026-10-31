@@ -36,7 +36,7 @@ code or sandbox setup. Bind the returned prepared manifest and SHA:
     & $cdag app-bind --native-manifest '<prepared manifest>' --native-manifest-sha256 '<prepared SHA>'
 
 Binding records the explicit selection for the active gateway release and current
-user. It does not launch the App. Binding and configuration reject an App using
+user. It does not launch the App. Runtime preparation, binding and configuration reject an App using
 this gateway's dedicated native home, Electron or browser profile; close only
 that owned instance before changing it. A disjoint stock or separate-profile App
 may continue working. Unknown identity/profile observations fail closed for

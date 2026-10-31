@@ -1,8 +1,8 @@
 # 当前机制验收状态
 
-## R222: LaTeX remains an open App gate
+## R222: native LaTeX repaired and exercised in the actual App
 
-DeepSeek created/edited a native LaTeX project, but compilation failed before source processing with CreateProcessAsUserW error 5. The pinned materialization candidate has 15 targeted Rust tests and 114 Python build/packaging checks passed. It has not been deployed or proved by actual App compilation/PDF preview. The installed CLI remains 18ef99ba. See [R222 evidence](qualification-r222.md).
+The five-patch runtime is actually loaded in the normal official App via installed prepare/bind/configure/launch. DeepSeek reached the original compiler, recovered from a retained cold timeout, obtained a genuine missing-source error, restored/updated the project and compiled successfully. Actual GUI preview and native PDF export were independently read back: three pages and exact new nonce. This closes that LaTeX scope; first-cold latency, native fork/revert, strict outputSchema, hooks and the other matrix gates remain separate. Validation: 15 native tests, 122 build/package checks, one real four-binary producer and real App evidence. See [R222 evidence](qualification-r222.md).
 
 
 本页描述固定 Windows App/runtime 组合的本地机制，不是模型能力榜单。当前尚未稳定发布；结论按机制、实际组合和证据边界区分，软件测试数量不代替 App 验收。
@@ -10,8 +10,8 @@ DeepSeek created/edited a native LaTeX project, but compilation failed before so
 ## 当前版本
 
 - App：26.1023.6621.0；原生：0.165.0-alpha.1.2 / upstream 720fec862a608ae1e5878d1eecb04fb93192e93c。
-- 当前原生 CLI：18ef99bac7865066e1e802521e0c0c058862956cc569a6abc193b2005fa36b7f。
-- 完整源码：39d578673f2031097dfa82fd97b5126a492ea4ba3a692b565ab5fcaef4dce33f；9514 文件；build lock dbb9faf2a71531369435611a2bf2c1104daeb4a4461509369d12648f67e4b90d。
+- 当前原生 CLI：ebec4115b77c4710feb71d9d460d893bb6cb164c2fbee906087783d83ac685fa。
+- 完整源码：3830ef7a9318ff1c6016ecaa6840805250c527c9a2b75b1e77b6b9c334210548；9516 文件；build lock 5bfdec0bc745a3a31e209078b1424d9f063d1eea73918eb394c8eae59f01648b。
 - 产品 source3229244 新增仅含哈希的有界调用回执。97相关检查通过；Windows普通权限下完整源码与安装版各1541唯一案例通过，均无skip/error/failure。安装版另核4623个setup/call/teardown阶段、精确JUnit身份、产品和六个纯协议模块来源。这是软件资格，实际App故障恢复仍未关闭。
 - 当前安装包 manifest ff0e750049630d60e3a2537a0434b9694b7e3602cb4888f53a5355a1788c093f；wheel dd8f31e07b2eda64ea144b414d6c5a03689a747bbcc1ff5b8d479a031bb719ec。后续公共QA/文档不改变25个产品文件；最终发行尚未生成。
 - 原始记录私有保留；公开发布须附去敏结论和可复核来源清单。
@@ -22,7 +22,7 @@ DeepSeek created/edited a native LaTeX project, but compilation failed before so
 
 | 机制 | 当前证据和限制 | 状态 |
 | --- | --- | --- |
-| 官方 App / 独立 profile / 实际 runtime 选择 | 官方包、SID/session、原生路径、创建时间和哈希绑定；18ef 实际加载。其他 App/CDS 不被接管。 | 范围通过 |
+| 官方 App / 独立 profile / 实际 runtime 选择 | 官方包、SID/session、原生路径、创建时间和哈希绑定；当前五补丁 ebec 实际加载，前版 18ef 留作回滚。其他 App/CDS 不被接管。 | 范围通过 |
 | 原生 AppTools / 插件 / MCP 发现 | 无 legacy 顶层替代定义；官方资源哈希核验，经原生 PluginManager 安装，真实发现及调用。 | C98/875 范围通过；新包按差异复核 |
 | Responses/SSE/工具历史/结构化输出/Code Mode | 软件合同、真实任务和最终D故障范围分开；25个产品文件未因被动QA或文档改变。 | 逐项结果见[本轮证据](qualification-r219.md)，不以Stop代替自然错误终态 |
 | 复杂工程任务 | 真实 App 中完成多文件 Jinja 修复；908原测试+22独立检查干净重建通过。模型有先前记忆，任务有人监督，非盲测或质量等价证明。 | 工作流范围通过 |
