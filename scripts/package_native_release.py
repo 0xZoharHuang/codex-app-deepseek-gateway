@@ -1,7 +1,7 @@
 """Assemble the raw Windows native distribution; never compile or execute it.
 
-Notice collection follows the build-time CDS collector at published d2edfa2,
-under Apache-2.0. SPDX data retain their own exact upstream commit and hashes.
+Notice collection copies the same pinned build-time pure helper region as CDS
+native_licenses.py, under Apache-2.0; packaging provenance records source hashes. SPDX data retain their own exact upstream commit and hashes.
 No CDS runtime, launcher, supervisor or tool execution module is imported.
 """
 from __future__ import annotations
@@ -221,9 +221,16 @@ def shared_graph(n_lock, j_lock, native_dir):
             "producer_sources_remain_separate": True}
 
 
-# Cargo crates may vendor C libraries below arbitrary paths (for example
-# curl/COPYING and aws-lc/third_party/fiat/LICENSE). Scan names throughout the
-# crate, retaining the legacy root and dedicated notice-directory behavior.
+# BEGIN PINNED BUILD-TIME NOTICE HELPERS
+def _redirected(path):
+    path = Path(path)
+    return path.is_symlink() or bool(
+        getattr(path.stat(follow_symlinks=False), "st_file_attributes", 0) & 0x400)
+
+
+# Cargo crates may vendor notices below arbitrary paths. Directory walks never
+# follow redirects; only notice-file aliases are resolved, inside an admitted
+# crate or the exact Cargo-pinned Git checkout that owns that crate.
 NOTICE_TOKENS = ("LICENSE", "NOTICE", "COPYING", "COPYRIGHT")
 NESTED_NOTICE_NAME = re.compile(r"^(?:licen[cs]e|notice|copying|copyright)(?:[._-].*)?$", re.IGNORECASE)
 NOTICE_FOLDERS = (("licenses",), ("LICENSES",), ("third_party", "licenses"), ("third-party", "licenses"))
@@ -231,16 +238,158 @@ MAX_NOTICE_SCAN_ENTRIES = 100_000
 MAX_NOTICE_SCAN_DEPTH = 32
 MAX_CRATE_NOTICE_FILES = 4_096
 MAX_CRATE_NOTICE_BYTES = 64 * 1024 * 1024
+MAX_NOTICE_ALIAS_HOPS = 16
 
 
-def notice_candidates(source):
-    """Bounded, no-follow source walk; never silently truncate vendored notices."""
-    source = Path(source).absolute()
-    require(source.is_dir(), "Crate source directory is missing")
-    require(not any(redirected(p) for p in (source, *source.parents)), "Crate source path is redirected")
-    pending = [source]
-    candidates = set()
-    visited = 0
+def _git(root, *arguments, executable="git"):
+    try:
+        result = subprocess.run([executable, "-C", str(root), *arguments],
+                                check=True, capture_output=True)
+    except subprocess.CalledProcessError as error:
+        raise ValueError("Git notice identity command failed at " + str(root) + ": " + " ".join(arguments)) from error
+    return result.stdout
+
+
+def _plain_parents(path):
+    require(not any(_redirected(p) for p in Path(path).parents),
+            "Crate notice parent is redirected: " + str(path))
+
+
+def _notice_name(path, source):
+    relative = path.relative_to(source)
+    return (len(relative.parts) == 1 and any(token in path.name.upper() for token in NOTICE_TOKENS)
+            or any(relative.parts[:len(prefix)] == prefix for prefix in NOTICE_FOLDERS)
+            or bool(NESTED_NOTICE_NAME.fullmatch(path.name)))
+
+
+def source_context(package, *, git="git"):
+    """Cargo Git identity admits a shared root; arbitrary parent directories do not."""
+    source = Path(os.path.abspath(package["manifest_path"])).parent
+    require(source.is_dir(), "Crate source directory is missing: " + str(source))
+    require(not any(_redirected(p) for p in (source, *source.parents)),
+            "Crate source path is redirected: " + str(source))
+    context = {"source": source, "root": source, "kind": "crate", "tree": {}, "index": {}, "git_executable": git}
+    if package.get("license_file"):
+        declared_path = Path(package["license_file"])
+        context["declared_notice"] = Path(os.path.abspath(declared_path if declared_path.is_absolute() else source / declared_path))
+    declared = package.get("source", "")
+    if not declared.startswith("git+"):
+        return context
+    match = re.fullmatch(r"git\+[^#\x00\r\n]+#([0-9a-f]{40})", declared)
+    require(match is not None, "Cargo Git source needs an exact full revision: " + declared)
+    revision = match[1]
+    query_revision = re.search(r"[?&]rev=([0-9a-f]{40})(?:[&#]|$)", declared)
+    require(query_revision is None or query_revision[1] == revision,
+            "Cargo Git source revision query differs from its locked commit: " + declared)
+    root = Path(os.path.abspath(_git(source, "rev-parse", "--show-toplevel", executable=git).decode().strip()))
+    require(source.is_relative_to(root), "Crate is outside its Git checkout: " + str(source))
+    require(not any(_redirected(p) for p in (root, *root.parents)),
+            "Git source root is redirected: " + str(root))
+    require(_git(root, "rev-parse", "HEAD", executable=git).decode().strip() == revision,
+            "Git checkout HEAD differs from Cargo source revision: " + str(source))
+    tree_raw = _git(root, "ls-tree", "-r", "-z", revision, executable=git)
+    index_raw = _git(root, "ls-files", "--stage", "-z", executable=git)
+    require(len(tree_raw) <= 16 * 1024 * 1024 and len(index_raw) <= 16 * 1024 * 1024,
+            "Git notice inventory exceeds bounded bytes")
+    tree, index = {}, {}
+    for raw, destination, is_index in [(tree_raw, tree, False), (index_raw, index, True)]:
+        entries = raw.rstrip(b"\0").split(b"\0") if raw else []
+        require(len(entries) <= MAX_NOTICE_SCAN_ENTRIES, "Git notice inventory exceeds bounded entries")
+        for entry in entries:
+            prefix, filename = entry.split(b"\t", 1)
+            fields = prefix.split()
+            name = filename.decode("utf-8")
+            require("\\" not in name and not Path(name).is_absolute()
+                    and ".." not in Path(name).parts, "Unsafe Git notice path: " + name)
+            if is_index:
+                require(fields[2] == b"0", "Git notice index contains unresolved stages: " + name)
+                value = (fields[0].decode(), fields[1].decode())
+            else:
+                value = (fields[0].decode(), fields[2].decode())
+            require(name not in destination, "Duplicate Git notice path: " + name)
+            destination[name] = value
+    folded = {}
+    for name in tree:
+        folded.setdefault(name.casefold(), []).append(name)
+    context.update(root=root, kind="pinned_git_checkout", revision=revision,
+                   declared=declared, tree=tree, index=index, folded=folded)
+    return context
+
+
+def _git_entry(context, path):
+    relative = path.relative_to(context["root"]).as_posix()
+    if os.name == "nt":
+        matches = context["folded"].get(relative.casefold(), [])
+        require(len(matches) == 1, "Missing or ambiguous Windows Git notice path: " + relative)
+        relative = matches[0]
+    require(relative in context["tree"], "Notice is not tracked at the Cargo revision: " + relative)
+    value = context["tree"][relative]
+    require(context["index"].get(relative) == value,
+            "Git notice index differs from the Cargo revision: " + relative)
+    return relative, value
+
+
+def _resolve_notice(path, source, context):
+    path = Path(os.path.abspath(path))
+    shared_declaration = (context["kind"] == "pinned_git_checkout"
+                          and path == context.get("declared_notice")
+                          and path.is_relative_to(context["root"]))
+    require(path.is_relative_to(source) or shared_declaration,
+            "Crate notice escapes its source: " + str(path))
+    root, seen, chain = context["root"], set(), []
+    current = path
+    for _ in range(MAX_NOTICE_ALIAS_HOPS + 1):
+        require(current.is_relative_to(root), "Crate notice alias escapes its source scope: " + str(current))
+        if context.get("allowed_roots"):
+            require(any(current.is_relative_to(admitted) for admitted in context["allowed_roots"]),
+                    "Crate notice escapes declared source/cache: " + str(current))
+        require(current not in seen, "Crate notice alias cycle: " + str(current))
+        seen.add(current); _plain_parents(current)
+        relative = current.relative_to(root).as_posix()
+        git_name, entry = _git_entry(context, current) if context["kind"] == "pinned_git_checkout" else (relative, None)
+        actual_link = current.is_symlink()
+        git_link = entry is not None and entry[0] == "120000"
+        info = current.lstat()
+        require(not _redirected(current) or actual_link,
+                "Crate notice contains a redirected non-symlink entry: " + str(current))
+        if not actual_link and not git_link:
+            require(stat.S_ISREG(info.st_mode), "Crate notice is not a regular file: " + str(current))
+            if entry is not None:
+                require(entry[0] in {"100644", "100755"}, "Invalid Git notice file mode: " + git_name)
+            return current, chain, (git_name, entry)
+        require(len(chain) < MAX_NOTICE_ALIAS_HOPS, "Crate notice alias chain exceeds bounded hops")
+        if git_link:
+            target_bytes = _git(root, "cat-file", "blob", entry[1], executable=context["git_executable"])
+            require(len(target_bytes) <= 4096, "Git notice alias target exceeds bounded bytes")
+            target = target_bytes.decode("utf-8")
+            if actual_link:
+                require(current.readlink() == Path(target),
+                        "Git notice symlink differs from the pinned target: " + str(current))
+            else:
+                require(stat.S_ISREG(info.st_mode) and current.read_bytes() == target_bytes,
+                        "Materialized Git notice alias differs from its pinned blob: " + str(current))
+        else:
+            require(context["kind"] == "crate", "Untracked Git notice alias: " + str(current))
+            target = str(current.readlink())
+        target_path = Path(target)
+        require(target and not target_path.is_absolute() and not target_path.drive
+                and not any(ch in target for ch in "\0\r\n"),
+                "Crate notice alias target must be a relative file path: " + str(current))
+        chain.append({"source": git_name, "target": target,
+                      "representation": "symlink" if actual_link else "git_materialized",
+                      **({"git_mode": "120000", "git_blob": entry[1]} if git_link else {})})
+        current = Path(os.path.abspath(current.parent / target_path))
+    raise ValueError("Crate notice alias chain exceeds bounded hops")
+
+
+def notice_candidates(source, context=None):
+    """No-follow walk; validate aliases before admitting their logical notice path."""
+    source = Path(os.path.abspath(source))
+    context = context or {"source": source, "root": source, "kind": "crate", "tree": {}, "index": {}}
+    require(source.is_dir(), "Crate source directory is missing: " + str(source))
+    require(not any(_redirected(p) for p in (source, *source.parents)),
+            "Crate source path is redirected: " + str(source))
+    pending, candidates, visited = [source], set(), 0
     while pending:
         folder = pending.pop()
         require(len(folder.relative_to(source).parts) <= MAX_NOTICE_SCAN_DEPTH,
@@ -250,27 +399,75 @@ def notice_candidates(source):
                 visited += 1
                 require(visited <= MAX_NOTICE_SCAN_ENTRIES, "Crate notice scan exceeds the bounded entry count")
                 path = Path(entry.path)
-                require(not redirected(path, entry.stat(follow_symlinks=False)),
-                        "Crate notice scan contains a redirected entry")
-                # scandir supplies direct children of an already admitted directory.
-                # Reject reparses before descent; lexical containment then avoids a
-                # separate filesystem resolution of every vendored source file.
-                require(path.is_relative_to(source), "Crate notice scan escapes its source")
-                if entry.is_dir(follow_symlinks=False):
-                    pending.append(path)
-                    continue
-                require(entry.is_file(follow_symlinks=False), "Crate notice scan contains a non-regular entry")
-                relative = path.relative_to(source)
-                root_notice = len(relative.parts) == 1 and any(token in path.name.upper() for token in NOTICE_TOKENS)
-                dedicated_notice = any(relative.parts[:len(prefix)] == prefix for prefix in NOTICE_FOLDERS)
-                if root_notice or dedicated_notice or NESTED_NOTICE_NAME.fullmatch(path.name):
+                require(path.is_relative_to(source), "Crate notice scan escapes its source: " + str(path))
+                logical_notice = _notice_name(path, source) or path == context.get("declared_notice")
+                git_alias = False
+                if context["kind"] == "pinned_git_checkout":
+                    relative = path.relative_to(context["root"]).as_posix()
+                    matches = context["folded"].get(relative.casefold(), []) if os.name == "nt" else [relative]
+                    git_alias = any(context["tree"].get(name, ("", ""))[0] == "120000" for name in matches)
+                if entry.is_symlink() or _redirected(path) or git_alias:
+                    require(logical_notice, "Crate notice scan contains a redirected entry: " + str(path))
+                    _resolve_notice(path, source, context)
                     candidates.add(path)
-                    require(len(candidates) <= MAX_CRATE_NOTICE_FILES,
-                            "Crate notice count exceeds the bounded file count")
+                elif entry.is_dir(follow_symlinks=False):
+                    pending.append(path)
+                else:
+                    require(entry.is_file(follow_symlinks=False),
+                            "Crate notice scan contains a non-regular entry: " + str(path))
+                    if logical_notice:
+                        candidates.add(path)
+                require(len(candidates) <= MAX_CRATE_NOTICE_FILES,
+                        "Crate notice count exceeds the bounded file count")
     return candidates
 
 
-def collect_licenses(metadata, output, allowed_roots, *, repo=REPO):
+def _regular_notice_bytes(path, scope):
+    require(not any(_redirected(p) for p in (path, *path.parents)),
+            "Crate notice path is redirected: " + str(path))
+    require(path.is_relative_to(scope), "Crate notice escapes its source: " + str(path))
+    before = path.stat()
+    require(stat.S_ISREG(before.st_mode), "Crate notice is not a regular file: " + str(path))
+    require(before.st_size <= 16 * 1024 * 1024, "Crate notice exceeds the bounded file size")
+    with path.open("rb") as stream:
+        content = stream.read(16 * 1024 * 1024 + 1)
+        opened = os.fstat(stream.fileno())
+    after = path.stat()
+    fields = lambda st: (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_nlink)
+    require(fields(before) == fields(opened) == fields(after) and len(content) == before.st_size,
+            "Crate notice changed during copy: " + str(path))
+    require(content[:2] != b"MZ" and content[:4] not in (b"\x7fELF", b"PK\x03\x04"),
+            "Compiled/container bytes are not a native source notice")
+    return content
+
+
+def notice_content(path, source, context=None):
+    source = Path(os.path.abspath(source))
+    context = context or {"source": source, "root": source, "kind": "crate", "tree": {}, "index": {}}
+    resolved, chain, git_entry = _resolve_notice(path, source, context)
+    content = _regular_notice_bytes(resolved, context["root"])
+    if context["kind"] == "pinned_git_checkout":
+        require(content == _git(context["root"], "cat-file", "blob", git_entry[1][1], executable=context["git_executable"]),
+                "Git notice content differs from the Cargo revision: " + str(resolved))
+    require((resolved, chain, git_entry) == _resolve_notice(path, source, context),
+            "Crate notice alias changed during copy: " + str(path))
+    provenance = None
+    shared_declaration = not Path(os.path.abspath(path)).is_relative_to(source)
+    if chain or shared_declaration:
+        provenance = {"kind": context["kind"], "resolved_source_file": git_entry[0],
+                      "alias_chain": chain}
+        if shared_declaration:
+            provenance["declaration"] = "Cargo license_file"
+        if context["kind"] == "pinned_git_checkout":
+            provenance.update(git_source=context["declared"], git_revision=context["revision"])
+    return content, provenance
+
+
+def _notice_bytes(path, source, context=None):
+    return notice_content(path, source, context)[0]
+# END PINNED BUILD-TIME NOTICE HELPERS
+
+def collect_licenses(metadata, output, allowed_roots, *, repo=REPO, git="git"):
     """Retain original bytes and attribution; reject missing/unknown declarations."""
     output = Path(output); output.mkdir(parents=True, exist_ok=False)
     roots = [Path(p).resolve() for p in allowed_roots]
@@ -289,6 +486,8 @@ def collect_licenses(metadata, output, allowed_roots, *, repo=REPO):
         if not package.get("source"):
             continue
         manifest = admitted(package["manifest_path"]); source = manifest.parent
+        context = source_context(package, git=git)
+        context["allowed_roots"] = roots
         expression = package.get("license")
         require(isinstance(expression, str) and expression, "External crate has no declared license")
         symbols = set(re.findall(r"[A-Za-z0-9.+-]+", expression)) - {"AND", "OR", "WITH"}
@@ -298,7 +497,10 @@ def collect_licenses(metadata, output, allowed_roots, *, repo=REPO):
         target = output / "crates" / key
         require(not output.resolve().is_relative_to(source.resolve()),
                 "License output cannot be inside crate source")
-        candidates = notice_candidates(source)
+        try:
+            candidates = notice_candidates(source, context)
+        except ValueError as error:
+            raise ValueError(f"Crate {package['name']}@{package['version']} root={source}: {error}") from error
         if package.get("license_file"):
             p = Path(package["license_file"])
             candidates.add(p if p.is_absolute() else source / p)
@@ -310,19 +512,24 @@ def collect_licenses(metadata, output, allowed_roots, *, repo=REPO):
         notices = []
         notice_bytes = 0
         for index, path in enumerate(sorted(candidates)):
-            path = admitted(path)
-            notice_bytes += path.stat().st_size
+            try:
+                content, resolution = notice_content(path, source, context)
+            except ValueError as error:
+                raise ValueError(f"Crate {package['name']}@{package['version']} notice={path}: {error}") from error
+            notice_bytes += len(content)
             require(notice_bytes <= MAX_CRATE_NOTICE_BYTES,
                     "Crate notices exceed the bounded aggregate size")
-            # Source notice files may have arbitrary extensions; identify unwanted
-            # binary container magic instead of assuming every executable suffix is proprietary.
-            with path.open("rb") as f:
-                magic = f.read(4)
-            require(magic[:2] != b"MZ" and magic not in (b"\x7fELF", b"PK\x03\x04"),
-                    "Compiled/container bytes are not a native source notice")
             name = str(index) + "-" + path.name
-            dest = target / name; record = copy_bytes(path, dest)
-            notices.append({"file": dest.relative_to(output).as_posix(), **record})
+            dest = target / name; dest.parent.mkdir(parents=True, exist_ok=True)
+            with dest.open("xb") as stream:
+                stream.write(content)
+            digest = hashlib.sha256(content).hexdigest()
+            require(dest.stat().st_nlink == 1 and sha(dest) == digest,
+                    "Independent notice copy verification failed")
+            notices.append({"file": dest.relative_to(output).as_posix(),
+                            "source_file": Path(os.path.relpath(path, source)).as_posix(),
+                            "sha256": digest, "size": len(content),
+                            **({"source_resolution": resolution} if resolution else {})})
         require(notices or expression, "Crate has neither notice nor declaration")
         item = {"name": package["name"], "version": package["version"], "source": package["source"],
                 "repository": package.get("repository"), "authors": package.get("authors", []),
@@ -521,7 +728,7 @@ def main():
     copy_bytes(REPO / "NOTICE", output / "NOTICE")
     for name in ("LICENSE", "NOTICE"):
         copy_bytes(source / name, output / "licenses" / ("codex-" + name))
-    licenses = collect_licenses(metadata, output / "licenses/rust", [args.cargo_home, source])
+    licenses = collect_licenses(metadata, output / "licenses/rust", [args.cargo_home, source], git=args.git)
     write(output / "provenance/dependency-graph.json", graph)
     copy_bytes(lock, output / "provenance/Cargo.lock", graph["Cargo_lock_sha256"])
     if single:
