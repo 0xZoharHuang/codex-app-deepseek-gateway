@@ -1,0 +1,704 @@
+--- a/codex-rs/state/src/migrations.rs
++++ b/codex-rs/state/src/migrations.rs
+@@ -12,21 +12,188 @@
+ pub(crate) static THREAD_HISTORY_MIGRATOR: Migrator =
+     sqlx_macros::migrate!("./thread_history_migrations");
+ 
++use std::collections::HashMap;
++
++use sqlx::AssertSqlSafe;
++use sqlx::SqlSafeStr;
++use sqlx::migrate::Migrate;
++use sqlx::migrate::MigrateError;
++use sqlx::migrate::Migration;
++
++fn migration_form(migration: &Migration, crlf: bool) -> Migration {
++    let lf = migration.sql.as_str().replace("\r\n", "\n");
++    let sql = if crlf { lf.replace('\n', "\r\n") } else { lf };
++    // This is exclusively an EOL representation of the trusted embedded SQL.
++    Migration::new(
++        migration.version,
++        migration.description.clone(),
++        migration.migration_type,
++        AssertSqlSafe(sql).into_sql_str(),
++        migration.no_tx,
++    )
++}
++
++fn copy_migrator(base: &Migrator) -> Migrator {
++    Migrator {
++        migrations: Cow::Owned(base.migrations.to_vec()),
++        ignore_missing: base.ignore_missing,
++        locking: base.locking,
++        no_tx: base.no_tx,
++        table_name: base.table_name.clone(),
++        create_schemas: base.create_schemas.clone(),
++    }
++}
++
++/// Match only exact LF/CRLF forms of the same version's embedded SQL.
++/// Select RAM SQL and checksum together; never rewrite an existing ledger value.
++pub(crate) async fn runtime_migrator_for_database(
++    pool: &SqlitePool,
++    base: &Migrator,
++    allow_legacy_recency: bool,
++    prefer_lf_for_empty: bool,
++) -> Result<Migrator, MigrateError> {
++    let mut result = copy_migrator(base);
++    for migration in base.iter() {
++        let lf = migration_form(migration, false);
++        let crlf = migration_form(migration, true);
++        if migration.checksum != lf.checksum && migration.checksum != crlf.checksum {
++            return Err(MigrateError::VersionMismatch(migration.version));
++        }
++    }
++    let exists = sqlx::query_scalar::<_, i64>(
++        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
++    )
++    .bind(base.table_name.as_ref())
++    .fetch_optional(pool)
++    .await?
++    .is_some();
++    let applied = if exists {
++        let mut connection = pool.acquire().await?;
++        if let Some(version) = connection.dirty_version(&base.table_name).await? {
++            return Err(MigrateError::Dirty(version));
++        }
++        connection.list_applied_migrations(&base.table_name).await?
++    } else {
++        Vec::new()
++    };
++    let recorded: HashMap<_, _> = applied
++        .iter()
++        .map(|migration| (migration.version, migration.checksum.as_ref()))
++        .collect();
++    let recency = base.iter().find(|migration| migration.version == 39);
++    let legacy_recency = if allow_legacy_recency && !recorded.contains_key(&39) {
++        recency.and_then(|migration| {
++            let checksum = *recorded.get(&38)?;
++            let lf = migration_form(migration, false);
++            let crlf = migration_form(migration, true);
++            (checksum == lf.checksum.as_ref() || checksum == crlf.checksum.as_ref())
++                .then_some(checksum)
++        })
++    } else {
++        None
++    };
++    let mut has_lf = false;
++    let mut has_crlf = false;
++    for applied in &applied {
++        let Some(migration) = base.iter().find(|migration| {
++            migration.version == applied.version && !migration.migration_type.is_down_migration()
++        }) else {
++            continue; // Leave unknown versions to SQLx's original ignore_missing policy.
++        };
++        let expected = if applied.version == 38 && legacy_recency.is_some() {
++            recency.expect("recognized legacy recency migration")
++        } else {
++            migration
++        };
++        let lf = migration_form(expected, false);
++        let crlf = migration_form(expected, true);
++        if applied.checksum != lf.checksum && applied.checksum != crlf.checksum {
++            return Err(MigrateError::VersionMismatch(applied.version));
++        }
++        if lf.checksum != crlf.checksum {
++            has_lf |= applied.checksum == lf.checksum;
++            has_crlf |= applied.checksum == crlf.checksum;
++        }
++    }
++    let pending_lf = has_lf && !has_crlf || !has_lf && !has_crlf && prefer_lf_for_empty;
++    for migration in result.migrations.to_mut() {
++        if migration.migration_type.is_down_migration() {
++            continue;
++        }
++        let checksum = if migration.version == 39 && legacy_recency.is_some() {
++            legacy_recency
++        } else if migration.version == 38 && legacy_recency.is_some() {
++            None // The existing repair moves the known old 38 row to 39 before run.
++        } else {
++            recorded.get(&migration.version).copied()
++        };
++        *migration = if let Some(checksum) = checksum {
++            let lf = migration_form(migration, false);
++            if checksum == lf.checksum.as_ref() {
++                lf
++            } else {
++                migration_form(migration, true)
++            }
++        } else if pending_lf {
++            migration_form(migration, false)
++        } else {
++            migration.clone()
++        };
++    }
++    Ok(result)
++}
++
++/// Existing stores determine their own representation without consulting primary state.
++pub(crate) async fn migration_ledger_is_empty(
++    pool: &SqlitePool,
++    base: &Migrator,
++) -> Result<bool, MigrateError> {
++    let exists = sqlx::query_scalar::<_, i64>(
++        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
++    )
++    .bind(base.table_name.as_ref())
++    .fetch_optional(pool)
++    .await?
++    .is_some();
++    if !exists {
++        return Ok(true);
++    }
++    let mut connection = pool.acquire().await?;
++    Ok(connection
++        .list_applied_migrations(&base.table_name)
++        .await?
++        .is_empty())
++}
++
++/// Missing lazy stores inherit an already established LF primary profile.
++pub(crate) async fn profile_uses_legacy_lf(pool: &SqlitePool) -> Result<bool, MigrateError> {
++    let base = runtime_state_migrator();
++    let compatible = runtime_migrator_for_database(pool, &base, true, false).await?;
++    Ok(compatible
++        .iter()
++        .all(|migration| migration.checksum == migration_form(migration, false).checksum))
++}
++
+ /// Allow an older Codex binary to open a database that has already been
+ /// migrated by a newer binary running in parallel.
+ ///
+ /// We intentionally ignore applied migration versions that are newer than the
+ /// embedded migration set. Known migration versions are still validated by
+ /// checksum, so this only relaxes the "database is ahead of me" case.
+-fn runtime_migrator(base: &'static Migrator) -> Migrator {
+-    Migrator {
+-        migrations: Cow::Borrowed(base.migrations.as_ref()),
+-        ignore_missing: true,
+-        locking: base.locking,
+-        no_tx: base.no_tx,
+-        table_name: base.table_name.clone(),
+-        create_schemas: base.create_schemas.clone(),
+-    }
++fn runtime_migrator(base: &Migrator) -> Migrator {
++    let mut result = copy_migrator(base);
++    result.ignore_missing = true;
++    if cfg!(windows) {
++        for migration in result.migrations.to_mut() {
++            let canonical = migration_form(migration, true);
++            if migration.checksum == canonical.checksum
++                || migration.checksum == migration_form(migration, false).checksum
++            {
++                *migration = canonical;
++            }
++        }
++    }
++    result
+ }
+ 
+ pub(crate) fn runtime_state_migrator() -> Migrator {
+--- a/codex-rs/state/src/sqlite.rs
++++ b/codex-rs/state/src/sqlite.rs
+@@ -9,7 +9,10 @@
+ )]
+ 
+ use crate::DbTelemetry;
++use crate::migrations::migration_ledger_is_empty;
++use crate::migrations::profile_uses_legacy_lf;
+ use crate::migrations::repair_legacy_recency_migration_version;
++use crate::migrations::runtime_migrator_for_database;
+ use crate::runtime::recovery::RuntimeDbInitError;
+ use crate::telemetry;
+ use crate::telemetry::DbKind;
+@@ -378,8 +381,27 @@
+         })?;
+         let started = Instant::now();
+         let migrate_result = async {
++            let primary_path = self.state_db_path();
++            let prefer_lf = if !matches!(spec.kind, DbKind::State)
++                && migration_ledger_is_empty(&pool, migrator).await?
++                && tokio::fs::try_exists(&primary_path).await?
++            {
++                let primary = self.open_read_only_pool(&primary_path, None).await?;
++                let preference = profile_uses_legacy_lf(&primary).await;
++                primary.close().await;
++                preference?
++            } else {
++                false
++            };
++            let migrator = runtime_migrator_for_database(
++                &pool,
++                migrator,
++                matches!(spec.kind, DbKind::State),
++                prefer_lf,
++            )
++            .await?;
+             if matches!(spec.kind, DbKind::State) {
+-                repair_legacy_recency_migration_version(&pool, migrator).await?;
++                repair_legacy_recency_migration_version(&pool, &migrator).await?;
+             }
+             migrator.run(&pool).await.map_err(anyhow::Error::from)
+         }
+--- a/codex-rs/state/src/migrations_tests.rs
++++ b/codex-rs/state/src/migrations_tests.rs
+@@ -1106,3 +1106,459 @@
+         );
+     }
+ }
++
++fn eol_migrator(base: &Migrator, crlf: bool) -> Migrator {
++    let mut result = super::copy_migrator(base);
++    result.migrations = Cow::Owned(
++        base.iter()
++            .map(|migration| super::migration_form(migration, crlf))
++            .collect(),
++    );
++    result
++}
++
++async fn eol_pool() -> sqlx_sqlite::SqlitePool {
++    sqlx_sqlite::SqlitePoolOptions::new()
++        .max_connections(1)
++        .connect("sqlite::memory:")
++        .await
++        .expect("isolated SQLx SQLite fixture")
++}
++
++async fn eol_ledger(
++    pool: &sqlx_sqlite::SqlitePool,
++) -> Vec<(i64, String, String, i64, Vec<u8>, i64)> {
++    sqlx::query_as(
++        "SELECT version,description,installed_on,success,checksum,execution_time FROM _sqlx_migrations ORDER BY version",
++    )
++    .fetch_all(pool)
++    .await
++    .expect("ledger snapshot")
++}
++
++fn eol_domains() -> [(&'static str, &'static Migrator); 6] {
++    [
++        ("state", &super::STATE_MIGRATOR),
++        ("logs", &super::LOGS_MIGRATOR),
++        ("goals", &super::GOALS_MIGRATOR),
++        ("memory", &super::MEMORIES_MIGRATOR),
++        ("queue", &super::QUEUE_MIGRATOR),
++        ("history", &super::THREAD_HISTORY_MIGRATOR),
++    ]
++}
++
++#[tokio::test]
++async fn eol_fresh_windows_six_stores_match_stock_representation() {
++    for (name, base) in eol_domains() {
++        let pool = eol_pool().await;
++        let canonical = super::runtime_migrator(base);
++        let selected =
++            super::runtime_migrator_for_database(&pool, &canonical, name == "state", false)
++                .await
++                .expect("fresh compatibility");
++        selected.run(&pool).await.expect("fresh migration");
++        let expected = eol_migrator(base, cfg!(windows));
++        let before = eol_ledger(&pool).await;
++        expected
++            .run(&pool)
++            .await
++            .expect("strict matching official representation");
++        assert_eq!(eol_ledger(&pool).await, before);
++        for (version, _, _, _, checksum, _) in before {
++            let migration = expected
++                .iter()
++                .find(|migration| migration.version == version)
++                .unwrap();
++            assert_eq!(
++                checksum,
++                migration.checksum.as_ref(),
++                "{name} version {version}"
++            );
++        }
++        pool.close().await;
++    }
++}
++
++#[tokio::test]
++async fn eol_existing_lf_six_stores_keep_ledger_userdata_and_old_reader() {
++    for (name, base) in eol_domains() {
++        let pool = eol_pool().await;
++        let legacy = eol_migrator(base, false);
++        legacy.run(&pool).await.expect("old P6 LF fixture");
++        sqlx::query("CREATE TABLE eol_user_sentinel (value TEXT, bytes BLOB)")
++            .execute(&pool)
++            .await
++            .unwrap();
++        sqlx::query("INSERT INTO eol_user_sentinel VALUES (?,?)")
++            .bind("original\r\nuser\ntext")
++            .bind(vec![0_u8, 1, 255])
++            .execute(&pool)
++            .await
++            .unwrap();
++        let before = eol_ledger(&pool).await;
++        let canonical = super::runtime_migrator(base);
++        let selected =
++            super::runtime_migrator_for_database(&pool, &canonical, name == "state", false)
++                .await
++                .expect("known LF representation");
++        selected
++            .run(&pool)
++            .await
++            .expect("read LF without rewriting");
++        legacy
++            .run(&pool)
++            .await
++            .expect("old P6 strict reader after upgrade");
++        assert_eq!(eol_ledger(&pool).await, before, "{name}");
++        let user: (String, Vec<u8>) = sqlx::query_as("SELECT value,bytes FROM eol_user_sentinel")
++            .fetch_one(&pool)
++            .await
++            .unwrap();
++        assert_eq!(user, ("original\r\nuser\ntext".to_owned(), vec![0, 1, 255]));
++        pool.close().await;
++    }
++}
++
++#[tokio::test]
++async fn eol_old_lf_prefix_pending_stays_lf_for_old_reader() {
++    for (name, base) in eol_domains() {
++        let pool = eol_pool().await;
++        let legacy = eol_migrator(base, false);
++        let mut prefix = eol_migrator(base, false);
++        let count = prefix.migrations.len().max(2) / 2;
++        prefix.migrations.to_mut().truncate(count);
++        prefix.run(&pool).await.unwrap();
++        let before = eol_ledger(&pool).await;
++        let canonical = super::runtime_migrator(base);
++        let selected =
++            super::runtime_migrator_for_database(&pool, &canonical, name == "state", false)
++                .await
++                .unwrap();
++        selected.run(&pool).await.unwrap();
++        let created = eol_ledger(&pool).await;
++        assert_eq!(created.len(), legacy.migrations.len(), "{name}");
++        assert_eq!(&created[..before.len()], &before, "{name}");
++        for row in &created {
++            let expected = legacy
++                .iter()
++                .find(|migration| migration.version == row.0)
++                .unwrap();
++            assert_eq!(row.4, expected.checksum.as_ref(), "{name}");
++        }
++        legacy
++            .run(&pool)
++            .await
++            .expect("LF pending bookkeeping remains old-P6 compatible");
++        assert_eq!(
++            eol_ledger(&pool).await,
++            created,
++            "{name}: old reader must not add or rewrite rows"
++        );
++        pool.close().await;
++    }
++}
++
++#[tokio::test]
++async fn eol_unknown_hash_dirty_and_changed_sql_are_strict() {
++    use sqlx::SqlSafeStr;
++    for dirty in [false, true] {
++        let pool = eol_pool().await;
++        let legacy = eol_migrator(&super::QUEUE_MIGRATOR, false);
++        legacy.run(&pool).await.unwrap();
++        if dirty {
++            sqlx::query("UPDATE _sqlx_migrations SET success=0 WHERE version=1")
++                .execute(&pool)
++                .await
++                .unwrap();
++        } else {
++            sqlx::query("UPDATE _sqlx_migrations SET checksum=zeroblob(48) WHERE version=1")
++                .execute(&pool)
++                .await
++                .unwrap();
++        }
++        let before = eol_ledger(&pool).await;
++        let canonical = super::runtime_migrator(&super::QUEUE_MIGRATOR);
++        let error = super::runtime_migrator_for_database(&pool, &canonical, false, false)
++            .await
++            .unwrap_err();
++        assert!(matches!(error, sqlx::migrate::MigrateError::Dirty(1)) == dirty);
++        assert!(matches!(error, sqlx::migrate::MigrateError::VersionMismatch(1)) != dirty);
++        assert_eq!(eol_ledger(&pool).await, before);
++        pool.close().await;
++    }
++    let pool = eol_pool().await;
++    eol_migrator(&super::QUEUE_MIGRATOR, false)
++        .run(&pool)
++        .await
++        .unwrap();
++    let changed = Migrator::with_migrations(vec![Migration::new(
++        1,
++        "changed SQL".into(),
++        sqlx::migrate::MigrationType::Simple,
++        "CREATE TABLE content_changed(value TEXT);".into_sql_str(),
++        false,
++    )]);
++    let error = super::runtime_migrator_for_database(&pool, &changed, false, false)
++        .await
++        .unwrap_err();
++    assert!(matches!(
++        error,
++        sqlx::migrate::MigrateError::VersionMismatch(1)
++    ));
++    pool.close().await;
++}
++
++#[tokio::test]
++async fn eol_legacy_38_to_39_repair_accepts_both_precise_forms() {
++    for crlf in [false, true] {
++        let pool = eol_pool().await;
++        let full = eol_migrator(&super::STATE_MIGRATOR, crlf);
++        let mut old = super::copy_migrator(&full);
++        old.migrations = Cow::Owned(
++            full.iter()
++                .filter(|migration| migration.version <= 37)
++                .cloned()
++                .collect(),
++        );
++        let mut recency = full
++            .iter()
++            .find(|migration| migration.version == 39)
++            .unwrap()
++            .clone();
++        recency.version = 38;
++        old.migrations.to_mut().push(recency);
++        old.run(&pool).await.unwrap();
++        let canonical = super::runtime_state_migrator();
++        let selected = super::runtime_migrator_for_database(&pool, &canonical, true, false)
++            .await
++            .unwrap();
++        repair_legacy_recency_migration_version(&pool, &selected)
++            .await
++            .unwrap();
++        selected.run(&pool).await.unwrap();
++        full.run(&pool)
++            .await
++            .expect("same-format old reader after legacy metadata repair");
++        assert_eq!(eol_ledger(&pool).await.len(), full.migrations.len());
++        pool.close().await;
++    }
++}
++
++#[tokio::test]
++async fn eol_sql_and_checksum_choose_same_literal_representation_and_rollback() {
++    use sqlx::SqlSafeStr;
++    let literal = Migrator::with_migrations(vec![Migration::new(
++        1, "multiline".into(), sqlx::migrate::MigrationType::Simple,
++        "CREATE TABLE eol_literal(value TEXT DEFAULT 'left\nright');\nINSERT INTO eol_literal DEFAULT VALUES;".into_sql_str(),
++        false,
++    )]);
++    let pool = eol_pool().await;
++    let canonical = super::runtime_migrator(&literal);
++    let selected = super::runtime_migrator_for_database(&pool, &canonical, false, false)
++        .await
++        .unwrap();
++    selected.run(&pool).await.unwrap();
++    let value: String = sqlx::query_scalar("SELECT value FROM eol_literal")
++        .fetch_one(&pool)
++        .await
++        .unwrap();
++    assert_eq!(
++        value,
++        if cfg!(windows) {
++            "left\r\nright"
++        } else {
++            "left\nright"
++        }
++    );
++    assert_eq!(
++        eol_ledger(&pool).await[0].4,
++        selected.iter().next().unwrap().checksum.as_ref()
++    );
++    pool.close().await;
++
++    let pending = Migrator::with_migrations(vec![
++        Migration::new(
++            1,
++            "first".into(),
++            sqlx::migrate::MigrationType::Simple,
++            "CREATE TABLE eol_literal(value TEXT);\n".into_sql_str(),
++            false,
++        ),
++        Migration::new(
++            2,
++            "literal pending".into(),
++            sqlx::migrate::MigrationType::Simple,
++            "INSERT INTO eol_literal VALUES ('left\nright');\n".into_sql_str(),
++            false,
++        ),
++    ]);
++    let pool = eol_pool().await;
++    let mut first = eol_migrator(&pending, false);
++    first.migrations.to_mut().truncate(1);
++    first.run(&pool).await.unwrap();
++    let selected = super::runtime_migrator_for_database(
++        &pool,
++        &super::runtime_migrator(&pending),
++        false,
++        false,
++    )
++    .await
++    .unwrap();
++    selected.run(&pool).await.unwrap();
++    let value: String = sqlx::query_scalar("SELECT value FROM eol_literal")
++        .fetch_one(&pool)
++        .await
++        .unwrap();
++    assert_eq!(value, "left\nright");
++    eol_migrator(&pending, false).run(&pool).await.unwrap();
++    pool.close().await;
++
++    let broken = Migrator::with_migrations(vec![Migration::new(
++        1, "failed DDL".into(), sqlx::migrate::MigrationType::Simple,
++        "CREATE TABLE eol_should_rollback(value TEXT);\nINSERT INTO eol_should_rollback VALUES ('x');\nSELECT missing_column FROM eol_missing_table;".into_sql_str(),
++        false,
++    )]);
++    let pool = eol_pool().await;
++    let selected = super::runtime_migrator_for_database(
++        &pool,
++        &super::runtime_migrator(&broken),
++        false,
++        false,
++    )
++    .await
++    .unwrap();
++    assert!(selected.run(&pool).await.is_err());
++    let count: i64 =
++        sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE name='eol_should_rollback'")
++            .fetch_one(&pool)
++            .await
++            .unwrap();
++    assert_eq!(count, 0);
++    assert!(eol_ledger(&pool).await.is_empty());
++    pool.close().await;
++}
++
++#[tokio::test]
++async fn eol_missing_lazy_stores_inherit_lf_primary_for_old_p6_rollback() {
++    let home = crate::runtime::test_support::unique_temp_dir();
++    tokio::fs::create_dir_all(&home).await.unwrap();
++    let _cleanup = scopeguard::guard(home.clone(), |home| {
++        let _ = std::fs::remove_dir_all(home);
++    });
++    let config = crate::SqliteConfig::new_for_testing(home.as_path().abs());
++    let primary = config
++        .open_read_write_pool(&config.state_db_path())
++        .await
++        .unwrap();
++    eol_migrator(&super::STATE_MIGRATOR, false)
++        .run(&primary)
++        .await
++        .unwrap();
++    let primary_before = eol_ledger(&primary).await;
++    primary.close().await;
++
++    for (name, base) in eol_domains()
++        .into_iter()
++        .filter(|(name, _)| *name != "state")
++    {
++        let canonical = super::runtime_migrator(base);
++        let pool = match name {
++            "logs" => config.open_logs_db(&canonical, None).await.unwrap(),
++            "goals" => config.open_goals_db(&canonical, None).await.unwrap(),
++            "memory" => config.open_memories_v2_db().await.unwrap(),
++            "queue" => config.open_queue_db(&canonical, None).await.unwrap(),
++            "history" => config
++                .open_thread_history_db(&canonical, None)
++                .await
++                .unwrap(),
++            _ => unreachable!(),
++        };
++        let legacy = eol_migrator(base, false);
++        let created = eol_ledger(&pool).await;
++        assert_eq!(created.len(), legacy.migrations.len(), "{name}");
++        for row in &created {
++            let expected = legacy
++                .iter()
++                .find(|migration| migration.version == row.0)
++                .unwrap();
++            assert_eq!(row.4, expected.checksum.as_ref(), "{name}");
++        }
++        legacy
++            .run(&pool)
++            .await
++            .expect("old P6 opens newly created legacy-profile auxiliary store");
++        assert_eq!(
++            eol_ledger(&pool).await,
++            created,
++            "{name}: old reader must not add or rewrite rows"
++        );
++        pool.close().await;
++    }
++    let primary = config
++        .open_read_only_pool(&config.state_db_path(), None)
++        .await
++        .unwrap();
++    assert_eq!(eol_ledger(&primary).await, primary_before);
++    primary.close().await;
++}
++
++#[tokio::test]
++async fn eol_existing_auxiliary_ledger_does_not_depend_on_primary_health() {
++    for dirty in [false, true] {
++        let home = crate::runtime::test_support::unique_temp_dir();
++        tokio::fs::create_dir_all(&home).await.unwrap();
++        let _cleanup = scopeguard::guard(home.clone(), |home| {
++            let _ = std::fs::remove_dir_all(home);
++        });
++        let config = crate::SqliteConfig::new_for_testing(home.as_path().abs());
++        let primary = config
++            .open_read_write_pool(&config.state_db_path())
++            .await
++            .unwrap();
++        eol_migrator(&super::STATE_MIGRATOR, false)
++            .run(&primary)
++            .await
++            .unwrap();
++        let logs = config
++            .open_read_write_pool(&config.logs_db_path())
++            .await
++            .unwrap();
++        eol_migrator(&super::LOGS_MIGRATOR, false)
++            .run(&logs)
++            .await
++            .unwrap();
++        let logs_before = eol_ledger(&logs).await;
++        logs.close().await;
++        if dirty {
++            sqlx::query("UPDATE _sqlx_migrations SET success=0 WHERE version=1")
++                .execute(&primary)
++                .await
++                .unwrap();
++        } else {
++            sqlx::query("UPDATE _sqlx_migrations SET checksum=zeroblob(48) WHERE version=1")
++                .execute(&primary)
++                .await
++                .unwrap();
++        }
++        let primary_before = eol_ledger(&primary).await;
++        let canonical = super::runtime_logs_migrator();
++        let logs = config
++            .open_logs_db(&canonical, None)
++            .await
++            .expect("valid existing auxiliary store is independent of primary validation");
++        assert_eq!(eol_ledger(&logs).await, logs_before);
++        assert_eq!(eol_ledger(&primary).await, primary_before);
++        let error = super::runtime_migrator_for_database(
++            &primary,
++            &super::runtime_state_migrator(),
++            true,
++            false,
++        )
++        .await
++        .unwrap_err();
++        assert!(matches!(error, sqlx::migrate::MigrateError::Dirty(1)) == dirty);
++        assert!(matches!(error, sqlx::migrate::MigrateError::VersionMismatch(1)) != dirty);
++        logs.close().await;
++        primary.close().await;
++    }
++}

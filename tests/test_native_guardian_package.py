@@ -29,15 +29,21 @@ P6_SOURCE = "5d10fd97306cd2d11a1bc5d4ae2327468240bb650639cc93c39d19b2b7b58edb"
 
 def recipe(patches=6):
     value = pack.load(ROOT / "native/build-lock.json")
-    assert [x["file"] for x in value["patches"]] in (P5, P6)
+    assert [x["file"] for x in value["patches"]] in (P5, P6, P6 + ["migration-checksum-eol-0165.patch"])
+    current_source = value["prepared_source_sha256"]
+    seventh = value["patches"].pop() if len(value["patches"]) == 7 else None
     if len(value["patches"]) == 6:
         assert value["patches"][-1] == {"file": P6[-1], "sha256": P6_SHA}
         value["patches"].pop()
     value["prepared_source_sha256"] = P5_SOURCE
     value["prepared_source_files"] = 9516
-    if patches == 6:
+    if patches >= 6:
         value["patches"].append({"file": P6[-1], "sha256": P6_SHA})
         value["prepared_source_sha256"] = P6_SOURCE
+    if patches == 7:
+        assert seventh is not None
+        value["patches"].append(seventh)
+        value["prepared_source_sha256"] = current_source
     return value
 
 
@@ -48,7 +54,7 @@ def write_lock(path, lock):
 
 def copied_native(repo):
     native = repo / "native"; native.mkdir(parents=True)
-    for name in P6:
+    for name in P6 + ["migration-checksum-eol-0165.patch"]:
         shutil.copyfile(ROOT / "native" / name, native / name)
     write_lock(native / "build-lock.json", recipe(5))
     return native
@@ -173,7 +179,7 @@ def test_explicit_staging_lock_does_not_weaken_receipt_or_patch_validation(tmp_p
         pack.validate_tree(stage, build_lock=path)
 
 
-@pytest.mark.parametrize("patch_count", [5, 6])
+@pytest.mark.parametrize("patch_count", [5, 6, 7])
 def test_packager_main_honors_private_lock_before_active_promotion_without_Cargo(tmp_path, monkeypatch, capsys, patch_count):
     # Tiny synthetic source/output receipts exercise wiring, not native qualification.
     repo = tmp_path / "repo"; native = copied_native(repo)
@@ -232,6 +238,6 @@ def test_packager_main_honors_private_lock_before_active_promotion_without_Cargo
     assert result["no_compile_or_native_execution"] is True and len(metadata_calls) == 1
     assert (output / "provenance/O165-original-build-lock.json").read_bytes() == lock_path.read_bytes()
     assert pack.load(output / "manifest.json")["build_lock_sha256"] == pack.sha(lock_path)
-    assert {p.name for p in (output / "provenance/patches").iterdir()} == set(P5 if patch_count == 5 else P6)
+    assert {p.name for p in (output / "provenance/patches").iterdir()} == {row["file"] for row in lock["patches"]}
     assert (native / "build-lock.json").read_bytes() == active
     assert build.source_state(source) == state and not list(target.iterdir())

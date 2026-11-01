@@ -129,8 +129,9 @@ def single_graph(lock, native_dir):
         "guardian-thread-context-0165.patch", "windows-cwd-ancestor-metadata-0165.patch"]
     tectonic_patches = base_patches + ["packaged-tectonic-materialization-0165.patch"]
     guardian_transport_patches = tectonic_patches + ["guardian-provider-transport-0165.patch"]
+    migration_eol_patches = guardian_transport_patches + ["migration-checksum-eol-0165.patch"]
     require([row["file"] for row in lock["patches"]] in (
-        base_patches, tectonic_patches, guardian_transport_patches),
+        base_patches, tectonic_patches, guardian_transport_patches, migration_eol_patches),
         "Single-producer patch topology differs")
     for row in lock["patches"]:
         require(sha(plain(native_dir / row["file"])) == row["sha256"],

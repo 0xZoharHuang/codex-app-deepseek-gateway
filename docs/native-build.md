@@ -1,8 +1,14 @@
 # 固定 Windows 原生构建
 
-## P6 构建前资格（R224，尚未晋升）
+## P7 迁移换行兼容候选（R241，尚未生成四目标产物或部署）
 
-当前 active lock 仍为五补丁 P5：5bfdec0bc745a3a31e209078b1424d9f063d1eea73918eb394c8eae59f01648b，完整源 3830ef7a9318ff1c6016ecaa6840805250c527c9a2b75b1e77b6b9c334210548 /9516 文件。P5 已经通过正式安装入口加载，CLI 为 ebec4115b77c4710feb71d9d460d893bb6cb164c2fbee906087783d83ac685fa；其真实 App LaTeX 范围证据见 [R222](qualification-r222.md)，不表示整体 App 已通过。
+第七个补丁 migration-checksum-eol-0165.patch 只修改原生 state crate 的迁移适配和对应测试，不修改 SQL 源文件或 SQLx。Windows 全新 profile 按同版本官方 App 的 CRLF SQL 执行并记录其 SHA384；已有迁移只接受同一 SQL 的 LF / CRLF 两个精确身份，在内存中选取相应 SQL 和校验值，不更新既有账本的 checksum 或用户行。旧 LF profile 后续才创建的辅助库从配置实际 primary 路径只读继承 LF，保留 P6 回退能力。未知内容和 dirty 迁移仍按 SQLx 拒绝，legacy38→39 修复和原有事务保持。
+
+已有 LF 账本不能由未经修改的 stock App 直接读取；本补丁不承诺任意旧、新或跨系统版本共享同一数据库。SQLx SQLite migration lock / unlock 是 no-op，不作额外互斥保证。当前只进行独立 codex-state 定向 unit 资格，四目标 producer、部署和 App 运行资格另行验收。
+
+## P6 构建前资格（R224 历史记录）
+
+R224 该阶段的 active lock 为五补丁 P5：5bfdec0bc745a3a31e209078b1424d9f063d1eea73918eb394c8eae59f01648b，完整源 3830ef7a9318ff1c6016ecaa6840805250c527c9a2b75b1e77b6b9c334210548 /9516 文件。P5 已经通过正式安装入口加载，CLI 为 ebec4115b77c4710feb71d9d460d893bb6cb164c2fbee906087783d83ac685fa；其真实 App LaTeX 范围证据见 [R222](qualification-r222.md)，不表示整体 App 已通过。
 
 P6 在 P5 后追加 guardian-provider-transport-0165.patch（SHA256 2d7504fcbfc86918c72eef7629760d590914b78c7bf705042e05f62749bacefe）。独立从已核验官方 720fec archive 重放六个补丁，得到完整源 5d10fd97306cd2d11a1bc5d4ae2327468240bb650639cc93c39d19b2b7b58edb /9516 文件；Cargo.lock 不变。此阶段只有来源重放和构建/打包软件资格，尚未生成新四目标产物、部署或进行 P6 App 验收。
 

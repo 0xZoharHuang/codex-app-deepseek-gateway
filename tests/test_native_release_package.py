@@ -383,11 +383,12 @@ def test_notice_reparse_guard_works_without_newer_junction_api(mode, attributes,
     assert pack.redirected(Path("unused-fixture-path"), metadata) is rejected
 
 
-@pytest.mark.parametrize("patch_count", [4, 5, 6])
+@pytest.mark.parametrize("patch_count", [4, 5, 6, 7])
 def test_single_producer_accepts_real_independent_target_without_private_projection(tmp_path, patch_count):
     native, lock, _, value, build = single_recipe(tmp_path)
     for name in ["packaged-tectonic-materialization-0165.patch",
-                 "guardian-provider-transport-0165.patch"][:patch_count - 4]:
+                 "guardian-provider-transport-0165.patch",
+                 "migration-checksum-eol-0165.patch"][:patch_count - 4]:
         patch = native / name
         patch.write_text("reviewed pinned component fixture")
         lock["patches"].append({"file": patch.name, "sha256": pack.sha(patch)})

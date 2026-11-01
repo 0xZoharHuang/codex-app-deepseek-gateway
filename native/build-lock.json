@@ -29,9 +29,13 @@
     {
       "file": "guardian-provider-transport-0165.patch",
       "sha256": "2d7504fcbfc86918c72eef7629760d590914b78c7bf705042e05f62749bacefe"
+    },
+    {
+      "file": "migration-checksum-eol-0165.patch",
+      "sha256": "167b7a679347c8bba2e84eb3d4c36b585c9ae1629ff072f1c6197856da242d97"
     }
   ],
-  "prepared_source_sha256": "5d10fd97306cd2d11a1bc5d4ae2327468240bb650639cc93c39d19b2b7b58edb",
+  "prepared_source_sha256": "834f6aaee6740900576373803b6314f05a0d88a0e92900016a7ef03474521862",
   "prepared_source_files": 9516,
   "cargo_lock_sha256": "7537da7c5e154334b15ef9b59091f5fed3a8e480b77c037e3a8b7f07d1614709",
   "release_environment": {
