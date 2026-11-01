@@ -1,5 +1,9 @@
 # 固定 Windows 原生构建
 
+## 构建并发资源上限
+
+标准 builder 可选 --jobs 1 或 --jobs 2，使用官方 Cargo --jobs 参数。固定 PROFILE / release_environment 中 CARGO_BUILD_JOBS=2 是锁定的最大并发值；显式 CLI override 优先，实际 argv 和 locked_max_build_jobs / effective_build_jobs / build_jobs_override 会同时写入构建回执。打包器严格核对这些字段与实际命令，并在分发 provenance 记录有效资源设置。无 override 的旧回执沿用原校验。此资源限制保留代码生成参数、源指纹、原生四目标和 owner/cache 的检查。
+
 ## P7 迁移换行兼容候选（R241，尚未生成四目标产物或部署）
 
 第七个补丁 migration-checksum-eol-0165.patch 只修改原生 state crate 的迁移适配和对应测试，不修改 SQL 源文件或 SQLx。Windows 全新 profile 按同版本官方 App 的 CRLF SQL 执行并记录其 SHA384；已有迁移只接受同一 SQL 的 LF / CRLF 两个精确身份，在内存中选取相应 SQL 和校验值，不更新既有账本的 checksum 或用户行。旧 LF profile 后续才创建的辅助库从配置实际 primary 路径只读继承 LF，保留 P6 回退能力。未知内容和 dirty 迁移仍按 SQLx 拒绝，legacy38→39 修复和原有事务保持。

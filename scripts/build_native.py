@@ -32,12 +32,24 @@ NATIVE_TARGETS = {
     "codex-windows-managed-deny-probe.exe": ("codex-windows-sandbox", "codex-windows-managed-deny-probe"),
 }
 
-def build_commands(toolchain: Path, binaries: list[str]) -> list[list[str]]:
+def build_jobs_policy(override: int | None = None) -> dict:
+    maximum = int(PROFILE["CARGO_BUILD_JOBS"])
+    require(override is None or type(override) is int and 1 <= override <= maximum,
+            "Build jobs override must be an integer within the locked maximum")
+    return {"locked_max_build_jobs": maximum,
+            "effective_build_jobs": maximum if override is None else override,
+            "build_jobs_override": override}
+
+
+def build_commands(toolchain: Path, binaries: list[str], *, jobs: int | None = None) -> list[list[str]]:
     require(isinstance(binaries, list) and bool(binaries)
             and all(isinstance(name, str) and name in NATIVE_TARGETS for name in binaries)
             and len(binaries) == len(set(binaries)), "Unsupported or duplicate native binary targets")
     packages = list(dict.fromkeys(NATIVE_TARGETS[name][0] for name in binaries))
+    build_jobs_policy(jobs)
     command = [str(toolchain / "cargo.exe"), "build", "--locked", "--release"]
+    if jobs is not None:
+        command.extend(["--jobs", str(jobs)])
     for package in packages:
         command.extend(["-p", package])
     for name in binaries:
@@ -342,6 +354,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--target-dir", type=Path, help="Explicit existing owned CARGO_TARGET_DIR, separate from Cargo home")
     parser.add_argument("--transition-from-lock", help="Explicit CAS of a terminal owned build to this lock, only when its existing prepared source matches exactly; select a new empty --output")
     parser.add_argument("--build-lock", type=Path, default=REPO / "native/build-lock.json", help="Explicit pinned source/target lock; defaults to the current CLI candidate")
+    parser.add_argument("--jobs", type=int, choices=range(1, int(PROFILE["CARGO_BUILD_JOBS"]) + 1),
+                        help="Official Cargo concurrency override, bounded by the locked maximum")
     parser.add_argument("--dry-run", action="store_true", help="Verify inputs/tool versions and print the plan without writing")
     args = parser.parse_args(argv)
     require(os.name == "nt", "this candidate targets Windows; use a Windows x64 MSVC Developer shell")
@@ -372,7 +386,7 @@ def main(argv: list[str] | None = None) -> int:
     require(git is not None and linker is not None and bool(os.environ.get("LIB")),
             "Git and the MSVC linker/LIB environment are required; open an x64 Developer shell")
     # One invocation for exactly the locked targets; never --bins.
-    commands = build_commands(toolchain, lock["binaries"])
+    commands = build_commands(toolchain, lock["binaries"], jobs=args.jobs)
     plan = {"schema_version": 1, "mode": "dry-run" if args.dry_run else "build",
             "build_lock_sha256": sha(lock_path), "upstream_commit": lock["upstream_commit"],
             "native_version": lock["native_version"],
@@ -380,7 +394,8 @@ def main(argv: list[str] | None = None) -> int:
             "archive": str(archive), "archive_sha256": lock["archive_sha256"], "patches": lock["patches"],
             "source": str(source), "source_sha256": lock["prepared_source_sha256"],
             "work_dir": str(work), "cache_dir": str(cache), "target": str(target), "cargo_home": str(cache / "cargo"),
-            "output": str(output), "profile": PROFILE, "below_normal_priority": True, "commands": commands, "rustc": rust, "cargo": cargo,
+            "output": str(output), "profile": PROFILE, **build_jobs_policy(args.jobs),
+            "below_normal_priority": True, "commands": commands, "rustc": rust, "cargo": cargo,
             "linker": linker, "runtime_executed": False, "app_qualified": False}
     marker = work / "build-owner.json"
     if work.exists() and any(work.iterdir()):

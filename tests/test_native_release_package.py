@@ -433,3 +433,37 @@ def test_single_producer_independent_target_keeps_standard_builder_guards(tmp_pa
         value.pop("source")
     with pytest.raises(ValueError):
         pack.single_sources(value, lock, digest, "4" * 64, build)
+
+
+def test_single_producer_binds_effective_one_job_and_public_provenance(tmp_path):
+    native, lock, digest, value, build = single_recipe(tmp_path)
+    value.update(build.build_jobs_policy(1))
+    value["commands"] = build.build_commands(Path("private-rust"), lock["binaries"], jobs=1)
+    refs, index, public = pack.single_sources(value, lock, digest, "4"*64, build)
+    assert refs["build_resources"] == public["build_resources"] == build.build_jobs_policy(1)
+    assert refs["release_environment"]["CARGO_BUILD_JOBS"] == "2"
+    assert "private-rust" not in json.dumps([refs, index, public])
+
+
+@pytest.mark.parametrize("corruption", ["zero", "above-lock", "bool", "partial", "wrong-effective", "missing-argv", "unreported-argv"])
+def test_single_producer_jobs_cannot_be_silently_misreported(tmp_path, corruption):
+    native, lock, digest, value, build = single_recipe(tmp_path)
+    value.update(build.build_jobs_policy(1))
+    value["commands"] = build.build_commands(Path("private-rust"), lock["binaries"], jobs=1)
+    if corruption == "zero":
+        value["build_jobs_override"] = 0
+    elif corruption == "above-lock":
+        value["build_jobs_override"] = 3
+    elif corruption == "bool":
+        value["effective_build_jobs"] = True
+    elif corruption == "partial":
+        del value["locked_max_build_jobs"]
+    elif corruption == "wrong-effective":
+        value["effective_build_jobs"] = 2
+    elif corruption == "missing-argv":
+        value["commands"] = build.build_commands(Path("private-rust"), lock["binaries"])
+    else:
+        for key in build.build_jobs_policy(1):
+            del value[key]
+    with pytest.raises(ValueError):
+        pack.single_sources(value, lock, digest, "4"*64, build)

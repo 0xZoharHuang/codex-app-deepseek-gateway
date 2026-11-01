@@ -153,7 +153,16 @@ def single_sources(raw, lock, lock_digest, raw_digest, build):
             and raw["patches"] == lock["patches"]
             and raw["profile"] == lock["release_environment"] == build.PROFILE,
             "Single-producer raw inputs differ from pinned recipe")
-    expected, = build.build_commands(Path("pinned-rust"), lock["binaries"])
+    resource_keys = ("locked_max_build_jobs", "effective_build_jobs", "build_jobs_override")
+    resource_policy = None
+    override = None
+    if any(key in raw for key in resource_keys):
+        override = raw.get("build_jobs_override")
+        resource_policy = build.build_jobs_policy(override)
+        require(all(key in raw and type(raw[key]) is type(value) and raw[key] == value
+                    for key, value in resource_policy.items()),
+                "Single-producer build jobs metadata differs")
+    expected, = build.build_commands(Path("pinned-rust"), lock["binaries"], jobs=override)
     cache = Path(raw.get("cache_dir", raw["work_dir"]))
     require(len(raw["commands"]) == 1 and raw["commands"][0][1:] == expected[1:]
             and raw["cargo_home"] == str(cache / "cargo"),
@@ -183,6 +192,9 @@ def single_sources(raw, lock, lock_digest, raw_digest, build):
               "native_version":lock["native_version"], "upstream_commit":lock["upstream_commit"],
               "source_sha256":lock["prepared_source_sha256"], "build_lock_sha256":lock_digest,
               "candidate_revision":"O165", "outputs":rows}
+    if resource_policy is not None:
+        refs["build_resources"] = dict(resource_policy)
+        public["build_resources"] = dict(resource_policy)
     return refs, index, public
 
 

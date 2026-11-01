@@ -252,7 +252,8 @@ def test_explicit_work_cache_preserves_default_layout(tmp_path):
     assert build.cache_directory(work,work / "source",work / "candidate",work) == work
 
 
-def test_dry_run_records_explicit_cache_without_mutating_work(tmp_path,monkeypatch,capsys):
+@pytest.mark.parametrize("jobs", [None, 1])
+def test_dry_run_records_explicit_cache_without_mutating_work(tmp_path,monkeypatch,capsys,jobs):
     data = b"fixed source fixture"; archive = tmp_path / "source.tar.gz"; archive.write_bytes(data)
     work = tmp_path / "new-work"; cache = tmp_path / "existing-cache"; cache.mkdir()
     toolchain = tmp_path / "rust"
@@ -267,12 +268,15 @@ def test_dry_run_records_explicit_cache_without_mutating_work(tmp_path,monkeypat
     monkeypatch.setattr(build.shutil,"which",lambda name:str(tmp_path / name))
     monkeypatch.setenv("LIB","fixture SDK")
     assert build.main(["--archive",str(archive),"--work-dir",str(work),"--cache-dir",str(cache),
-                       "--toolchain-bin",str(toolchain),"--build-lock",str(lock_path),"--dry-run"]) == 0
+                       "--toolchain-bin",str(toolchain),"--build-lock",str(lock_path),"--dry-run"]
+                      + ([] if jobs is None else ["--jobs",str(jobs)])) == 0
     plan = json.loads(capsys.readouterr().out)
     assert plan["source"] == str(work / "source") and plan["output"] == str(work / "candidate")
     assert plan["work_dir"] == str(work) and plan["cache_dir"] == str(cache)
     assert plan["cargo_home"] == str(cache / "cargo") and plan["target"] == str(cache / "target")
     assert plan["runtime_executed"] is False and plan["app_qualified"] is False
+    assert {key:plan[key] for key in build.build_jobs_policy(jobs)} == build.build_jobs_policy(jobs)
+    assert ("--jobs" in plan["commands"][0]) is (jobs is not None)
     assert not work.exists()
     assert list(cache.iterdir()) == []
 
@@ -436,3 +440,32 @@ def test_owned_build_transition_refuses_hardlinked_preserved_records(tmp_path, r
     assert before == {name: (work / name).read_bytes() for name in names}
     assert alias.read_bytes() == before[record]
     assert not (work / "previous-builds").exists()
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_cargo_jobs_override_preserves_locked_profile_and_targets(tmp_path, jobs):
+    command, = build.build_commands(Path("fixed-rust"), list(build.NATIVE_TARGETS), jobs=jobs)
+    assert command[:6] == [str(Path("fixed-rust") / "cargo.exe"), "build", "--locked", "--release", "--jobs", str(jobs)]
+    assert command.count("-p") == 2 and command.count("--bin") == 4 and "--bins" not in command
+    env = build.build_environment(tmp_path, Path("fixed-rust"))
+    assert env["CARGO_BUILD_JOBS"] == build.PROFILE["CARGO_BUILD_JOBS"] == "2"
+    assert build.build_jobs_policy(jobs) == {
+        "locked_max_build_jobs": 2, "effective_build_jobs": jobs, "build_jobs_override": jobs}
+    assert build.build_jobs_policy() == {
+        "locked_max_build_jobs": 2, "effective_build_jobs": 2, "build_jobs_override": None}
+
+
+@pytest.mark.parametrize("jobs", ["0", "3"])
+def test_jobs_cli_rejects_outside_lock_before_any_tool_or_write(tmp_path, monkeypatch, jobs):
+    monkeypatch.setattr(build, "checked_output", lambda command: pytest.fail("tool must not run"))
+    with pytest.raises(SystemExit) as error:
+        build.main(["--archive", str(tmp_path / "absent.tar.gz"),
+                    "--work-dir", str(tmp_path / "untouched"),
+                    "--toolchain-bin", str(tmp_path / "absent-rust"),
+                    "--jobs", jobs, "--dry-run"])
+    assert error.value.code == 2 and not (tmp_path / "untouched").exists()
+
+
+def test_job_policy_rejects_json_boolean_as_integer():
+    with pytest.raises(ValueError, match="locked maximum"):
+        build.build_jobs_policy(True)
