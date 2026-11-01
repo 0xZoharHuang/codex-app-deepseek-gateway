@@ -242,7 +242,7 @@
          }
 --- a/codex-rs/state/src/migrations_tests.rs
 +++ b/codex-rs/state/src/migrations_tests.rs
-@@ -1106,3 +1106,459 @@
+@@ -1106,3 +1106,496 @@
          );
      }
  }
@@ -468,6 +468,8 @@
 +        recency.version = 38;
 +        old.migrations.to_mut().push(recency);
 +        old.run(&pool).await.unwrap();
++        let before = eol_ledger(&pool).await;
++        assert_eq!(before.len(), old.migrations.len());
 +        let canonical = super::runtime_state_migrator();
 +        let selected = super::runtime_migrator_for_database(&pool, &canonical, true, false)
 +            .await
@@ -476,10 +478,45 @@
 +            .await
 +            .unwrap();
 +        selected.run(&pool).await.unwrap();
++        let created = eol_ledger(&pool).await;
++        assert_eq!(created.len(), full.migrations.len());
++        assert_eq!(
++            created.iter().map(|row| row.0).collect::<Vec<_>>(),
++            full.iter()
++                .map(|migration| migration.version)
++                .collect::<Vec<_>>()
++        );
++        for row in &created {
++            let expected = full
++                .iter()
++                .find(|migration| migration.version == row.0)
++                .unwrap();
++            assert_eq!(row.4, expected.checksum.as_ref());
++        }
++        for previous in &before {
++            let mut expected = previous.clone();
++            if expected.0 == 38 {
++                expected.0 = 39;
++                expected.1 = full
++                    .iter()
++                    .find(|migration| migration.version == 39)
++                    .unwrap()
++                    .description
++                    .to_string();
++            }
++            assert_eq!(
++                created.iter().find(|row| row.0 == expected.0).unwrap(),
++                &expected
++            );
++        }
 +        full.run(&pool)
 +            .await
 +            .expect("same-format old reader after legacy metadata repair");
-+        assert_eq!(eol_ledger(&pool).await.len(), full.migrations.len());
++        assert_eq!(
++            eol_ledger(&pool).await,
++            created,
++            "old reader must not add or rewrite migration rows"
++        );
 +        pool.close().await;
 +    }
 +}

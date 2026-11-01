@@ -175,7 +175,7 @@ def test_current_0165_recipe_is_a_single_four_target_native_producer():
     expected_source = {
         5: "3830ef7a9318ff1c6016ecaa6840805250c527c9a2b75b1e77b6b9c334210548",
         6: "5d10fd97306cd2d11a1bc5d4ae2327468240bb650639cc93c39d19b2b7b58edb",
-        7: "834f6aaee6740900576373803b6314f05a0d88a0e92900016a7ef03474521862",
+        7: "1125f5c87733fb267177522de600918b06a0a41489543b57c721a3bcce6d7c56",
     }
     assert lock["prepared_source_sha256"] == expected_source[len(names)]
     assert lock["prepared_source_files"] == 9516
