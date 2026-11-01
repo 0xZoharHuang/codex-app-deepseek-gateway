@@ -29,6 +29,7 @@ class ServiceConfig:
     image_transport: dict | None = None
     policy_origin: dict | None = None
     config_sha256: str | None = None
+    ordinary_default_provider: str = PROVIDER
 
     @property
     def configured_baseline(self) -> dict[str, str]:
@@ -84,7 +85,8 @@ def load_service_config(home: Path) -> ServiceConfig:
 
     Missing config uses the fixed model and official DeepSeek route only. Other
     pinned-model providers require an explicit allowlist; BridgeSettings defaults
-    never broaden the CLI's configured selection.
+    never broaden the CLI's configured selection. The ordinary provider stays
+    DeepSeek unless explicitly selected here; special protocol routes keep priority.
     """
     path = resolve_service_home(home) / "gateway.json"
     if path.is_symlink() or (path.exists() and (not path.is_file() or path.stat().st_nlink != 1)):
@@ -103,13 +105,19 @@ def load_service_config(home: Path) -> ServiceConfig:
         raise ServiceConfigError("gateway.json must contain a JSON object")
     allowed_fields = {"accepted_models", "allowed_providers", "upstream_proxy",
                       "app_version", "native_version", "native_sha256",
-                      "image_search_backend", "image_transport", "policy_origin", "web_search_backend"}
+                      "image_search_backend", "image_transport", "policy_origin", "web_search_backend",
+                      "ordinary_default_provider"}
     if set(config) - allowed_fields:
         raise ServiceConfigError("gateway.json contains unsupported configuration fields")
     models = _config_names(config, "accepted_models", (MODEL,))
     providers = _config_names(config, "allowed_providers", (PROVIDER,))
     if not set(providers) <= {PROVIDER, SERIAL_PROVIDER, STRUCTURED_PROVIDER}:
         raise ServiceConfigError("allowed_providers contains unsupported pinned-model routes")
+    ordinary = config.get("ordinary_default_provider", PROVIDER)
+    if not isinstance(ordinary, str) or ordinary not in {PROVIDER, STRUCTURED_PROVIDER}:
+        raise ServiceConfigError("ordinary_default_provider must be deepseek or morph/fp8")
+    if "ordinary_default_provider" in config and ordinary not in providers:
+        raise ServiceConfigError("ordinary_default_provider must be explicitly allowed in allowed_providers")
     proxy = config.get("upstream_proxy")
     if proxy is not None:
         if not isinstance(proxy, str) or not proxy or "\\" in proxy or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in proxy):
@@ -154,28 +162,35 @@ def load_service_config(home: Path) -> ServiceConfig:
         except (TypeError, ValueError):
             raise ServiceConfigError("image_transport has missing or invalid policy fields") from None
     origin = config.get("policy_origin")
-    if origin is not None and origin not in (DEFAULT_POLICY_ORIGIN, LEGACY_POLICY_ORIGIN_068, LEGACY_POLICY_ORIGIN_067):
+    if origin is not None and origin not in (DEFAULT_POLICY_ORIGIN, LEGACY_POLICY_ORIGIN_068_PUBLISHED, LEGACY_POLICY_ORIGIN_068, LEGACY_POLICY_ORIGIN_067):
         raise ServiceConfigError("gateway.json has an unrecognized policy_origin")
     return ServiceConfig(models, providers, proxy, **metadata,
                          image_search_backend=image_search, web_search_backend=web_search,
                          image_transport=image_policy, policy_origin=origin,
-                         config_sha256=hashlib.sha256(raw).hexdigest() if raw is not None else None)
+                         config_sha256=hashlib.sha256(raw).hexdigest() if raw is not None else None,
+                         ordinary_default_provider=ordinary)
 
 
 
 # This is the complete route set reachable in pinned protocol.prepare() at
-# fixed CDS 0.6.8 / 1684b7f: DeepSeek, strict/peer+hosted Morph, explicit serial Prime.
+# fixed CDS 0.6.9 / a704174: ordinary DeepSeek or explicit Morph,
+# strict/peer+hosted Morph, and explicit serial Prime.
 # It is metadata, not a second routing implementation.
 DEFAULT_PROVIDERS = ("deepseek", "morph/fp8", "primeintellect")
 DEFAULT_POLICY_ORIGIN = {
     "policy_id": "codex-app-680c4-full-runtime-v1",
     "native_version": NATIVE_VERSION,
-    "protocol_commit": "1684b7f136b59b04ca7a1895d0754f30f88f5a45",
+    "protocol_commit": "a70417460d823a906ebc7274834e2412be1ebe53",
     "provider_reasons": {
         "deepseek": "official_default",
         "morph/fp8": "strict_json_schema_or_native_peer_history_with_hosted_tools",
         "primeintellect": "explicit_parallel_tool_calls_false",
     },
+}
+
+# Exact published 0.6.8 initialization remains valid with its original bytes.
+LEGACY_POLICY_ORIGIN_068_PUBLISHED = {
+    **DEFAULT_POLICY_ORIGIN, "protocol_commit": "1684b7f136b59b04ca7a1895d0754f30f88f5a45",
 }
 
 # Exact previous initialization metadata remains valid; no existing file is rewritten.
@@ -226,7 +241,8 @@ def require_app_policy(config, catalog_models=None):
 def policy_info(config, *, created=False):
     return {"status": "created_fixed_app_policy" if created else "existing_policy_preserved",
             "config_sha256": config.config_sha256, "accepted_models": list(config.accepted_models),
-            "allowed_providers": list(config.allowed_providers), "origin": config.policy_origin}
+            "allowed_providers": list(config.allowed_providers),
+            "ordinary_default_provider": config.ordinary_default_provider, "origin": config.policy_origin}
 
 
 def ensure_app_policy(home):

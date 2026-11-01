@@ -31,7 +31,7 @@
 
 [CDS](https://github.com/0xZoharHuang/codex-deepseek-runtime) 让 Codex CLI 使用 DeepSeek；本仓库让官方桌面 App 使用 DeepSeek。两者可以并行使用，安装目录、配置、会话、凭据项和进程归属独立。
 
-当前源码固定复用已发布 CDS 0.6.8 的六个纯协议模块，以及一个经验证的进程内 Windows Proactor 清理 helper，来源为固定公开提交 [1684b7f](https://github.com/0xZoharHuang/codex-deepseek-runtime/commit/1684b7f136b59b04ca7a1895d0754f30f88f5a45)。六个协议模块与旧依赖逐字节相同；该 helper 只在明确的 HTTP 生命周期入口调用，不在导入时应用，不修改共享 Python 文件或事件循环策略。依赖轮子、helper 和 PSF 许可证均按锁文件校验。没有复制 CDS 启动器、线程管理、工具执行器或 agent loop，也不会通过 CDS 启动或接管桌面 App。
+当前源码固定复用已发布 CDS 0.6.9 的六个纯协议模块，以及一个经验证的进程内 Windows Proactor 清理 helper，来源为固定公开提交 [a704174](https://github.com/0xZoharHuang/codex-deepseek-runtime/commit/a70417460d823a906ebc7274834e2412be1ebe53)。协议新增显式普通提供方参数；原有默认路由和特殊路由优先级保留。依赖由该精确公开源码在 Windows 离线构建，两次独立轮子字节一致，锁文件记录源码、模块、轮子及许可证摘要；该轮子不是 CDS 的公开发布资产。helper 只在明确的 HTTP 生命周期入口调用，不在导入时应用，不修改共享 Python 文件或事件循环策略。没有复制 CDS 启动器、线程管理、工具执行器或 agent loop，也不会通过 CDS 启动或接管桌面 App。
 
 ## 当前固定组合
 
@@ -128,7 +128,7 @@ $catalogSha = (Get-FileHash -LiteralPath $catalog -Algorithm SHA256).Hash.ToLowe
 
 主任务、子任务和显式辅助别名都请求固定 DeepSeek。新任务标题、线程描述、记忆和审核各有原生调用路径，未知模型名报错，不隐式换名。
 
-默认 App 策略明确允许三种同模型路由：普通请求优先 deepseek；原生严格结构化场景允许 morph/fp8；显式串行工具语义允许 primeintellect。请求失败不会自动换提供方。实际服务商与请求路由分开记录，不能把 provider.only 当成实际服务商证明。
+默认 App 策略明确允许三种同模型路由：普通请求默认 deepseek；原生严格结构化场景允许 morph/fp8；显式串行工具语义允许 primeintellect。项目自己的 `gateway.json` 可显式设置 `"ordinary_default_provider": "morph/fp8"`，且该路由必须已在 `allowed_providers` 中。省略字段继续使用 deepseek；字段只改变普通请求，不覆盖串行、严格结构化或原生历史的特殊路由优先级。配置在服务启动时读为不可变快照，修改后须通过本项目的显式停止、启动流程加载，App preflight 会核对服务报告的选择和配置摘要。请求失败不会自动换提供方，不读取环境变量选择提供方。实际服务商与请求路由分开记录，不能把 provider.only 当成实际服务商证明。
 
 原生 web.run 的执行、引用和事件机制继续保留，网页检索和抓取服务由显式后端提供。搜索、打开、页内查找、跟随链接仍属于验收范围；无法表达的模式或约束必须明确失败，不默默改成无过滤搜索。后端和凭据见[网页路径](docs/web-runtime-path.md)。Firecrawl 目前使用有额度和速率限制的官方 keyless 服务，不承诺生产 SLA；时区地理偏置、日期精度等限制见[后端合同](docs/firecrawl-search.md)，不支持的约束不会悄悄丢掉。web.run、网页预览与 App 内置浏览器/计算机交互是不同能力。
 

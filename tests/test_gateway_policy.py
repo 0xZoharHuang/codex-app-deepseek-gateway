@@ -22,7 +22,7 @@ def test_versioned_app_default_covers_actual_pinned_prepare_routes(tmp_path):
     config, receipt = gp.ensure_app_policy(tmp_path / "new")
     assert receipt["status"] == "created_fixed_app_policy"
     assert config.policy_origin["provider_reasons"]["primeintellect"] == "explicit_parallel_tool_calls_false"
-    assert config.policy_origin["protocol_commit"] == "1684b7f136b59b04ca7a1895d0754f30f88f5a45"
+    assert config.policy_origin["protocol_commit"] == "a70417460d823a906ebc7274834e2412be1ebe53"
 
 
 def test_config_snapshot_parses_and_hashes_same_single_read(tmp_path, monkeypatch):
@@ -133,7 +133,7 @@ def test_old_pinned_origin_requires_explicit_operator_transition_without_rewrite
     assert sorted(item.name for item in home.iterdir()) == ["gateway.json", "state-preserved.bin"]
 
 
-@pytest.mark.parametrize("known_origin", [gp.LEGACY_POLICY_ORIGIN_067,gp.LEGACY_POLICY_ORIGIN_068], ids=["legacy067","legacy068"])
+@pytest.mark.parametrize("known_origin", [gp.LEGACY_POLICY_ORIGIN_067,gp.LEGACY_POLICY_ORIGIN_068,gp.LEGACY_POLICY_ORIGIN_068_PUBLISHED], ids=["legacy067","legacy068","published068"])
 def test_exact_previous_initialization_origin_is_preserved_on_protocol_only_upgrade(tmp_path, known_origin):
     home = tmp_path / "gateway"; home.mkdir()
     value = gp.default_app_policy()
@@ -155,7 +155,7 @@ def test_exact_previous_initialization_origin_is_preserved_on_protocol_only_upgr
 
 
 @pytest.mark.parametrize("change", ["native_version", "policy_id", "protocol_commit", "reason", "extra"])
-@pytest.mark.parametrize("known_origin", [gp.LEGACY_POLICY_ORIGIN_067,gp.LEGACY_POLICY_ORIGIN_068], ids=["legacy067","legacy068"])
+@pytest.mark.parametrize("known_origin", [gp.LEGACY_POLICY_ORIGIN_067,gp.LEGACY_POLICY_ORIGIN_068,gp.LEGACY_POLICY_ORIGIN_068_PUBLISHED], ids=["legacy067","legacy068","published068"])
 def test_previous_origin_compatibility_rejects_any_unrecognized_metadata(tmp_path, known_origin, change):
     home = tmp_path / "gateway"; home.mkdir()
     value = gp.default_app_policy()
@@ -174,7 +174,7 @@ def test_previous_origin_compatibility_rejects_any_unrecognized_metadata(tmp_pat
 
 
 @pytest.mark.parametrize("field", ["allowed_providers", "accepted_models"])
-@pytest.mark.parametrize("known_origin", [gp.LEGACY_POLICY_ORIGIN_067,gp.LEGACY_POLICY_ORIGIN_068], ids=["legacy067","legacy068"])
+@pytest.mark.parametrize("known_origin", [gp.LEGACY_POLICY_ORIGIN_067,gp.LEGACY_POLICY_ORIGIN_068,gp.LEGACY_POLICY_ORIGIN_068_PUBLISHED], ids=["legacy067","legacy068","published068"])
 def test_previous_origin_does_not_expand_a_narrowed_policy(tmp_path, known_origin, field):
     home = tmp_path / "gateway"; home.mkdir()
     value = gp.default_app_policy()

@@ -187,7 +187,7 @@ def verify_cds_dependency(path, lock):
             require(hashlib.sha256(archive.read("codex_deepseek/" + name)).hexdigest() == expected,
                     "Pinned CDS transport helper differs")
         require(set(compatibility["license_files"]) == {
-                    "codex_deepseek_runtime-0.6.8.dist-info/licenses/licenses/cpython-proactor-PSF.txt"},
+                    "codex_deepseek_runtime-0.6.9.dist-info/licenses/licenses/cpython-proactor-PSF.txt"},
                 "Unexpected CDS transport license boundary")
         for name, expected in compatibility["license_files"].items():
             require(hashlib.sha256(archive.read(name)).hexdigest() == expected,

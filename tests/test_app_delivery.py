@@ -52,6 +52,7 @@ def healthy_gateway(f):
             "health": {"status": "ready", "model": gp.PINNED_MODEL,
                        "accepted_models": list(policy.accepted_models),
                        "allowed_providers": list(policy.allowed_providers),
+                       "ordinary_default_provider": policy.ordinary_default_provider,
                        "config_sha256": policy.config_sha256}}
 
 def test_packaged_assets_are_identical_to_the_fixed_sources():
@@ -322,12 +323,14 @@ def test_explicit_extra_alias_catalog_policy_and_reordered_health_are_supported(
     assert path.read_bytes() == before and not f.backend.spawned
 
 
-@pytest.mark.parametrize("mismatch", ["hash", "model", "guardian", "providers", "missing_hash"])
+@pytest.mark.parametrize("mismatch", ["hash", "model", "guardian", "providers", "missing_hash", "ordinary", "missing_ordinary"])
 def test_app_check_refuses_stale_actual_gateway_policy_without_restart(fixture, monkeypatch, mismatch):
     f = fixture; configure(f)
     gateway = healthy_gateway(f)
     if mismatch == "hash": gateway["health"]["config_sha256"] = "f" * 64
     elif mismatch == "missing_hash": gateway["health"].pop("config_sha256")
+    elif mismatch == "ordinary": gateway["health"]["ordinary_default_provider"] = "morph/fp8"
+    elif mismatch == "missing_ordinary": gateway["health"].pop("ordinary_default_provider")
     elif mismatch == "model": gateway["health"]["model"] = "unknown-model"
     elif mismatch == "guardian": gateway["health"]["accepted_models"] = [gp.PINNED_MODEL]
     else: gateway["health"]["allowed_providers"].remove("primeintellect")

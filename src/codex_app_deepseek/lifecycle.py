@@ -578,9 +578,12 @@ def diagnose(install_root: Path, *, observed_baseline: dict | None = None) -> di
     observed = observe_app() if observed_baseline is None else observed_baseline
     differences = [key for key in ("app_version", "native_version", "native_sha256")
                    if str(observed.get(key, "")).removeprefix("codex-cli ") != str(expected[key]).removeprefix("codex-cli ")]
+    from .gateway_policy import load_service_config, policy_info
+    policy = load_service_config(Path(receipt["data_home"]))
     return {"status": "compatible" if not differences else "compatibility_revalidation_required",
             "release_id": receipt["release_id"], "expected_baseline": expected,
             "observed_baseline": observed, "mismatched_fields": differences,
+            "configured_gateway_policy": {key: value for key, value in policy_info(policy).items() if key != "status"},
             "model_request_performed": False, "credentials_read": False}
 
 
@@ -659,20 +662,23 @@ def health(port: int, *, token_provider=None) -> dict:
     result = json.loads(raw)
     if not isinstance(result, dict) or result.get("status") != "ready":
         raise LifecycleError("Local gateway is not ready")
-    from .gateway_policy import _config_names, DEFAULT_PROVIDERS, ServiceConfigError
+    from .gateway_policy import _config_names, DEFAULT_PROVIDERS, PROVIDER, STRUCTURED_PROVIDER, ServiceConfigError
     try:
         models = _config_names(result, "accepted_models", ())
         providers = _config_names(result, "allowed_providers", ())
     except ServiceConfigError:
         raise LifecycleError("Local gateway health has invalid model/provider names") from None
     fingerprint = result.get("config_sha256")
+    ordinary = result.get("ordinary_default_provider")
     if (not isinstance(result.get("model"), str) or not result["model"]
             or not set(providers) <= set(DEFAULT_PROVIDERS)
+            or not isinstance(ordinary, str) or ordinary not in {PROVIDER, STRUCTURED_PROVIDER}
             or (fingerprint is not None and (not isinstance(fingerprint, str)
                 or re.fullmatch("[0-9a-f]{64}", fingerprint) is None))):
         raise LifecycleError("Local gateway health has invalid policy identity")
     return {"status": "ready", "model": result["model"], "accepted_models": list(models),
-            "allowed_providers": list(providers), "config_sha256": fingerprint,
+            "allowed_providers": list(providers), "ordinary_default_provider": ordinary,
+            "config_sha256": fingerprint,
             "upstream_model_request_performed": False}
 
 

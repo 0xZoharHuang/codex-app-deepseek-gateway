@@ -4,7 +4,12 @@ This repository contains an independent integration for the official Codex App.
 The integration code is distributed under the Apache License, Version 2.0.
 
 It depends on pure protocol modules from codex-deepseek-runtime at
-cb788738864e97a16cde82f3c584164162ab6f7c (published 0.6.7, Apache-2.0).
+a70417460d823a906ebc7274834e2412be1ebe53 (published 0.6.9, Apache-2.0).
+The six protocol modules and the single Windows Proactor compatibility helper
+remain separate admitted boundaries in release/dependencies.windows-py313.json.
+The dependency wheel is built reproducibly from that exact public source archive;
+it is not a separately published CDS release asset. The Apache license is retained
+in licenses/cds-LICENSE and the helper's PSF license remains in its dependency wheel.
 
 The current native patches modify OpenAI Codex source at
 720fec862a608ae1e5878d1eecb04fb93192e93c (Apache-2.0).

@@ -390,8 +390,8 @@ async def test_unknown_reasoning_context_fails_before_upstream(tmp_path, context
 async def test_all_turns_fails_closed_if_dependency_drops_reasoning(tmp_path, monkeypatch):
     import codex_app_deepseek.bridge as module
     original_prepare = module.prepare
-    def faulty_prepare(body, state):
-        payload, registry = original_prepare(body, state)
+    def faulty_prepare(body, state, **options):
+        payload, registry = original_prepare(body, state, **options)
         payload["input"] = [item for item in payload["input"] if item.get("type") != "reasoning"]
         return payload, registry
     monkeypatch.setattr(module, "prepare", faulty_prepare)

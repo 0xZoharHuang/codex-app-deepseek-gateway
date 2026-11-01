@@ -441,7 +441,8 @@ def check(root, *, backend=None, accessibility=False, observation_seconds=60):
     if (health.get("model") != gp.PINNED_MODEL
             or not policy.config_sha256 or health.get("config_sha256") != policy.config_sha256
             or health.get("accepted_models") is None or set(health["accepted_models"]) != set(catalog_models)
-            or health.get("allowed_providers") is None or set(health["allowed_providers"]) != set(policy.allowed_providers)):
+            or health.get("allowed_providers") is None or set(health["allowed_providers"]) != set(policy.allowed_providers)
+            or health.get("ordinary_default_provider") != policy.ordinary_default_provider):
         raise DeliveryError("Owned gateway loaded a different policy/catalog; explicitly stop/start it, then run app-check")
     if gp.load_service_config(installation.data).config_sha256 != policy.config_sha256:
         raise DeliveryError("Gateway policy changed during installed preflight; run app-check again")

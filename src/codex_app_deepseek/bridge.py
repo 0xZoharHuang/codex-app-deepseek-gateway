@@ -58,6 +58,7 @@ class BridgeSettings:
     trust_env: bool = False
     proxy_url: str | None = field(default=None, repr=False)
     ssl_context: ssl.SSLContext | None = None
+    ordinary_default_provider: str = PROVIDER
 
     def __post_init__(self):
         if not isinstance(self.token, str) or len(self.token) < 24 or any(c.isspace() for c in self.token):
@@ -67,6 +68,11 @@ class BridgeSettings:
             raise ValueError("Accepted models must be a nonempty list of unique explicit names")
         if not self.allowed_providers or not set(self.allowed_providers) <= _ALLOWED_ROUTES:
             raise ValueError("Allowed providers must explicitly select supported pinned-model routes")
+        if (not isinstance(self.ordinary_default_provider, str)
+                or self.ordinary_default_provider not in {PROVIDER, STRUCTURED_PROVIDER}):
+            raise ValueError("Ordinary default provider must be deepseek or morph/fp8")
+        if self.ordinary_default_provider != PROVIDER and self.ordinary_default_provider not in self.allowed_providers:
+            raise ValueError("Ordinary default provider must be explicitly allowed")
         if self.config_sha256 is not None and (not isinstance(self.config_sha256, str)
                 or len(self.config_sha256) != 64 or any(c not in "0123456789abcdef" for c in self.config_sha256)):
             raise ValueError("Configuration fingerprint must be SHA256 or null")
@@ -498,6 +504,7 @@ def create_app(
                                   "image_maintenance": request.app[maintenance_key].snapshot() if maintenance_key in request.app else {"enabled": False},
                                   "accepted_models": list(settings.accepted_models),
                                   "allowed_providers": list(settings.allowed_providers),
+                                  "ordinary_default_provider": settings.ordinary_default_provider,
                                   "fallbacks": False, "config_sha256": settings.config_sha256})
 
     async def models(request):
@@ -556,7 +563,8 @@ def create_app(
             translated = dict(body)
             translated["model"] = MODEL
             evidence = state.evidence_view(translated.get("input"))
-            payload, registry = prepare(translated, evidence)
+            payload, registry = prepare(translated, evidence,
+                                        ordinary_default_provider=settings.ordinary_default_provider)
             adaptations = {**control_adaptations, **adapt_reasoning_context(translated, payload)}
             output_mapping = getattr(registry, "structured_output_mapping", None)
             if output_mapping is not None:

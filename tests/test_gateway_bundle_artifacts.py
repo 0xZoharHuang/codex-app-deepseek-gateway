@@ -93,7 +93,7 @@ def cds_boundary_fixture(tmp_path):
     modules = {name: ("fixture-" + name).encode() for name in
                ["protocol.py", "formats.py", "structured.py", "protocol_errors.py", "search.py", "__init__.py"]}
     helper = b"fixture-reviewed-helper"
-    license_path = "codex_deepseek_runtime-0.6.8.dist-info/licenses/licenses/cpython-proactor-PSF.txt"
+    license_path = "codex_deepseek_runtime-0.6.9.dist-info/licenses/licenses/cpython-proactor-PSF.txt"
     license_bytes = b"fixture-complete-PSF-license"
     lock = {"protocol_boundary": {"source_commit": "fixed", "pure_files": {
                 name: hashlib.sha256(value).hexdigest() for name, value in modules.items()}},

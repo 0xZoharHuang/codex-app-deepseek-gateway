@@ -146,6 +146,8 @@ def test_version_combinations_require_explicit_revalidation(bundle):
     result,_=activate(bundle)
     match=lc.diagnose(bundle.install,observed_baseline=bundle.release["app_baseline"])
     assert match["status"] == "compatible" and match["credentials_read"] is False
+    assert match["configured_gateway_policy"]["ordinary_default_provider"] == "deepseek"
+    assert match["configured_gateway_policy"]["config_sha256"] == lc.digest(bundle.data / "gateway.json")
     changed={**bundle.release["app_baseline"],"native_sha256":"c"*64}
     verdict=lc.diagnose(bundle.install,observed_baseline=changed)
     assert verdict["status"] == "compatibility_revalidation_required"
@@ -305,7 +307,7 @@ def test_health_ignores_proxy_environment_and_never_calls_a_model(monkeypatch):
     class Response:
         def __enter__(self):return self
         def __exit__(self,*args):pass
-        def read(self,size):return b'{"status":"ready","model":"fixture","accepted_models":["fixture"],"allowed_providers":["deepseek"],"config_sha256":null}'
+        def read(self,size):return b'{"status":"ready","model":"fixture","accepted_models":["fixture"],"allowed_providers":["deepseek"],"ordinary_default_provider":"deepseek","config_sha256":null}'
     class Opener:
         def open(self,request,timeout):
             captured["url"]=request.full_url;captured["timeout"]=timeout

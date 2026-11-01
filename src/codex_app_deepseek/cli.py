@@ -138,7 +138,8 @@ def serve(home: Path, port: int):
     context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     settings = BridgeSettings(token=read(LOCAL_TARGET), accepted_models=config.accepted_models,
                               allowed_providers=config.allowed_providers, proxy_url=config.upstream_proxy,
-                              ssl_context=context, config_sha256=config.config_sha256)
+                              ssl_context=context, config_sha256=config.config_sha256,
+                              ordinary_default_provider=config.ordinary_default_provider)
     home.mkdir(parents=True, exist_ok=True)
     _private(home, directory=True)
     with ExitStack() as resources:
@@ -180,7 +181,8 @@ def serve(home: Path, port: int):
             import psutil
             record = {"pid": os.getpid(), "created": psutil.Process().create_time(),
                       "executable": sys.executable, "port": port, "version": __version__, "host": "127.0.0.1",
-                      "config_sha256": config.config_sha256}
+                      "config_sha256": config.config_sha256,
+                      "ordinary_default_provider": config.ordinary_default_provider}
             if config.configured_baseline:
                 record["configured_baseline"] = config.configured_baseline
             _write_service_record(home, record)
