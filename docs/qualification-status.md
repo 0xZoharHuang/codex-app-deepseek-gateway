@@ -1,72 +1,70 @@
-# 当前机制验收状态
+# 当前资格与交付索引
 
-## R224: actual App history and Hooks closed; protocol source qualified
+本页区分源码/软件、编译产物、实际 App 工作流和外部服务证据。它是最终交付索引的一部分；最终 tag、网关 manifest/archive 及资产可用性由 [v0.1.0 发行页](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/releases/tag/v0.1.0) 的外部 `SHA256SUMS.json` 绑定。校验索引在最终构建后产生，不写回参与 wheel metadata 的源码，避免自指 hash。
 
-Actual GUI fork, Edit/Send history reversion, same-UUID cold recovery with inherited web references, normal Hooks and diff/Undo/Reapply passed their exact scopes. Central schema/auto-tool adaptation passed native source tasks, strict negative controls and V2 normal-input carry; installed rollout is pending. Full CDS runner failures were triaged, and the exact 47 prerequisite-dependent cases passed with correct test prerequisites; two installed-adapter cases await the matching QA wheel. A real Guardian V2 background WebSocket capability defect was found and is being fixed at its native transport boundary. See [R224 qualification and preserved failures](qualification-r224.md). Overall stable release remains open.
+**固定组合的本地 runtime 范围已分层关闭，最终交付门仍单列。** R27 的正确 typed 图像输入、provider 媒体接受、App 内嵌 PDF 预览，以及正确目录的宿主输出读取均有新证据。原始失败和私有证据保留；本页不公开会话正文、账户凭据、机器身份或闭源 App 代码。
 
-## R223: native interface audit continues
+## 固定来源
 
-Native Command/McpTool Hooks passed the exact API lifecycle and filesystem scope; actual App Hooks and Undo remain pending. Native outputSchema passed after a real read in the preceding turn, but two same-turn automatic-tool tasks failed their nonce/read oracle. Direct provider probes reproduce the distinction; no production routing change or auto-to-required substitution was made. A new source audit reconfirmed the closed App worktree restore identity defect. See [R223 evidence and limits](qualification-r223.md). Overall stable qualification remains open.
+| 组件 | 固定身份 |
+| --- | --- |
+| App / 已测平台 | 官方签名 `26.1023.6621.0`；Windows 10 x64 19045 普通交互会话 |
+| Native / upstream | `0.165.0-alpha.1.2` / `720fec862a608ae1e5878d1eecb04fb93192e93c` |
+| Native 完整源码 | `1125f5c87733fb267177522de600918b06a0a41489543b57c721a3bcce6d7c56`，9,516 files |
+| Native build lock | `da4e194baa449c3caa4457021770876d4ddc5d663869995bd0fb1cae6eb497e6`，七个有序补丁 |
+| 实际 P7 CLI | `d4ba603ccd287f4ce7ae863d9a0e0e02c2f37c2fa594d6a5ddea4df699a7b202` |
+| 公共 raw native manifest | `4cd522fbdf4fede602a30537cbbfca0fd53ab36c6e8f49ea8bfd8ff50966683e` |
+| 公共 raw native tar | `32b380bdeb24a09f223af9e037576566ade11018a083b90b472c75b3c58da03c`，142,231,452 bytes / 3,037 普通成员 |
+| 本机官方 Code Mode host | `510687c53c57f52dbf105b8b0050f595d255ab6dafc968c00940c782aa5141c2`，只从匹配官方包物化，不公开分发 |
+| 推理 | `deepseek/deepseek-v4.1-flash-1017`；已知上游版本身份 `deepseek/deepseek-v4.1-flash-20261017` |
+| 纯协议依赖 | CDS 0.6.9 / `a70417460d823a906ebc7274834e2412be1ebe53` |
+| CDS 固定公开源码 archive | `a6a90199358b90539495b8d1799c1afbfed75da14a121b5a03c5df2188cd07ce` |
+| 由该源码可复现构建的依赖 wheel | `4f2c97fde6de3abfd42da16ffad7bc8ecf6a4567383fb8a05304fcaaa180e5d1`；离线包携带，不虚构另一个公开 wheel URL |
 
-## R222: native LaTeX repaired and exercised in the actual App
+公开 tar 的资格对象是原始四产品与公开许可证/provenance 库存，**不包含官方闭源 App sidecar**。prepare 生成的本机绝对路径 manifest 与 Code Mode host 不重新打包上传。最终网关包哈希不内嵌本页或 README；以外部资产索引核对，不能拿自己现算的值证明下载来源可信。
 
-The five-patch runtime is actually loaded in the normal official App via installed prepare/bind/configure/launch. DeepSeek reached the original compiler, recovered from a retained cold timeout, obtained a genuine missing-source error, restored/updated the project and compiled successfully. Actual GUI preview and native PDF export were independently read back: three pages and exact new nonce. This closes that LaTeX scope; first-cold latency, native fork/revert, strict outputSchema, hooks and the other matrix gates remain separate. Validation: 15 native tests, 122 build/package checks, one real four-binary producer and real App evidence. See [R222 evidence](qualification-r222.md).
+## 已关闭的当前组合范围
 
-
-本页描述固定 Windows App/runtime 组合的本地机制，不是模型能力榜单。当前尚未稳定发布；结论按机制、实际组合和证据边界区分，软件测试数量不代替 App 验收。
-
-## 当前版本
-
-- App：26.1023.6621.0；原生：0.165.0-alpha.1.2 / upstream 720fec862a608ae1e5878d1eecb04fb93192e93c。
-- 当前原生 CLI：ebec4115b77c4710feb71d9d460d893bb6cb164c2fbee906087783d83ac685fa。
-- 完整源码：3830ef7a9318ff1c6016ecaa6840805250c527c9a2b75b1e77b6b9c334210548；9516 文件；build lock 5bfdec0bc745a3a31e209078b1424d9f063d1eea73918eb394c8eae59f01648b。
-- 产品 source3229244 新增仅含哈希的有界调用回执。97相关检查通过；Windows普通权限下完整源码与安装版各1541唯一案例通过，均无skip/error/failure。安装版另核4623个setup/call/teardown阶段、精确JUnit身份、产品和六个纯协议模块来源。这是软件资格，实际App故障恢复仍未关闭。
-- 当前安装包 manifest ff0e750049630d60e3a2537a0434b9694b7e3602cb4888f53a5355a1788c093f；wheel dd8f31e07b2eda64ea144b414d6c5a03689a747bbcc1ff5b8d479a031bb719ec。后续公共QA/文档不改变25个产品文件；最终发行尚未生成。
-- 原始记录私有保留；公开发布须附去敏结论和可复核来源清单。
-
-## 机制矩阵
-
-“范围通过”只关闭该列的具体行为；“承接”要求对应代码及输入逐字节核对，不能表示整套在新版本重跑。
-
-| 机制 | 当前证据和限制 | 状态 |
+| 层级 | 实际证据 | 结论边界 |
 | --- | --- | --- |
-| 官方 App / 独立 profile / 实际 runtime 选择 | 官方包、SID/session、原生路径、创建时间和哈希绑定；当前五补丁 ebec 实际加载，前版 18ef 留作回滚。其他 App/CDS 不被接管。 | 范围通过 |
-| 原生 AppTools / 插件 / MCP 发现 | 无 legacy 顶层替代定义；官方资源哈希核验，经原生 PluginManager 安装，真实发现及调用。 | C98/875 范围通过；新包按差异复核 |
-| Responses/SSE/工具历史/结构化输出/Code Mode | 软件合同、真实任务和最终D故障范围分开；25个产品文件未因被动QA或文档改变。 | 逐项结果见[本轮证据](qualification-r219.md)，不以Stop代替自然错误终态 |
-| 复杂工程任务 | 真实 App 中完成多文件 Jinja 修复；908原测试+22独立检查干净重建通过。模型有先前记忆，任务有人监督，非盲测或质量等价证明。 | 工作流范围通过 |
-| 原生多级智能体与冷恢复 | 同一原 Root/child UUID、前缀和消息关系有实证；V2 loaded-only 列表与按已知路径懒恢复分开核对。V1/V2 具体生命周期不能互相替代。 | 当前0.165多级协作/原UUID冷恢复已实测；18ef仅Windows元数据/cfg(test)差异，核心线程逻辑相同并明确承接 |
-| 人工审批 / 文件网络边界 | 实际允许、拒绝和受限执行分别留证；不以 full access 通过。 | 已有范围证据；最终组合差异核对 |
-| Guardian 内部记忆上下文 | 最小已持有上下文补丁保留公共查询限制；实际记忆/内部评分不再因 internal thread lookup 失败。 | 875修复已验证；18ef相同逻辑承接 |
-| Guardian 真实 Allow/Deny | 固定 DeepSeek reviewer 的 literal Allow、完整 Deny，与原生 fresh approval、具体动作和无副作用对应。实际 reviewer UUID 不同于 Parent，归属由原生构造 Parent/action 结构核实。 | 精确审批机制通过 |
-| Guardian 后续整任务 | 同一窗口随后因8 live预算返回503，父任务最终失败。受控删除来自明确 synthetic QA 注入；不能称为 DeepSeek 主任务自然选择或整任务成功。旧409/failed-closed保留。 | 失败如实保留，不覆盖审批范围结论 |
-| 记忆提取、整合、新会话读取 | 当前原生阶段有实证；曾有模型引用错误，修正与独立检查均留存。 | 具体阶段通过；不称模型永不出错 |
-| 原生自动/手动压缩与冷继续 | 自动触发输入、完整调用/结果配对、原生 replacement 历史和冷继续分开核验。当前0.165不移植旧私有容量扩展。 | 当前已验机制与源相等承接，最终证据索引待发布 |
-| App 客户端 Queue / Steer / goal / 终端 | 客户端Queue与原生Steer已有实际输入、原生输出、调用ID及归属证据；预置文本和单纯UIA返回不算成功。 | 客户端范围通过；Steer、goal暂停/正常恢复、客户端Queue、两个终端选择性中止及原B自然完成均有具体实测 |
-| server queue API | 原生消费点Pg对目标key实际返回false，已有SDK client；客户端Queue/Steer仍有正向实测。未手工调用SDK、强制门或把空DB当证据。 | 当前有效条件已观察；本次未走server queue API，不计正向执行通过，也不推断地区/账户原因。见[本轮补充](qualification-r220.md) |
-| Windows UAC / secure desktop | 当前真实UAC人工同意与拒绝未实测，不由source相等或普通App审批推出；本次不借此新造UAC/privateRPC流程。 | 未实测，条件边界明确 |
-| Windows sandbox平台 | 本次为Win10 19045实际支持的沙箱，不冒充Win11 MXC，也不外推任意账户、区域或OS安全桌面。 | 固定宿主范围 |
-| Windows 默认 cwd | 18ef 原工作树一次默认 exec：SID1009、PWD/GetLocation/相对读正确，父属性可读且列目录被拒；严格ACL只新增1008 allow0x80 flags0，旧ACE/FID/字节保持。 | 原工作树范围通过 |
-| 新目录正常物化 | 正常create/attach的新parent与leaf执行前均无1008权限；一次正常默认命令后，parent仅128/noinherit，leaf及policy明确可写的旧restoredroot按原生Modify/cap/.git只读carveout物化，14节点严格after已核；完整小JSON、默认cwd、888B相对读、父list拒绝都真通过。 | 首次新目录范围通过；新父链实际执行和14路径权限复核已关闭 |
-| 原生 worktree 归档/恢复 | 本轮正式GUI完成快照/删除、聊天归档/取消归档、原生Restore；完整文件哈希、HEAD、干净Git状态、worktree登记、同UUID及active附件一致；DeepSeek随后默认cwd相对读/哈希真实成功。 | 正式GUI完整生命周期通过；secondary restore_worktree工具的Windows路径key缺口仍未关闭，未手改ref/队列/附件 |
-| OAuth | 当前C98/875：GUI添加/Authenticate/Reconnect，HTTP服务器用户角色Deny/Allow，真实函数成功、TTL刷新、fixture-only revoke后的isError、同Root冷复用、原生CLI精确logout/remove和GUI缺席。 | 当前配置后端范围通过 |
-| OAuth 证据限制 | Consent不是browser click；680字段是固定fixture数据；无全存储模式新复测声明。启动前置失败及3条 unknown_or_expired 400/no grant全部保留。 | 限制明确 |
-| 网页搜索/open/find/click | 最终canonical恢复后，实际App回读原source70全部行及同一引用ID，并核对真实DeepSeek固定模型/提供方。 | 具体搜索/导航/天气和旧引用恢复范围通过；金融/体育私有云数据未接入、不计通过 |
-| 429/503/413/截流/取消/服务丢失/同端口认证恢复 | 实际MAIN、native输入、编号和效果联结；401原生刷新两次目标请求的完整typed JSON相等。 | [逐项真实结果](qualification-r219.md)；413/部分截流以Stop终止的边界保留 |
-| App IAB / 计算机工具 | 原生Xb消费点对IAB/CUA实际均返回false，正常设置入口禁用。临时Windows入口实验仅完成node_repl注册和Sky导入，list_apps缺App管道报os error2，已收回。 | 当前有效条件已观察；正向控制未通过，不以web.run/预览或云权益边界替代。见[源与实测](upstream-native-computer-use-bootstrap.md) |
-| 公共发布、回滚、最终清理 | 相同25个产品文件的新干净提交离线包可复现；正式安装入口完成A/B激活回退、真实服务健康、三方配置回滚、运行中卸载、重装和精确清退，用户新增设置/文件保留。未绑定另一App或重复移除原生沙箱。 | Python服务安装生命周期范围通过；整体App稳定发布、最终有边界清理及最后实时周额度确认仍待完成。见[本轮补充](qualification-r220.md) |
+| 安装版 Python 软件 | code-qualified source `5bf6c6a130d1f568fe909066594de34c05e1a8cd`；1,747 unique 主节点通过，0 fail/error/skip；宿主 1,742 与普通用户 5 个权限前置用例分别执行 | 另有 19 个 SubtestReport 单列；metadata 2、source focus 429 和重叠子集不相加。不是 1,768 个互异 App 行为 |
+| Native 构建 | 标准同一次 Cargo 命令生成四产品，source/lock/工具链/profile/四产品身份相符；七补丁来源及定向原生断言闭合 | 编译通过不代替 App；中途资源失败与后续正常完成各自保留，不把打包器的 native_build_executed=false 解读成未编译 |
+| 公开装配与许可 | 3,037 个普通成员逐项 SHA/size/type/path 校验；1,122 个 crate 许可条目及 19 份 SPDX 文本、来源与 alias 目标字节核实 | 许可来源归档与实际编译、分发库存是分层证据，不声称第三方外部认证 |
+| 正常本机升级 | no-activate 安装、独立永久原生目录、正常 prepare/bind/catalog/configure/service/单次 App launch | 临时 build output 的先前 prepare 结果保留，但未作为永久生产绑定；无全局 kill、共享状态或订阅迁移 |
+| 实际 P7 加载 | 正常 app-status 回读同一次启动，实际 App、主后端和另一原生后端均匹配固定签名/版本、永久路径与 P7 hash；运行服务加载显式 Morph/配置哈希 | 原 app-launch 的外层等待超时保留；实际 App 后创建，经同 run 状态确认，未重复 launch。health 不是 generation 成功 |
+| 旧 profile 保留 | 110 旧会话/rollout 前缀、8 个原数据库的 53 个表 schema、既有 SQLx 账本和用户稳定行投影核对；一致性备份和旧回退物保留 | 日志/sequence 与已标识观察 cursor 的真实变化逐字段记录；不以活 DB 文件整字节不变作错误断言 |
+| fresh 原生互读 | 新 P7 创建的 canonical CRLF profile → 同版本原官方 stock → P7，真实 initialize/EOF/出生时间终态和存储投影核对 | 只算实际创建并打开的 stores；lazy history 未创建不能算打开。与旧 LF 生产 profile 保留是不同控制 |
+| 真实网页工程 | 当前 App 的主任务与原生 child 完成源码/官方文档交叉审查并写两份交付物；输入受保护，非 controller 代写 | 子线程继承历史中的 aborted 不计本次 Stop；child 实际新调用与继承记录分开，V2 不凭空要求 V1 close 工具 |
+| 网页请求/引用 | 52 个实际操作：open 14、find 32、click 2、search/image/time/weather 各 1；13 次 Code Mode 调用、25 个原生网页事件；操作 hash、时间、session、refs 联结 | Find 为 20 次命中、12 次正常零匹配。一个并行 open 的摘要缺 lineno，有两个 nested-ID 候选；保候选，不捏造唯一归属 |
+| 完整数据服务 payload | 文本与图片的实际完整 canonical JSON hash 重构均匹配真实 HTTP 200/完整响应；原 q、低 context、城市/国家、文本 recency、图片省略 tbs 全核 | 这是 source 支持的完整语义 payload hash 证明，不是 direct Alpha raw-body 捕获，也不是排序/日期精度、远程图片像素安全门认证 |
+| time / weather / MCP | UTC 时间处于真实任务窗口；SF duration=1/start 省略得到当地当天 forecast，两次正式数据 HTTP 及 raw hash 匹配；两次 App MCP 只读 list_projects 均成功 | 只公开数量，不公开项目名。额外 open_in_codex 的 queued 回执不计作只读工具或 UI 已渲染 |
+| 模型路由与失败 | 请求固定 canonical DeepSeek，普通 Morph 明确选择，无客户端隐式 fallback；三次独立上游 metadata GET 样本确认 Morph/固定版本 | 原本地 observed_provider=null 不补写。网页窗口只 3 样本，媒体另 1 样本；不称全窗口供应方均独证；reasoning-only 无 final 的结构化失败仍 failed，不能放松 validator。usage={} 不表示免费/未计 token |
 
-原生Plan已通过正常slash入口、真实request_user_input及GUI Alpha答案回传并还原Default。内置/review通过真正Code review入口运行：turn_trigger=code_review，使用turn/start而非review/start；908项原工程测试通过。此前未提交答案的UIA尝试保留。详见[本轮证据](qualification-r219.md)。
+最终仅文档后继不能把未经检查的字节自动算成已资格。最终组包需将 22 个 Python 模块、native 输入/补丁/锁、依赖清单等与上述 code-qualified 来源逐字核对；确有产品变更时按影响补验。公开 tag 与外部校验索引提供最终来源，不在源码中强求“本页包含自身最终 commit/SHA”的固定点。
 
-[可移植被动观测和严格校验](../tests/fixtures/app_faults/evidence/README.md)已有35纯负控及本地真实HTTP/tap验证，无模型、App或凭据调用，不计作App验收。configured_baseline仅是策略声明，不证明实际二进制。
+## R27 媒体分层关闭，原失败保留
 
-## 保留的真实失败
+- **实际 PDF → 原生 screenshot → App 显示**：本轮真实打开公共 W3C PDF，raw SHA `3df79d34abbca99308e79cb94461c1893582604d68329a41fd4bec1885e6adb4`。page 0 经 pypdfium2 5.14.0 / PDFium 156.0.8076.0、scale 2 渲染为 1190×1684 / 14,763-byte PNG，SHA `380c744a3a9089315c94da97ed8454ba608cbc60f5745907fa254dcd7e35ee40`；保留 BLOB、本地文件、native ref/Markdown 同源。实际 App 截图与 UIA 对上白色纵向页和 Dummy PDF file 内容，不是图标或纯 Markdown。没有用旧 0.163 同哈希图替当前执行，也没有 controller 重截图替代。
+- **view_image → typed 输出 → provider**：首轮真实读到了原 PNG，但模型 `text(JSON.stringify(r))` 只输出文本，未算 typed 链通过。另一次同线程纠错直接使用原生 `image(r)`：helper 将原 DTO 规范为 typed PNG，119-byte、32×24、SHA `09632d3f1f7d25282d2ec464c63231899a87274cb453bdb1f46fd83f0ac6c45b` 保持原字节。实际 incoming call/output 哈希与 gateway receipt 对上，原协议保留类型/调用 ID/parts；小请求走 lossless inline，无 file URL/上传转换。真实 HTTP 200/完成对应的一个上游 metadata 样本确认 Morph、固定模型版本、`num_media_prompt=1`。这不是整个窗口供应方独证，也不评价模型识图质量。
+- **传输计数的解释**：低于 prevention threshold 的 source fastpath 直接发送原始编码字节，并不扫描 image_occurrences；该路径的计数零/Files consumption not_applicable 不能误当没有 inline 图片。证据来自 typed bytes、incoming 完整哈希、明确 source 流程、实际 HTTP 和上述单样本 metadata；没有注入 tap 或声称捕获完整上游 wire body。
+- **宿主 JSON 可读性**：原报告的拒读来自 Root 验收夹具将目录按文件权限处理、漏掉可继承的 host/SYSTEM grants。shipping 的 14 个目录/6 个文件 helper 调用无同类误用，未改 runtime。另建正确目录后由模型原生 apply_patch AddFile 一次，普通与提升宿主读到相同的 122-byte JSON、SHA `817c965ef227621ef736f83c43bbc8b27b5392991e13435df94853a8ca4eebf6`、owner 与 SDDL；owner 仍是原 sandbox 身份。没有修改原 R299 报告、ACL 或 owner。这只关闭夹具前置/宿主读取回归，不拿小 JSON 代替复杂任务。
+- 扩大预览按钮的 Invoke NoPattern 原错误保留，不称扩大成功；本次正向为真实内嵌预览。最初的文本化输出、坏夹具、元数据尾缀错误、结构化模型失败与取消均保原件，不因最终成功抹掉。
+- 实际任务后，只对自己改动的两个网页操作者叶字段按 fresh SHA CAS 恢复原 absence；原已 live 的 no-op 不认领/回滚，auth.command、后来新增项目 trust 和其他设置保留。原 checkpoint 不伪改成另一段历史。
 
-1. 930检查对应复用已知工程任务，非blind；模型先前记忆和错误引用纠正没有省略。
-2. Guardian 起初私有QA把未知辅助请求占用MAIN互斥，出现409；后又遇预算503。不同线程header曾令旁路漏记。旧记录不改成通过，新旁路只改善归属证据，不能生成native verdict。
-3. Windows 默认cwd曾因父目录缺读取属性使PowerShell回C盘。修复后单次QA脚本把Get-Content的ETS对象按Depth8反射展开约50MB并被原生裁剪；只从原输出完整唯一字段取证，不称完整JSON可解析，不重发成功读取。
-4. 原生首次构建后才发现单测fixture AI控制位错误，浪费了一轮构建。原101/原producer保留；test-only同DACL stock初始化修好后完整断言通过，才冻结最终source/lock并重新标准构建。无生产ACL primitive更改或控制位mask。
-5. packager曾只接受旧三补丁拓扑，拒绝当前四补丁；已修正真实接线和当前锁集成断言。输出父目录缺失的操作错误也保留，未伪造成功产物。
-6. 归档需要合法Git身份。commit-tree128没有被当作删除成功；只修自有测试repo的local身份，不写用户global。
-7. 历史helper被防护隔离及早期权限错误保留。当前工作未关闭Defender、添加例外、恢复隔离样本或更改全机安全策略。
+## 尚为单独交付门
 
-更早候选仅见[历史摘要](qualification-history.md)。最终公开报告不能发布会话正文、凭据、内部项目或闭源 App 代码。
+最终源码/双构网关包、外部校验索引与公开资产字节读回、正常生命周期交付，以及用户要求的 Windows 自有物有界整理和当时实际使用额度复核，由最终交付回执关闭。运行资格不能代替这些动作；不写成已发布、已清理或额度已重置。本页采用版本中性的外部发行索引，不把最终包 hash 反填进参与构建的 README。
+
+## 原版缺陷与适用条件
+
+固定原版 App + 原官方 native 的 Windows restore_worktree 返回相同 295-byte 错误；快照 blobs 存在，路径表示导致 snapshot key 不同。这一同基线负向证据保留，**不是 Restore 正向通过**；该路径作为原版负向边界保留，不从旧失败或源码相同推出正向恢复成功，与其他已验证 GUI 工作树生命周期分开。不靠 ref alias、路径替换、WSL、opaque JSON 或关闭原生机制冒充修复；正常 GUI 中其他已验证工作树行为仍按其具体范围陈述。
+
+IAB/计算机工具、server queue 等按实际有效门分类。当前门为 false 的 SDK/API 不冒称已执行；固定 Windows 10 环境没有凭空新增 Win11 MXC、UAC 或 secure-desktop 必须通过的任务，也不能用普通 App 审批推出这些 OS 路径成功。金融/体育云 feed 单列，不能据“云权益”把所有网页或本地 API 一起排除。
+
+## 历史范围与精确承接
+
+历史源/配置/实际条件相同的权限、Guardian Allow/Deny、记忆提取/整合/跨会话读取、自动/手动压缩、Steer/客户端队列/goal、Hooks/diff/Undo、OAuth、同 UUID 冷恢复与旧引用等按组件相等证明承接；不写成每一项都在 P7 再跑了一遍。原生 local API getter、ZIP 或纯 fixture 不能代替 GUI/模型记忆形成。
+
+历史说明：[R219](qualification-r219.md)、[R220](qualification-r220.md)、[R222](qualification-r222.md)、[R223](qualification-r223.md)、[R224](qualification-r224.md)。这些文档记录当时版本与失败，不能据旧的“当前”一词选择旧二进制或覆盖本页当前身份。改动触达处以新分项实测为准。
+
+模型质量、模型固有模态能力、第三方排序/数据精度与云账户权益另列；本地协议、工具、权限、会话与真实错误传播仍在验收合同内。

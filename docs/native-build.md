@@ -4,11 +4,42 @@
 
 标准 builder 可选 --jobs 1 或 --jobs 2，使用官方 Cargo --jobs 参数。固定 PROFILE / release_environment 中 CARGO_BUILD_JOBS=2 是锁定的最大并发值；显式 CLI override 优先，实际 argv 和 locked_max_build_jobs / effective_build_jobs / build_jobs_override 会同时写入构建回执。打包器严格核对这些字段与实际命令，并在分发 provenance 记录有效资源设置。无 override 的旧回执沿用原校验。此资源限制保留代码生成参数、源指纹、原生四目标和 owner/cache 的检查。
 
-## P7 迁移换行兼容候选（R241，尚未生成四目标产物或部署）
+## 当前 P7：来源、构建、装配与 App 资格分开
 
-第七个补丁 migration-checksum-eol-0165.patch 只修改原生 state crate 的迁移适配和对应测试，不修改 SQL 源文件或 SQLx。Windows 全新 profile 按同版本官方 App 的 CRLF SQL 执行并记录其 SHA384；已有迁移只接受同一 SQL 的 LF / CRLF 两个精确身份，在内存中选取相应 SQL 和校验值，不更新既有账本的 checksum 或用户行。旧 LF profile 后续才创建的辅助库从配置实际 primary 路径只读继承 LF，保留 P6 回退能力。未知内容和 dirty 迁移仍按 SQLx 拒绝，legacy38→39 修复和原有事务保持。
+固定 App 26.1023.6621.0 / native 0.165.0-alpha.1.2，上游 `720fec862a608ae1e5878d1eecb04fb93192e93c`。完整 prepared source 为 `1125f5c87733fb267177522de600918b06a0a41489543b57c721a3bcce6d7c56`，9,516 文件；锁为 `da4e194baa449c3caa4457021770876d4ddc5d663869995bd0fb1cae6eb497e6`，Cargo.lock 为 `7537da7c5e154334b15ef9b59091f5fed3a8e480b77c037e3a8b7f07d1614709`。Rust 1.99.1 / x86_64-pc-windows-msvc，当前实际 producer 使用正常 release profile、jobs1。
 
-已有 LF 账本不能由未经修改的 stock App 直接读取；本补丁不承诺任意旧、新或跨系统版本共享同一数据库。SQLx SQLite migration lock / unlock 是 no-op，不作额外互斥保证。当前只进行独立 codex-state 定向 unit 资格，四目标 producer、部署和 App 运行资格另行验收。
+七个补丁严格按锁排序：
+
+| 补丁 | SHA256 |
+| --- | --- |
+| windows-home-namespace-0165.patch | 1e436f88e4201e6e33bba7d509e43265071c321006efd360215a260bf643d83b |
+| mcp-keyring-isolation-0165.patch | 0cfe1ae48ab50ef8d930298c42cd7ee6d2de4277750cceacca7e5d2c2d0c8efc |
+| guardian-thread-context-0165.patch | 6f434a95d3e0dd34c501539c0b8b562ac8bb2efc2973edf42a3d659cf1eaca60 |
+| windows-cwd-ancestor-metadata-0165.patch | 9544c5b02e0e4e3546ba24fa1931b4e9592c5cf84d9ce0e7009b57868ac3c002 |
+| packaged-tectonic-materialization-0165.patch | e9585d91f7aa3db567c067a628040be8b4de2e594533e2af224a369731085fd7 |
+| guardian-provider-transport-0165.patch | 2d7504fcbfc86918c72eef7629760d590914b78c7bf705042e05f62749bacefe |
+| migration-checksum-eol-0165.patch | 707b87fceec61b5028a1566490dc5d2c6dca420b704be4e8193a1b33e9e479ec |
+
+它们处理 Windows home 命名空间、MCP 项目凭据隔离、Guardian 已持有内部上下文、cwd 必要属性权限、官方 Tectonic 物化、Guardian 尊重 provider transport、SQL 迁移换行兼容。不重写 agent loop、审批器、工具调度、压缩或工作树业务，也不改闭源 App。
+
+P7 的迁移补丁不改 SQL 文件、SQLx 或已有账本。只承认同一 SQL 的已知 LF/CRLF 身份，保持已有 representation 和用户数据；空辅助库按已证明 primary hint 建立，新全空 Windows profile 用官方 CRLF。未知内容和 dirty 仍失败。SQLx SQLite lock/unlock 为 no-op，不能宣称额外互斥。旧 LF profile 不因此自动变成可由未修改 stock 读取；fresh stock 互读与生产旧 LF 保留分别实测。
+
+### 实际四产品与公共分发
+
+| 文件 | 字节 | SHA256 |
+| --- | ---: | --- |
+| codex.exe | 409374720 | d4ba603ccd287f4ce7ae863d9a0e0e02c2f37c2fa594d6a5ddea4df699a7b202 |
+| codex-command-runner.exe | 10890240 | 51c572ccf12509d047bce52d213187c1c7cd6d2ee41b6fd7f5b4b33361fd483c |
+| codex-windows-sandbox-setup.exe | 19425792 | 9ad3ec4a7fdb941652ff4ca568253f62bae27e44c2fd81c2cb0a393bea4db60d |
+| codex-windows-managed-deny-probe.exe | 251392 | 403c3ecbe6a012e46e174a3eeb5fd55e5d6b5852df1c92211fdb6dc5c3012bd6 |
+
+标准 producer 的同一次实际 Cargo 命令成功生成四产品；中途资源失败记录仍保留。标准 package 之后核完整 source、raw producer、四文件 SHA/size、license 和全库存；packager distribution 中的 `native_build_executed=false` 仅说明装配层没有重新编译，不能据此抹去独立 producer 的实际编译。
+
+公共 raw manifest SHA256 为 `4cd522fbdf4fede602a30537cbbfca0fd53ab36c6e8f49ea8bfd8ff50966683e`；tar SHA256 为 `32b380bdeb24a09f223af9e037576566ade11018a083b90b472c75b3c58da03c`，142,231,452 字节、3,037 个普通成员。1,122 个 crate 的许可条目及 19 份 SPDX 文本与实际来源/目标 notice 字节、Git alias/provenance 校验分层完成；不跳过合法许可或放宽外部 redirect 守卫。
+
+这个公共包**没有闭源 App/Code Mode host**。用户先把原 tar 解压到新永久版本目录，再正常 app-prepare-runtime。prepare 就地从匹配签名 App 物化 host `510687c53c57f52dbf105b8b0050f595d255ab6dafc968c00940c782aa5141c2` 并写本机 prepared manifest。不要绑定测试 output，不将 prepared 目录重新当作 pristine 公共 tar 上传。安装步骤见 [Windows quickstart](windows-quickstart.md)。
+
+实际 App 已加载永久 P7，旧会话/存储保留、fresh CRLF→stock→P7 互读及网页任务有新证据；媒体 typed 输入/provider 接受与 App 内嵌 PDF 预览已有本组合正向；宿主 JSON 拒读已归因为验收夹具漏目录继承，在正确新目录完成原生写入/双身份读取，未改 runtime 或原错误文件。编译/装配、state unit、GUI/模型任务均不互相替代。完整状态见 [qualification-status](qualification-status.md)。
 
 ## P6 构建前资格（R224 历史记录）
 
@@ -16,7 +47,7 @@ R224 该阶段的 active lock 为五补丁 P5：5bfdec0bc745a3a31e209078b1424d9f
 
 P6 在 P5 后追加 guardian-provider-transport-0165.patch（SHA256 2d7504fcbfc86918c72eef7629760d590914b78c7bf705042e05f62749bacefe）。独立从已核验官方 720fec archive 重放六个补丁，得到完整源 5d10fd97306cd2d11a1bc5d4ae2327468240bb650639cc93c39d19b2b7b58edb /9516 文件；Cargo.lock 不变。此阶段只有来源重放和构建/打包软件资格，尚未生成新四目标产物、部署或进行 P6 App 验收。
 
-打包器只接受完整且有序的已知四、五、六补丁栈；不允许跳过 Tectonic 后直接添加 P6，或接受未知补丁。显式 --build-lock 在输入、staging、archive 使用同一精确锁和 SHA，而不是借用 active lock 的 patch 白名单。所有声明 patch 及原始锁都必须完整携带且校验相等。active lock 的晋升须由已确认旧 lease/构建终态的操作者统一完成；使用私有候选锁不意味着可以提前改现有 owner/source/target。
+打包器只接受完整且有序的已知四、五、六、七补丁栈；不允许跳过 Tectonic 后直接添加 P6，或接受未知补丁。显式 --build-lock 在输入、staging、archive 使用同一精确锁和 SHA，而不是借用 active lock 的 patch 白名单。所有声明 patch 及原始锁都必须完整携带且校验相等。active lock 的晋升须由已确认旧 lease/构建终态的操作者统一完成；使用私有候选锁不意味着可以提前改现有 owner/source/target。
 
 本轮 139 项离线构建/打包检查通过；其中 main 集成使用明确的模拟 Cargo metadata 和测试输出，不调用 Cargo、编译器、App 或模型，不能当作真实 producer。标准 builder 本身没有 patch 数量硬编码，仍只允许一条锁定的四目标 Cargo 命令。
 
@@ -51,6 +82,8 @@ P6 在 P5 后追加 guardian-provider-transport-0165.patch（SHA256 2d7504fcbfc8
 它们不重写agent loop、审批器、工具执行器、压缩或智能体持久化。父目录补丁只补必要的原生读取属性物化；public thread lookup仍保持限制。
 
 ## 先单测、后冻结、再构建
+
+贡献/验收夹具：新目录调用 `_private(path, directory=True)` 以保留可继承的宿主权限；不要把按文件模式创建目录的夹具错误当 runtime 缺陷，保原失败并用正确新夹具复验。
 
 修改原生代码时先在该确切prepared tree运行相关Rust单测，并审查真实断言都执行；再导出patch、更新完整source指纹和锁，运行当前真实锁的Python构建/打包合同检查，最后才构建四目标。不要用“编译成功”代替尚未运行的单测，也不要先编40分钟再发现fixture失败。
 
@@ -101,7 +134,7 @@ $env:CARGO_PROFILE_RELEASE_CODEGEN_UNITS = '16'
 cargo build --locked --release -p codex-cli -p codex-windows-sandbox --bin codex --bin codex-command-runner --bin codex-windows-sandbox-setup --bin codex-windows-managed-deny-probe
 ~~~
 
-使用两jobs、below-normal优先级、无incremental/debug、无LTO、16 codegen units。只选择四个target，不用--bins。构建前后核完整树、archive、锁和patch SHA，原始manifest始终标built-not-app-qualified。
+并发按正常 --jobs1/2 显式选择，锁定最大2；当前P7实际jobs1。使用below-normal优先级、无incremental/debug、无LTO、16 codegen units。只选择四个target，不用--bins。构建前后核完整树、archive、锁和patch SHA，原始manifest始终标built-not-app-qualified。
 
 显式--cache-dir可复用本项目已有Cargo/target缓存，不搬源路径、不清空缓存。输入锁变化只允许--transition-from-lock OLD_SHA的标准CAS：旧构建必须终态，真实现有source已匹配新锁，固定原路径/mtime，拒绝redirect/reparse/hardlink风险，按旧记录内容保存owner/report/source-manifest三份备份，再换owner。默认路径仍严格，不采用旧mtime-reference/ABA做法。不降低磁盘guard或并行占用同一cache。
 
@@ -122,7 +155,7 @@ cargo build --locked --release -p codex-cli -p codex-windows-sandbox --bin codex
 
 先创建输出父目录，stage/evidence自身必须是新路径。公共组装要求源码干净且已提交；development qualification不冒充公开发行。输出记录固定依赖license与来源，不导出私有请求或构建机凭据。
 
-当前raw归档3034个文件已逐成员对照分发目录SHA/size，无链接、越界或重复。它仍不代表完整App通过。正常app-prepare-runtime从用户本机固定官方App复制匹配sidecar；该prepared目录含闭源资源，不能重新打成公共包。
+上述历史P4 raw归档的3034文件记录只属于该旧阶段；当前P7为本页顶部绑定的3037成员，不能混用资产。它仍不代表完整App通过。正常app-prepare-runtime从用户本机固定官方App复制匹配sidecar；该prepared目录含闭源资源，不能重新打成公共包。
 
 真实App还要验证官方包/普通用户/实际加载路径、权限、工具、会话和故障恢复。更新工具链、App、patch、metadata或依赖都会形成新的待验证组合。早期候选和失败仅见[历史摘要](qualification-history.md)。
 

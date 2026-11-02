@@ -1,181 +1,87 @@
-# Codex App DeepSeek Gateway
+# Codex App DeepSeek Gateway（CADSG）
 
-让官方 Codex 桌面 App 使用固定版本的 DeepSeek，并继续由 Codex 原生运行时管理任务、子智能体、工具、权限、沙箱和会话。
+让官方 **Codex 桌面 App 使用固定版本 DeepSeek**。界面、主任务、原生子智能体、工具、审批、沙箱、终端、会话和恢复仍由 Codex 管理；CADSG 连接模型协议、传输、认证和明确的数据后端。必要的开源 runtime 补丁集中在兼容边界，不另写 agent loop、审批器或工具执行器。
 
-**当前仍在最终验收，尚未稳定发布。** 已关闭的机制、有限范围的通过和剩余项目分开列在[验收状态](docs/qualification-status.md)。安装版能启动、模型能回复、软件测试通过，都不能单独证明完整等价。
-
-本轮实际App问答、代码审查、认证刷新、完整GUI工作树恢复及相同产品安装生命周期见[真实结果](docs/qualification-r219.md)和[后续补充](docs/qualification-r220.md)。原生浏览器/桌面控制及secondary恢复工具的未关闭问题仍明确列出。
-
-本项目的“等价”是固定 App 在该 Windows 环境下实际支持的本地 runtime 能力。模型推理质量、模型自身模态限制和 OpenAI 私有云账户权益分别说明。
-
-~~~text
-你在官方 Codex App 中交付一个工程任务
-                  |
-      原生主任务 -> 子智能体 -> 孙智能体
-                  |
-     原生工具 / 审批 / 沙箱 / 终端 / diff
-                  |
-          原生模型请求与工具历史
-                  v
-       本机专用 DeepSeek 网关
-        | Responses / SSE 协议适配
-        | 明确的主模型、辅助模型和提供方路由
-        +---------------------> OpenRouter -> 固定 DeepSeek
+```text
+官方 Codex App（独立 profile）
         |
-        + alpha/search -------> 显式配置的网页后端
-~~~
+        v
+Codex 原生 runtime + 固定最小补丁
+  | 任务 / 子智能体 / 工具 / 审批 / 沙箱 / 会话
+  |
+  +-- 模型请求 --> 本机 CADSG --> OpenRouter --> 固定 DeepSeek
+  |
+  +-- 原生 web.run --> 显式网页 / 图片索引 / 天气数据后端
+```
 
-网关负责翻译请求和结果。真正运行 shell、应用补丁、决定权限、管理原生智能体和保存任务的仍是 Codex。App 的原有界面和工具也继续来自用户本机安装的官方 App。
+本项目与 [CDS](https://github.com/0xZoharHuang/codex-deepseek-runtime) 独立：CDS 面向 CLI，CADSG 面向桌面 App。这里不通过 CDS 启动 App，不分发官方闭源 App，不迁移 OpenAI 会话；安装、数据和项目凭据项与现有 App/CDS 分开。
 
-## 和 CDS 有什么关系
+**固定组合的本地 runtime 验收已按分层证据关闭。** 软件、P7 实际加载与会话保留、fresh profile 互读、真实网页任务，以及 typed 图像输入、实际 App 内嵌 PDF 预览和正确目录的宿主输出读取分别有证据，原始失败仍保留。范围与最终交付状态见[资格索引](docs/qualification-status.md)；下载可用性由发行页与外部校验资产确认，不根据安装说明推断。
 
-[CDS](https://github.com/0xZoharHuang/codex-deepseek-runtime) 让 Codex CLI 使用 DeepSeek；本仓库让官方桌面 App 使用 DeepSeek。两者可以并行使用，安装目录、配置、会话、凭据项和进程归属独立。
+## 固定组合
 
-当前源码固定复用已发布 CDS 0.6.9 的六个纯协议模块，以及一个经验证的进程内 Windows Proactor 清理 helper，来源为固定公开提交 [a704174](https://github.com/0xZoharHuang/codex-deepseek-runtime/commit/a70417460d823a906ebc7274834e2412be1ebe53)。协议新增显式普通提供方参数；原有默认路由和特殊路由优先级保留。依赖由该精确公开源码在 Windows 离线构建，两次独立轮子字节一致，锁文件记录源码、模块、轮子及许可证摘要；该轮子不是 CDS 的公开发布资产。helper 只在明确的 HTTP 生命周期入口调用，不在导入时应用，不修改共享 Python 文件或事件循环策略。没有复制 CDS 启动器、线程管理、工具执行器或 agent loop，也不会通过 CDS 启动或接管桌面 App。
-
-## 当前固定组合
-
-| 项目 | 固定值 |
+| 项目 | 范围 |
 | --- | --- |
-| 已实测宿主 | Windows 10 Pro 19045，x64；普通交互用户 |
-| 官方 App | 26.1023.6621.0 |
-| 原生源码 | 0.165.0-alpha.1.2 / 720fec862a608ae1e5878d1eecb04fb93192e93c |
-| 当前原生候选 | O165；CLI SHA256 18ef99bac7865066e1e802521e0c0c058862956cc569a6abc193b2005fa36b7f |
-| 完整原生源码指纹 | 39d578673f2031097dfa82fd97b5126a492ea4ba3a692b565ab5fcaef4dce33f，9514 个文件 |
-| 模型请求 ID | deepseek/deepseek-v4.1-flash-1017 |
-| OpenRouter canonical 模型 ID | deepseek/deepseek-v4.1-flash-20261017 |
-| 已有安装版证据 | 产品 source 3229244；源码与安装版各 1541 项通过；当前包 manifest ff0e750049630d60e3a2537a0434b9694b7e3602cb4888f53a5355a1788c093f |
-| 最终发布包 | 尚未发布；当前开发包正在真实 App 最终验收，不能作为稳定发布下载 |
+| 宿主 | 已验证 Windows 10 x64，19045；目标用户的普通交互会话 |
+| Python | 本轮资格使用独立 CPython 3.13.3 x64；其他构建须按实际兼容检查 |
+| 官方 App | `26.1023.6621.0`，正常入口校验官方签名、包身份与资源 |
+| 原生 runtime | `0.165.0-alpha.1.2`；上游 `720fec862a608ae1e5878d1eecb04fb93192e93c`；P7 七补丁 |
+| 模型请求 ID | `deepseek/deepseek-v4.1-flash-1017` |
+| 上游版本身份 | `deepseek/deepseek-v4.1-flash-20261017` |
+| 协议依赖 | 已公开 CDS `0.6.9`，固定提交 `a70417460d823a906ebc7274834e2412be1ebe53` |
 
-当前实测是 Win10 的原生沙箱，不代表 Win11 MXC 或系统安全桌面/UAC。当前文档不把 Windows 的验收外推到 Linux/macOS 桌面 App。CDS 的跨平台资格由其独立仓库记录。App、runtime、依赖或模型版本变化后，需要重新核对兼容性和受影响机制。
+当前 Windows 结果不外推为 Linux/macOS 桌面 App、Win11 MXC 或系统安全桌面已验收。App 自动更新后需要重新确认组合，修改配置中的版本字符串不能代替兼容验证。
 
-## 四个必要的原生补丁
+## 开始使用
 
-补丁顺序和哈希固定在 [native/build-lock.json](native/build-lock.json)，四个原生可执行文件同源构建：
+完整的逐步命令在 **[Windows 安装与首次启动](docs/windows-quickstart.md)**。顺序是：
 
-1. Windows home 命名空间：避免多个独立 CODEX_HOME 共用固定沙箱账号和资源，保留原生 setup、token、runner、权限和生命周期。
-2. MCP Direct 凭据隔离：按本项目的 canonical home 隔离原生 Direct 凭据；同一 home 的原生 Secrets 主密钥合同保持。
-3. Guardian 内部上下文：让内部记忆和审核工作使用已持有的原生授权上下文；公共线程查询仍不暴露内部线程，不改变审批决定规则。
-4. Windows 工作树父目录元数据：在正常原生 setup 物化阶段，对当前授权 cwd 所需的自有父链补充不继承的读取属性权限。它不授予列目录或文件写权限，也不替代原生叶目录权限。
+1. 从 [v0.1.0 发行页](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/releases/tag/v0.1.0) 获取网关包、原生包和外部 `SHA256SUMS.json`，核对下载字节；下载可用性与最终发布状态以该页为准。
+2. 用独立 Python 3.13 正常 Install，再显式 Activate；`setup-credentials` 将 key 写入当前 Windows 用户的项目专用凭据存储。
+3. **把已核原生 tar 解压到永久版本目录**，再 prepare / bind。prepare 在该目录物化本机官方 Code Mode host，不能把生产绑定指向临时 build output。
+4. 从这次原生二进制的 `debug models --bundled` 生成匹配 catalog，正常 app-configure、service-start、app-check、app-launch。
 
-旧 0.163 的容量扩展和压缩补丁不移植进 O165。当前的压缩、审批、工具调度和原生智能体机制使用固定上游实现。构建与来源见[原生构建](docs/native-build.md)。
+```text
+%LOCALAPPDATA%\codex-app-deepseek-gateway\
+  managed-install\releases\<release ID>\venv
+  native-runtimes\<不可变版本目录>
+  gateway.json / protocol.sqlite / web-data
+%LOCALAPPDATA%\codex-app-deepseek-app\
+  config.toml / sessions / electron-user-data
+```
 
-## 安装前准备
+安装不会直接启动 App。按普通权限运行；不要复用其他 App/CDS 的 Python 或 venv，不改全局 PATH/代理，不全局结束 `codex.exe`。若启动返回 pending、timeout 或 unknown，先用 **同一次 `app-status` / 实际 run ID** 回读，不能据此重复 launch。
 
-使用目标 Windows 用户的普通 PowerShell。管理员账户也按非提升权限使用；不要把日常安装目录建成其他用户或提升权限主体所有。
+## 模型与数据后端
 
-需要已安装并可验证签名的固定官方 App、独立 Python 3.13，以及完整、经过发布 SHA256 核验的网关离线包和原生包。此仓库不分发官方闭源 App，也不把本机复制的 Code Mode Host 打进公共原生包。
+普通请求默认 `deepseek`。可在排空任务、正常停止本项目服务后，明确选择已允许的 `ordinary_default_provider: "morph/fp8"`；这是同一个固定模型的显式兼容提供方，失败不会自动切换。严格 schema、特定原生历史和显式串行工具有各自固定路线，不能靠改变工具语义规避失败。操作与健康检查见[安装指南](docs/windows-quickstart.md#模型和网页后端)。
 
-下面命令的文件名和参数对应当前正式入口。发布前，下载地址和可信哈希必须由最终发行记录补齐；不要把本地现算的哈希当成来源信任。
+文本后端可选 `openrouter_exa` 或 `firecrawl`；图片可选关闭、`wikimedia_commons` 或 `firecrawl`。Firecrawl 图片要求文本后端也选 Firecrawl。后端不在失败后隐式互换；keyless 服务的配额、限速和可用性由服务方决定。
 
-## 首次安装
+- recency 连接到 **UTC 日历日期范围**，不承诺精确滚动时间窗或服务端日期准确率。
+- 城市/国家是地理偏置，**不是地理围栏**；原始 query 不追加地点。
+- 搜索 timezone、图片 recency 明确 unsupported。图片 live/cached/indexed 的索引元数据不等于图片缓存快照、索引新鲜度或像素已取回。
+- open/find/click、引用归属、错误、取消和恢复仍属于本地 runtime 接线；不能统统归入“云权益”而排除。
+- 天气是带来源的 forecast，不是实时传感器观测。金融报价、体育等 OpenAI 私有 typed feeds 未接入，普通网页片段不冒充这些接口。
 
-解压网关包与原生包到不同的自有永久目录。示例采用默认安装位置，不修改全局 PATH：
+参见[网页合同](docs/firecrawl-search.md)、[天气](docs/weather-service.md)和[图片传输](docs/media-transport.md)。图片 URL/元数据、实际像素传输、App 显示和模型视觉理解是不同层；模型本身的视觉质量不由网关创造。
 
-~~~powershell
-$bundle = 'C:\CADSG\gateway-release'
-$nativeInput = 'C:\CADSG\native'
-$basePython = 'C:\Path\To\IndependentPython313\python.exe'
-$installer = Join-Path $bundle 'install_gateway.ps1'
-$gatewaySha = 'ff0e750049630d60e3a2537a0434b9694b7e3602cb4888f53a5355a1788c093f'
-$rawNativeSha = '0bd930c845f94a6e46a05dc79af5a40cda172b20a4f6338ca8cfcc3c7fe07893'
+## 日常状态、升级与回退
 
-$install = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer -Action Install -ManifestPath (Join-Path $bundle 'release.json') -ManifestSha256 $gatewaySha -Wheelhouse (Join-Path $bundle 'wheels') -PythonExe $basePython | ConvertFrom-Json
-& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer -Action Activate -ReleaseId $install.release_id
-$cdag = $install.command
-$python = Join-Path (Split-Path -Parent $cdag) 'python.exe'
-& $cdag --version
-& $cdag setup-credentials
-~~~
-
-setup-credentials 在交互界面读取 OpenRouter key，保存到 Windows 专用凭据项。不要把 key 放入参数、App 提示或仓库。导入 CDS 凭据是单独显式选项，首次独立安装无需读取 CDS。
-
-正常关闭本项目使用的 App 实例，再准备和绑定原生包：
-
-~~~powershell
-$prepared = & $cdag app-prepare-runtime --native-manifest (Join-Path $nativeInput 'manifest.json') --native-manifest-sha256 $rawNativeSha | ConvertFrom-Json
-& $cdag app-bind --native-manifest $prepared.manifest --native-manifest-sha256 $prepared.manifest_sha256
-~~~
-
-prepare 核验本机官方 App 和原生包，复制匹配的官方 sidecar 到私有目录，并记录来源；它不启动 App。bind 保存明确的选择，不猜测其他安装目录。
-
-从绑定的原生版本生成保留其能力元数据的模型目录：
-
-~~~powershell
-$native = Join-Path (Split-Path -Parent $prepared.manifest) 'codex.exe'
-$bundled = Join-Path $nativeInput 'bundled-models.json'
-$catalog = Join-Path $nativeInput 'deepseek-catalog.json'
-$nativeVersion = (& $native --version).Trim()
-
-& $python -I -c "import subprocess,sys;from pathlib import Path;raw=subprocess.run([sys.argv[1],'debug','models','--bundled'],check=True,stdout=subprocess.PIPE).stdout;Path(sys.argv[2]).open('xb').write(raw)" $native $bundled
-& $python -I -c "import json,sys;from pathlib import Path;from codex_app_deepseek.catalog import build_catalog;s=json.loads(Path(sys.argv[1]).read_text(encoding='utf-8-sig'));v=build_catalog(s,native_version=sys.argv[3]);Path(sys.argv[2]).open('x',encoding='utf-8',newline='\n').write(json.dumps(v,ensure_ascii=False,indent=2)+'\n')" $bundled $catalog $nativeVersion
-
-$catalogSha = (Get-FileHash -LiteralPath $catalog -Algorithm SHA256).Hash.ToLowerInvariant()
-& $cdag app-configure --catalog $catalog --catalog-sha256 $catalogSha --port 42817
-& $cdag service-start --port 42817
-& $cdag app-check
-& $cdag app-launch --observation-seconds 120 --wait-seconds 120
-& $cdag app-status
-~~~
-
-上述 --bundled 只读该二进制内嵌目录；该分支不创建在线模型或认证管理器。目录生成与配置不是能力通过证明。app-configure 通过原生 PluginManager 安装和启用官方 AppTools，记录独立回滚所有权；不靠复刻的 legacy MCP 定义替代官方工具。
-
-默认原生 agent 模式为 V2。V1 可通过匹配目录及显式参数为新会话选择；已存在会话保留自身记录，不隐式迁移。重启后 list_agents 只列已加载原生线程，也不等于旧子会话丢失；原生已知路径可懒恢复原 UUID。
-
-详细的身份条件、独立安装目录和升级步骤见[正式入口](docs/installed-app-entrypoints.md)与[安装生命周期](docs/lifecycle.md)。
-
-## 模型和网页服务
-
-主任务、子任务和显式辅助别名都请求固定 DeepSeek。新任务标题、线程描述、记忆和审核各有原生调用路径，未知模型名报错，不隐式换名。
-
-默认 App 策略明确允许三种同模型路由：普通请求默认 deepseek；原生严格结构化场景允许 morph/fp8；显式串行工具语义允许 primeintellect。项目自己的 `gateway.json` 可显式设置 `"ordinary_default_provider": "morph/fp8"`，且该路由必须已在 `allowed_providers` 中。省略字段继续使用 deepseek；字段只改变普通请求，不覆盖串行、严格结构化或原生历史的特殊路由优先级。配置在服务启动时读为不可变快照，修改后须通过本项目的显式停止、启动流程加载，App preflight 会核对服务报告的选择和配置摘要。请求失败不会自动换提供方，不读取环境变量选择提供方。实际服务商与请求路由分开记录，不能把 provider.only 当成实际服务商证明。
-
-原生 web.run 的执行、引用和事件机制继续保留，网页检索和抓取服务由显式后端提供。搜索、打开、页内查找、跟随链接仍属于验收范围；无法表达的模式或约束必须明确失败，不默默改成无过滤搜索。后端和凭据见[网页路径](docs/web-runtime-path.md)。Firecrawl 目前使用有额度和速率限制的官方 keyless 服务，不承诺生产 SLA；时区地理偏置、日期精度等限制见[后端合同](docs/firecrawl-search.md)，不支持的约束不会悄悄丢掉。web.run、网页预览与 App 内置浏览器/计算机交互是不同能力。
-
-模型质量、模型未具备的模态、金融报价/体育等 OpenAI 私有云数据服务和账户权益不包含在本地 runtime 等价中。App IAB/计算机工具仍需按[验收状态](docs/qualification-status.md)关闭，不能用云权益边界掩盖本地能力缺口。
-
-## 日常使用、诊断与恢复
-
-~~~powershell
-& $cdag service-start
-& $cdag diagnose
-& $cdag app-check
-& $cdag app-launch --observation-seconds 120 --wait-seconds 120
-& $cdag app-status
+```powershell
+& $cdag diagnose --install-root $managed
 & $cdag health --port 42817
-~~~
+& $cdag app-status --install-root $managed
+```
 
-health 只验证本地网关，不发模型请求。启动观察超时不等于进程不存在；先读 app-status 和原 run receipt，不要重复启动或按 codex.exe 名字全局结束进程。auth-token 的 stdout 是本地凭据，不应粘贴到日志。service.json 的 configured_baseline 只是策略声明，可能保留早期配置值；实际加载版本以绑定清单和 App/native 进程路径、出生时间及哈希读回为准。
+`diagnose` 描述磁盘配置/版本，health 描述运行服务加载的配置，实际 App/native 路径与哈希才证明加载了哪个 runtime。三者不能互相代替，也不代表模型 generation 已成功。
 
-| 现象 | 正常处理 |
-| --- | --- |
-| App 更新后不兼容 | 保留现有会话，停止使用旧组合，重新验证固定 App/runtime/catalog；不接受未知版本继续运行。 |
-| 未知模型、字段或工具历史语义 | 查明确错误和本次请求回执；不要删字段、伪造工具成功或换模型绕过。 |
-| 主工作树不能直接归档 | 这是原生保护。归档原任务并等待清理完成；恢复任务后使用正常 Restore worktree 入口。 |
-| Git 快照/归档 commit-tree 128 | 自己的仓库需要合法 Git author/committer 身份。按用户意愿配置该仓库或自己的 Git；CADSG 不自动写全局身份，也不把失败算成功。 |
-| 工作树恢复或队列仍待完成 | 先读本次原生状态和日志；不要重复 Archive、改队列或手工删除目录。 |
+升级先排空任务、正常退出本项目 App、停止本项目服务，保留旧 release、原生目录、绑定和检查点，再按正常入口安装/选择新版本。Rollback 恢复登记的 App 配置，不自动切回旧 gateway release；卸载默认保留会话、工程、凭据和数据。完整步骤及冲突处理见[升级、回滚与卸载](docs/windows-quickstart.md#升级回滚与卸载)。不要用旧数据库或整份旧配置覆盖后来工作。
 
-## 升级、回滚与卸载
+## 来源与交付
 
-升级采用新目录安装与显式 Activate。先正常关闭本项目 App，再保留旧包、原生目录、绑定及配置检查点；为新版本重新 prepare/bind/configure/check。升级不下载或替换未知 runtime，也不覆盖其他用户的 App。
+六个纯协议模块和一个带 PSF 许可的 process-local Windows HTTP 清理 helper 来自固定 CDS；不复用其 launcher、监督器、线程管理或工具执行。依赖锁、原生补丁、许可证和实际范围见[原生构建](docs/native-build.md)、[依赖清单](release/dependencies.windows-py313.json)及[验收状态](docs/qualification-status.md)。
 
-~~~powershell
-& $cdag service-stop
-# 先通过 App 正常退出本项目实例，再执行：
-& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer -Action Rollback
-# 完整卸载使用同一已校验安装器：
-& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer -Action Uninstall
-~~~
+最终交付索引是 **[资格状态页](docs/qualification-status.md) + 发行页外部 `SHA256SUMS.json`**。后者作为单独资产在最终归档后生成，不回写参与 wheel METADATA 的源码或被其校验的 zip/tar；README 不硬编码自身网关包或 manifest 的哈希。先从可信仓库发行渠道取得索引，再核下载文件；本地现算一个 hash 只能证明本地字节，不能自证来源可信。
 
-回滚按项目拥有的字段和检查点恢复，保留后来由用户修改的内容；冲突明确报告。卸载使用原生 sandbox uninstall 清理本项目资源，不另写账号/权限管理器。用户工程、会话、凭据和原生按合同保留的文件系统权限不会被笼统清空；不承诺复原整张历史 DACL。
-
-专用 App home、协议数据库、网页引用、图片状态和原始诊断属于私有工作数据。公开问题只提供去敏摘要与哈希。当前验收未关闭前不发布“全通过”，也不把旧组合的通过延伸到新版本。
-
-
-## 显式 Firecrawl 图片元数据
-
-在本项目的 gateway.json 中同时设置 web_search_backend 和 image_search_backend 为 firecrawl，才选择官方 Firecrawl 图片索引。现有 null/Wikimedia 选择保持不变，请求失败不会切换提供方；本路由不读取额外账号或 key。
-
-图片查询保留原 query 和 domain policy，以真正的 location/country 服务字段表达城市偏置。文本 recency 使用文档规定的 tbs；图片 recency 和搜索 timezone 仍在网络请求前明确报错。live/cached/indexed 图片查询只读取搜索索引元数据，不传 scrapeOptions、不抓取目标页面、不下载图片；这不承诺归档快照或索引新鲜度。后续 open/fetch 继续执行各自的 cached/indexed 访问限制。
-
-Firecrawl 图片 URL 是未信任元数据和原生 Markdown 引用，执行公共 URL 语法及 blocked-domain 校验。未知尺寸、作者、许可均不编造，不把 Wikimedia 的开放许可或 CDN 信任转给 Firecrawl；Wikimedia 自己的来源/CDN 检查保留。Codex App 的 remote-image/url_safe/authentication 控制不变，元数据或 Markdown 返回本身不等于 rich rendering 已验收。
+原始回执、会话、配置备份和请求上下文私有保留，不上传 key、token 或完整模型上下文。已知原版 Windows `restore_worktree` 缺陷保留为负向基线，不宣称 Restore 正向通过。
