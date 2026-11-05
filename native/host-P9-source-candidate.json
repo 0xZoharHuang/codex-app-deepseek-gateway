@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "status": "P9_source_proposal_only_not_typechecked_or_native_App_qualified",
+  "candidate": "P9",
+  "candidate_revision": "O165",
+  "native_version": "0.165.0-alpha.1.2",
+  "upstream_commit": "720fec862a608ae1e5878d1eecb04fb93192e93c",
+  "base_P8_lock_archive": "build-lock.O165-P8-source.json",
+  "base_P8_lock_sha256": "9d918cfc5a694b91463cf724deed26bfaecce1a48bea63c362c2814f1eb7fcb4",
+  "base_P7_lock_archive": "build-lock.O165-P7-original.json",
+  "candidate_lock_sha256": "b50a9d41b30c902a77fa4fa7193b5a4e1a1d62117341c73c5768bf407b7af309",
+  "prepared_source_sha256": "495125857fc45dc71a780d16832f2b2132ad129aea72f0353ebd12adeafc0c9b",
+  "prepared_source_files": 9518,
+  "cargo_lock_sha256": "24ec41c0cad0145b14a2cda3a5b343540dfcb7043c24bef32a65ae46edc7f980",
+  "patches": [
+    {
+      "file": "windows-home-namespace-0165.patch",
+      "sha256": "1e436f88e4201e6e33bba7d509e43265071c321006efd360215a260bf643d83b"
+    },
+    {
+      "file": "mcp-keyring-isolation-0165.patch",
+      "sha256": "0cfe1ae48ab50ef8d930298c42cd7ee6d2de4277750cceacca7e5d2c2d0c8efc"
+    },
+    {
+      "file": "guardian-thread-context-0165.patch",
+      "sha256": "6f434a95d3e0dd34c501539c0b8b562ac8bb2efc2973edf42a3d659cf1eaca60"
+    },
+    {
+      "file": "windows-cwd-ancestor-metadata-0165.patch",
+      "sha256": "9544c5b02e0e4e3546ba24fa1931b4e9592c5cf84d9ce0e7009b57868ac3c002"
+    },
+    {
+      "file": "packaged-tectonic-materialization-0165.patch",
+      "sha256": "e9585d91f7aa3db567c067a628040be8b4de2e594533e2af224a369731085fd7"
+    },
+    {
+      "file": "guardian-provider-transport-0165.patch",
+      "sha256": "2d7504fcbfc86918c72eef7629760d590914b78c7bf705042e05f62749bacefe"
+    },
+    {
+      "file": "migration-checksum-eol-0165.patch",
+      "sha256": "707b87fceec61b5028a1566490dc5d2c6dca420b704be4e8193a1b33e9e479ec"
+    },
+    {
+      "file": "cadsg-request-capacity-port-0165.patch",
+      "sha256": "0804fb004cbb8bcba5fcf1e29e542ee29c002c49ce3f05818eb7dbde76d3e564"
+    },
+    {
+      "file": "cadsg-request-capacity-cancel-0165.patch",
+      "sha256": "63beeb01233e21431513fcdb063e7565423790e731febfce12b249bb2e3ee225"
+    },
+    {
+      "file": "windows-host-boundaries-0165.patch",
+      "sha256": "c92180906b471db6c39ecbd057cb928b1071153c1fe57c02bb69cf6ffb0656df"
+    }
+  ],
+  "host_source_upstream_patch_sha256": "36c4a9a964c98d3998abfe99846f3cbf34b0b3982046e7c5eef3724b01a31087",
+  "host_0165_patch_sha256": "c92180906b471db6c39ecbd057cb928b1071153c1fe57c02bb69cf6ffb0656df",
+  "host_scope": [
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/private_acl_lock.rs",
+      "before_sha256": "b83c9c39f03115b98279e35eeb1c5cd422bc4632e087a44e83b2391c5f3d9581",
+      "after_sha256": "903c6e08fe7c1d51fb3f7f5f27c95df9f3250e696d55ea4f825f76653083a24c",
+      "after_size": 12790
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/identity.rs",
+      "before_sha256": "65b9bee593a3a45ef5c160c9b419db060e48e41d4694605522a2e1fa97483f63",
+      "after_sha256": "f2b5f86a7023936a3df078426440a2bfb11973ab3bbe46004af7328cca3151f4",
+      "after_size": 29980
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/setup.rs",
+      "before_sha256": "d854d1b6009e3cb4f595b0413da0817a6073b69af670280a8a010178fc5c9727",
+      "after_sha256": "56ec70392eda033536496340748d2525dd634de5aa69f1f8057a993fbee94b7c",
+      "after_size": 99718
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/desktop.rs",
+      "before_sha256": "41be4a90c585cd68889596db36fae693e2425b2350913886be03cc8d33b20b22",
+      "after_sha256": "7479dce9ccde812fd5ac37ac794f051467bfe1ac10aab7f44fd36c1027809c5b",
+      "after_size": 22670
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/elevated/runner_client.rs",
+      "before_sha256": "07cdc54ac4eddcfcd9667808a902ee8932adaf9c08fb25e601542adb1c63ebfb",
+      "after_sha256": "fd911d600528eb17a80a4068ffacb09835e344f5fab7ecbc11ba5e080cf032e8",
+      "after_size": 28609
+    }
+  ],
+  "textual_conflicts": 0,
+  "semantic_adaptations": [
+    {
+      "file": "identity.rs tests",
+      "issue": "CDS test fixture constructed namespace fields absent on native0.165 SetupMarker and SandboxUsersFile",
+      "resolution": "Build exact namespace-bearing on-disk JSON Value fixture; mutate only username/version in JSON Value to preserve ownership sidecar and negative-test isolation; public struct/schema/current-user runtime behavior unchanged."
+    }
+  ],
+  "source_inventory_method": "P8 derived rich map plus only five exact host after hashes/sizes; no fresh full scan or full source copy",
+  "required_native_mechanism_nodes": [
+    "private_acl_lock::tests::private_policy_canonical_owner_does_not_duplicate_system_or_admin_sid",
+    "private_acl_lock::tests::private_policy_ordinary_owner_keeps_exact_three_principals_and_rights",
+    "identity::tests::setup_readiness_explicit_target_does_not_adopt_maintenance_caller_namespace",
+    "identity::tests::setup_readiness_explicit_target_rejects_wrong_names_and_version",
+    "desktop::bootstrap_startup_name_tests::session0_bootstrap_preserves_actual_service_station",
+    "desktop::bootstrap_startup_name_tests::session0_bootstrap_preserves_interactive_station_without_assuming_it",
+    "desktop::bootstrap_startup_name_tests::session0_bootstrap_preserves_exact_station_utf16",
+    "desktop::bootstrap_startup_name_tests::session0_bootstrap_rejects_empty_injected_or_oversized_station",
+    "desktop::bootstrap_startup_name_tests::session0_bootstrap_rejects_default_and_injected_private_names",
+    "elevated::runner_client::startup_observation_tests::session0_bootstrap_reports_only_actual_signaled_exit_code",
+    "elevated::runner_client::startup_observation_tests::session0_bootstrap_still_active_does_not_query_or_invent_exit",
+    "elevated::runner_client::startup_observation_tests::session0_bootstrap_wait_failure_is_not_an_exit_code",
+    "elevated::runner_client::startup_observation_tests::session0_bootstrap_exit_query_failure_retains_its_own_error",
+    "elevated::runner_client::startup_observation_tests::session0_bootstrap_unexpected_wait_is_explicit",
+    "elevated::runner_client::startup_observation_tests::session0_bootstrap_diagnostic_context_preserves_original_classification",
+    "setup::tests::setup_completion_requires_ready_artifacts"
+  ],
+  "native_nodes_source_derived_not_binary_verified": true,
+  "compiled": false,
+  "native_unit_executed": false,
+  "service_station_qualified": false,
+  "App_GUI_qualified": false,
+  "CDS_unit16_pass_does_not_qualify_this_native0165_port": true,
+  "release_packaging_gate": "Unchanged strict5/6/7 topology rejects both P8 and P9 source candidates; no P7 binary evidence reused"
+}

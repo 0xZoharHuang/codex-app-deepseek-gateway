@@ -1,0 +1,534 @@
+{
+  "status": "SOURCE_PROPOSAL_NOT_COMPILED_NOT_DEPLOYED",
+  "candidate_lock": "native/build-lock.O165-P12-source.json",
+  "candidate_lock_sha256": "cecc84b030c9e696dbf02d00091d9e17f40318bfead10b61ae1849aecf2f40d7",
+  "base_lock_sha256": "32923acc9502840d9bb38dfb77da1c0474100ddb7a72be61e1c9a6e836717499",
+  "patch": {
+    "file": "cadsg-native-service-restoration-0165.patch",
+    "sha256": "301fd81afcfd332e07230800c7ea8b0f93069eecfb503db1f68735a8b1b437ed"
+  },
+  "prepared_source_sha256": "503a27225346c4017bcf060909325c7a46d4fccd84c64db34d87340328d35d0e",
+  "prepared_source_files": 9525,
+  "derived_full_manifest": "Private qualification inventory; identifier retained by digest.",
+  "derived_full_manifest_sha256": "1a0ea47275e8ed59e9e7768613be603071a89e31fa41997caf7d421998fcffbe",
+  "fresh_full_inventory_performed": false,
+  "scope": [
+    {
+      "path": "codex-rs/Cargo.lock",
+      "before": {
+        "sha256": "24ec41c0cad0145b14a2cda3a5b343540dfcb7043c24bef32a65ae46edc7f980",
+        "size": 409540
+      },
+      "after": {
+        "sha256": "82d24e8abed4e4659b1d9be703a147e4c06959b79f0a369755083a05d2af7682",
+        "size": 409566
+      }
+    },
+    {
+      "path": "codex-rs/cli/src/main.rs",
+      "before": {
+        "sha256": "ac51c153916132c0be2c37ea1136562685b832957bc2e43e53d71608d0b28a4a",
+        "size": 185257
+      },
+      "after": {
+        "sha256": "ebb979e7ccc8e36c9bd60afc52d2487e4078da78e72da0b5d4a9c9691b81f7e0",
+        "size": 185340
+      }
+    },
+    {
+      "path": "codex-rs/code-mode-host/Cargo.toml",
+      "before": {
+        "sha256": "102bd33db5a318765e9c4259147f2e69cfb09ba51dd358aff19aa010019862cd",
+        "size": 1340
+      },
+      "after": {
+        "sha256": "c54f22b26580f81fafb1fc1b5b3f7c8d560182fe2a958546ab8d3d24d0c22ead",
+        "size": 1423
+      }
+    },
+    {
+      "path": "codex-rs/code-mode-host/src/main.rs",
+      "before": {
+        "sha256": "7cb4c1fbe7505228f3432452f00a77ebeb6a08380f3f272cc972faa426c140af",
+        "size": 4154
+      },
+      "after": {
+        "sha256": "528a4735b99a40164e69d8e8c92599b5561669bd244aa7483abf20ed1d543c6b",
+        "size": 4237
+      }
+    },
+    {
+      "path": "codex-rs/core/src/code_mode_host.rs",
+      "before": {
+        "sha256": "46041affb995e4907a95f5bc72b42f616e2b61191987d48538c2240d7403f674",
+        "size": 5847
+      },
+      "after": {
+        "sha256": "e7a66c11545f7a5041d96899413adf94d9961502e606e7f8b1ae3930890c97ab",
+        "size": 6030
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/app_package/project_mode.rs",
+      "before": null,
+      "after": {
+        "sha256": "5e052b94096abb48c1d457b7eedce0f53d5f108d6ca64adb98d37362e779a6bc",
+        "size": 6026
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/app_package.rs",
+      "before": {
+        "sha256": "5a39101121dc921ed10178c1b6f52253ed1159963e7462fe7424801a5c97756c",
+        "size": 9367
+      },
+      "after": {
+        "sha256": "be9bd83b3e1076b132a68493724b6e8de90fe347485f1ae22f67a06ce88ef192",
+        "size": 10328
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/app_package_tests.rs",
+      "before": {
+        "sha256": "d8da720dc4c48b05af968a22aa26bcf4e28d500c27de4d20449a54c5594ba1e0",
+        "size": 5644
+      },
+      "after": {
+        "sha256": "15adf8fc6ca0af28648e94707321925fd321e200b39af1268ee59de0866e3878",
+        "size": 5672
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/bin/command_runner/main.rs",
+      "before": {
+        "sha256": "69a1085f80b32e96e6cfaf699b8fb673bc59b236ab8b745957421c223a432161",
+        "size": 308
+      },
+      "after": {
+        "sha256": "a2c5d658ddf1e0fca3a1f4b00104bd9962adf5b36b7232dd05bb60f9d87fd55a",
+        "size": 371
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/identity.rs",
+      "before": {
+        "sha256": "f2b5f86a7023936a3df078426440a2bfb11973ab3bbe46004af7328cca3151f4",
+        "size": 29980
+      },
+      "after": {
+        "sha256": "2afb3ca886a89ccc61ba46cf99f85f516a4569d651b31531d755c206c79765be",
+        "size": 31716
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/installation_record.rs",
+      "before": {
+        "sha256": "f56bf16c340cf45a2178d60b8446c5127a3760a3d146383a9f78033fe73b8bdc",
+        "size": 3649
+      },
+      "after": {
+        "sha256": "7682166073266b05bdba16d14e093eb08d4d4e85ebdcb214b20a3b1362219e86",
+        "size": 3829
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/lib.rs",
+      "before": {
+        "sha256": "a6fd914def525979dc397a05ae6e102e8cd08d07f82ecbace90a47849890e28e",
+        "size": 37703
+      },
+      "after": {
+        "sha256": "7002495d2d692ddf13baac0acff86d8a26a411403ed9755fce7a89b44fc2f4bc",
+        "size": 38443
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/namespace.rs",
+      "before": {
+        "sha256": "2e2bea6e1d541cdd2a0f6b5f8f0c11f81d3e0b6ccabcf00ad4e791687da24ace",
+        "size": 11481
+      },
+      "after": {
+        "sha256": "c2ca1c329cdbabf5f9438f0ded236252df008eea9655e4b48a1c4db555bfbdfb",
+        "size": 12234
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/namespace_coordination.rs",
+      "before": {
+        "sha256": "d86a1f6f784f3dad03e4c170f7fb500cb2092d8901a9c28bddecd23237ad5bc7",
+        "size": 9331
+      },
+      "after": {
+        "sha256": "ab4f0730bc826f00170cc69ffd40e6b089140f74ab8b3941f6b0b3a0acb152af",
+        "size": 11848
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/namespace_key.rs",
+      "before": {
+        "sha256": "13466eb55b1c8bfb50fbf238fe9a192f5f44b5102c225e5930e5a80cb74b55bc",
+        "size": 8952
+      },
+      "after": {
+        "sha256": "fca2429185eeeb100fadb6ad8d6b69e3aed60d732f550bb1633a61be7e4fa945",
+        "size": 9074
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/provisioning_client.rs",
+      "before": {
+        "sha256": "ee0a9f610b7a147387afaa33b958c3bb993719640b611260b8679524683bb526",
+        "size": 15821
+      },
+      "after": {
+        "sha256": "50f3d191ea4737d88cbe60ed841fa1c36c2fbdb9ea619602453bea81e04d41da",
+        "size": 18477
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/provisioning_protocol.rs",
+      "before": {
+        "sha256": "05a09b1170701501121aee183110eb3ca6eaa178a3f3cbda47d32b45a0410013",
+        "size": 3233
+      },
+      "after": {
+        "sha256": "7cabf5f385a53cc0410823b5b6d595018e96b4e7358af27c6a11113ad383e701",
+        "size": 3234
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/runtime_ownership.rs",
+      "before": {
+        "sha256": "7b41010207ad5cd9f3822bac9962e4def6a66714f53944cd620d0845e9248f8d",
+        "size": 9278
+      },
+      "after": {
+        "sha256": "42a82a04d71ff969c5b5eac1d4946b08b6e632e816b2f088f23a5feea2cf74ed",
+        "size": 11311
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/runtime_ownership_tests.rs",
+      "before": {
+        "sha256": "2e123ac8254ef1426e619b99b96d0daac76c6753b9b7291d209fb2ee477583a1",
+        "size": 9098
+      },
+      "after": {
+        "sha256": "59ce7e714de0ea2b9f526e9348e78a1b64e3ea0f7d6bab78878457eb54db4689",
+        "size": 10618
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/service_identity.rs",
+      "before": {
+        "sha256": "ab644521f4b060898bfff1db7c8e732d825e50592c2b34babe34a007bdb0939a",
+        "size": 2427
+      },
+      "after": {
+        "sha256": "495124b11d8ae66280a62b535aaf8fedecf8a7f0b538319fe804c8aa673b96f0",
+        "size": 2427
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/setup.rs",
+      "before": {
+        "sha256": "56ec70392eda033536496340748d2525dd634de5aa69f1f8057a993fbee94b7c",
+        "size": 99718
+      },
+      "after": {
+        "sha256": "0a9f5814289be877c915d3979bb5d8399db9e660221bd4463b439c9b03ee225d",
+        "size": 99588
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/setup_provisioning/service.rs",
+      "before": {
+        "sha256": "b704a725687381c317054783e94b12742ec4fe253b98031eaac414512a317e89",
+        "size": 967
+      },
+      "after": {
+        "sha256": "969bcedbd640e36dcb9e4de05082b479e2eb31090c4e3c505274d0169eff8de7",
+        "size": 2065
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/setup_provisioning.rs",
+      "before": {
+        "sha256": "150b0142deba661bbf641344b051c55339d20156bf5795699de164a52136c459",
+        "size": 57530
+      },
+      "after": {
+        "sha256": "1d9043a09e760e5ffaea5ea1cd3c7f4b90d2ee41f00d1981b0147cbadaf8980a",
+        "size": 57440
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/uninstall_windows/principals.rs",
+      "before": {
+        "sha256": "3882bcdbb2680db0046fbf54944c934b20188ea60245c8004962400ddf485778",
+        "size": 6363
+      },
+      "after": {
+        "sha256": "32d6d2dceaffed520406632d7d5d55e9e90c2c3688d10a790fb66cd46f4c8471",
+        "size": 6465
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/uninstall_windows.rs",
+      "before": {
+        "sha256": "ee7d13f13bffba54394f20634d69feef614eb7f161633e0c01cf430a2275887a",
+        "size": 9138
+      },
+      "after": {
+        "sha256": "8c7f69ebbb64500153e1658450423a0c496b9b61e865271b0e88d2072e4f2c35",
+        "size": 10512
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-service/src/ipc/authentication.rs",
+      "before": {
+        "sha256": "6c319cbed52a7bc787b591f0ecb4764e8dc9237c7ad62c05d579239feee15a64",
+        "size": 9139
+      },
+      "after": {
+        "sha256": "914aa0904ac296a009161fc2b5dfd2f202b63759fd29f58ad97bb98cbd564d8a",
+        "size": 9537
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-service/src/ipc/listener.rs",
+      "before": {
+        "sha256": "8ed5460522ee988776085813e100730ef8d58415185202ab31d12dc269f33832",
+        "size": 4485
+      },
+      "after": {
+        "sha256": "68322a4067218091e7b1185dffebed9df51d68f967cb5a0f8b1cfcc8bbfbc1a7",
+        "size": 4715
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-service/src/ipc.rs",
+      "before": {
+        "sha256": "9bce1116ec3744c84bd3f3af1502e4d959c9d4c4fea5299d021d8b4c9fdc954a",
+        "size": 14363
+      },
+      "after": {
+        "sha256": "469cfd087462b44abc0c4844f10f3ab32a608d4f978c09f56f99802cc4fea3d4",
+        "size": 14492
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-service/src/package_identity/registered.rs",
+      "before": {
+        "sha256": "29482d1dc27f4dc3a58ee16c0c6424bfc64db9c9c9a8677568e4036caddc0dd5",
+        "size": 3096
+      },
+      "after": {
+        "sha256": "944666c59188d906ca2cc9d11b3b1b8eaaf1e5bc3d56e90549d5ed5cbede7ad4",
+        "size": 3301
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-service/src/package_lifecycle/cleanup.rs",
+      "before": {
+        "sha256": "91b1bcc281fa0bc921ea711c6014130f94295b18ba0d060d9b6033084fc0dd4b",
+        "size": 8090
+      },
+      "after": {
+        "sha256": "66fad94f20eb97b38f638e42f2e73c012b33c8bc363aeb39a444e03515096fc5",
+        "size": 8316
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-service/src/package_lifecycle/registered.rs",
+      "before": {
+        "sha256": "a1cac820d691f4e57d6d857e6796a10bed6ddb4c7a8f3abef186af3d2160c789",
+        "size": 5995
+      },
+      "after": {
+        "sha256": "caa9a3ddcc09b89c01d48ae59193ca74e0a5da9c3209d84dbb402ce36304f51b",
+        "size": 5996
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-service/src/package_lifecycle.rs",
+      "before": {
+        "sha256": "b90a41a126ae65602eecab8d67b2be926efe7dcfd1d64a515ce5cc4df9825020",
+        "size": 12398
+      },
+      "after": {
+        "sha256": "1f0037523a7e6ab01b13d283d51887bc867b540c8897a804e59512fa5762eecd",
+        "size": 13022
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-service/src/provisioning/registered.rs",
+      "before": {
+        "sha256": "ab3cb4a9029e6b9d2e59fca7756834f6fc1c4cee1db89b1fdb87715242a595af",
+        "size": 9583
+      },
+      "after": {
+        "sha256": "2563d858fe7468162c87dbaeca30f336cfa56022c0ecddd67affea47e58648fb",
+        "size": 9972
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-service/src/provisioning/registered_tests.rs",
+      "before": {
+        "sha256": "b2f9f65e5a2b0921285edf2b29d9ab82c2ef5fc9a8ebb5a873b910be70fa6dcc",
+        "size": 10191
+      },
+      "after": {
+        "sha256": "4ee13dac124aa46d083f622483e7adbcc41d351f46e645b034035dedba6cd16f",
+        "size": 10694
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-service/src/provisioning.rs",
+      "before": {
+        "sha256": "c16d4e9b676c3150a92cecdecd71fb724ebea45c72c4e9696e163d47a3f17e13",
+        "size": 4900
+      },
+      "after": {
+        "sha256": "6ace4ac0e496c8e308c2d96456dbf7f0109da6ef8b007eb01efa8c338c7228b4",
+        "size": 5020
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-service/src/registered_runtime/removal.rs",
+      "before": {
+        "sha256": "57d64c9ecdcef973a7271821f840a7251d3284266727ca02f2bafcb60606532c",
+        "size": 10912
+      },
+      "after": {
+        "sha256": "6759ebaf5d079613369316d19b45cc219502d988a66cebea8c047f61509912c9",
+        "size": 11158
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-service/src/registered_runtime.rs",
+      "before": {
+        "sha256": "e457f8b3f16729535465f1c1845bd1f035f8947d06cfcf9432542c807cacf40b",
+        "size": 13726
+      },
+      "after": {
+        "sha256": "64693204ccccd36afdd4fa3928095e9407db4b7c89a958567979a243523e6628",
+        "size": 14041
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-service/src/service.rs",
+      "before": {
+        "sha256": "11db7f2f827a7d339f51a59c585c4228bd0575f7c11ca0c25acaa0bfee63ab16",
+        "size": 13022
+      },
+      "after": {
+        "sha256": "0d8c466e5a403e8238f137358fd2299b5de1dcc21e6746d9729d7db6f5fb78af",
+        "size": 13022
+      }
+    }
+  ],
+  "source_overlay_bytes": "native/cadsg-native-service-restoration-0165.patch",
+  "sparse_apply_check": true,
+  "sparse_apply_all_after_bytes_match": true,
+  "rustfmt_parse_check": true,
+  "cargo_lock_sha256": "82d24e8abed4e4659b1d9be703a147e4c06959b79f0a369755083a05d2af7682",
+  "normal_build_profile_unchanged": true,
+  "normal_build_jobs_override": 1,
+  "required_native_nodes_source_derived": [
+    "context_manager::history::tests::request_capacity_restored_calls_use_native_aborted_outputs_without_mutating_live_history::function",
+    "context_manager::history::tests::request_capacity_restored_calls_use_native_aborted_outputs_without_mutating_live_history::custom",
+    "context_manager::history::tests::request_capacity_restored_calls_use_native_aborted_outputs_without_mutating_live_history::local_shell",
+    "context_manager::history::tests::request_capacity_restored_calls_use_native_aborted_outputs_without_mutating_live_history::tool_search",
+    "context_manager::history::tests::request_capacity_restored_custom_call_output_id_is_stable_across_independent_rebuilds",
+    "compact::tests::request_capacity_byte_prefix_bounds_dense_data_instead_of_counting_small_notes",
+    "compact::tests::request_capacity_byte_prefix_dominant_first_input_does_not_retry_every_trailing_note",
+    "compact::tests::request_capacity_byte_prefix_requires_new_real_input_after_the_previous_summary",
+    "context_manager::history::tests::request_capacity_fresh_summary_keeps_current_turn_and_completes_only_restored_old_pairs",
+    "context_manager::history::tests::request_capacity_fresh_summary_requires_current_turn_and_stops_before_ambiguous_input",
+    "context_manager::history::tests::request_capacity_fresh_summary_does_not_cross_pair_ending_in_current_turn",
+    "compact::tests::request_capacity_fresh_summary_recovers_old_cp6_without_manual_or_ordinary_warmup::old_cp6_direct_fresh_summary",
+    "compact::tests::request_capacity_fresh_summary_recovers_old_cp6_without_manual_or_ordinary_warmup::byte_bounded_subset_preserves_all_unsent_history",
+    "compact::tests::request_capacity_fresh_summary_recovers_old_cp6_without_manual_or_ordinary_warmup::completed_without_summary_cannot_install",
+    "compact::tests::request_capacity_fresh_summary_recovers_old_cp6_without_manual_or_ordinary_warmup::failed_upstream_cannot_install",
+    "compact::tests::request_capacity_fresh_summary_recovers_old_cp6_without_manual_or_ordinary_warmup::changed_native_lifetime_cannot_install",
+    "compact::tests::request_capacity_fresh_summary_recovers_old_cp6_without_manual_or_ordinary_warmup::changed_auth_owner_cannot_install",
+    "compact::tests::request_capacity_fresh_summary_recovers_old_cp6_without_manual_or_ordinary_warmup::seven_image_budget_six_requires_whole_transaction",
+    "compact::tests::request_capacity_fresh_summary_recovers_old_cp6_without_manual_or_ordinary_warmup::cancelled_after_partial_response_cannot_install",
+    "context_manager::history::tests::request_capacity_prefix_protects_crossing_and_unfinished_native_pairs::function_pair",
+    "context_manager::history::tests::request_capacity_prefix_protects_crossing_and_unfinished_native_pairs::custom_pair",
+    "context_manager::history::tests::request_capacity_prefix_protects_crossing_and_unfinished_native_pairs::local_shell_function_output_pair",
+    "context_manager::history::tests::request_capacity_prefix_protects_crossing_and_unfinished_native_pairs::client_tool_search_pair",
+    "context_manager::history::tests::request_capacity_prefix_rechecks_pairs_after_moving_boundary_back",
+    "context_manager::history::tests::request_capacity_prefix_keeps_native_standalone_server_tool_search_output",
+    "compact::tests::byte_capacity_compaction_preserves_unconsumed_suffix_and_fences_epoch",
+    "compact::tests::irreducible_capacity_failure_keeps_history_and_failed_attempt_fence",
+    "compact::tests::capacity_token_budget_reset_preserves_pending_and_concurrent_suffix_without_model",
+    "compact::tests::capacity_token_budget_without_confirmed_cursor_preserves_input",
+    "compact::tests::capacity_token_budget_stale_prefix_returns_original_http413",
+    "compact::tests::manual_partition_does_not_treat_other_http_errors_as_byte_capacity::unauthorized",
+    "compact::tests::manual_partition_does_not_treat_other_http_errors_as_byte_capacity::rate_limited",
+    "compact::tests::manual_partition_does_not_treat_other_http_errors_as_byte_capacity::unavailable",
+    "compact::tests::capacity_installer_rechecks_real_cancel_token_after_waiting_for_native_state_lock",
+    "compact::tests::capacity_token_budget_already_cancelled_helper_preserves_native_state_without_model",
+    "compact::tests::capacity_token_cancel_prevents_summary_install_without_dropping_future::cancel_and_release_final_summary_inside_native_grace",
+    "compact::tests::capacity_token_cancel_prevents_summary_install_without_dropping_future::stopped_helper_emits_no_request",
+    "session::tests::capacity_commit_tests::capacity_complete_cancel_before_guard_keeps_real_window_history_and_writer_unchanged",
+    "session::tests::capacity_commit_tests::capacity_owned_commit_survives_native_force_abort_and_orders_real_writer::after_add_ack_withheld_with_native_interruption_marker",
+    "session::tests::capacity_commit_tests::capacity_owned_commit_survives_native_force_abort_and_orders_real_writer::after_add_ack_withheld_without_native_interruption_marker",
+    "session::tests::capacity_commit_tests::capacity_owned_commit_survives_native_force_abort_and_orders_real_writer::before_add_with_native_interruption_marker",
+    "session::tests::capacity_commit_tests::capacity_owned_commit_survives_native_force_abort_and_orders_real_writer::before_add_without_native_interruption_marker",
+    "session::tests::capacity_commit_tests::capacity_owned_commit_survives_native_force_abort_and_orders_real_writer::shutdown_admission_closes_before_add_finishes",
+    "session::tests::capacity_commit_tests::capacity_owned_commit_survives_native_force_abort_and_orders_real_writer::shutdown_admission_closes_while_append_ack_withheld",
+    "compact::tests::historical_typed_projection_tests::historical_projection_message_keeps_positional_metadata_and_media",
+    "compact::tests::historical_typed_projection_tests::historical_projection_refuses_unattributed_current_or_incomplete_items::_current_expects",
+    "compact::tests::historical_typed_projection_tests::historical_projection_refuses_unattributed_current_or_incomplete_items::_encrypted_expects",
+    "compact::tests::historical_typed_projection_tests::historical_projection_refuses_unattributed_current_or_incomplete_items::_in_progress_expects",
+    "compact::tests::historical_typed_projection_tests::historical_projection_refuses_unattributed_current_or_incomplete_items::_incomplete_expects",
+    "compact::tests::historical_typed_projection_tests::historical_projection_refuses_unattributed_current_or_incomplete_items::_missing_output_expects",
+    "compact::tests::historical_typed_projection_tests::historical_projection_refuses_unattributed_current_or_incomplete_items::_unknown_expects",
+    "compact::tests::historical_typed_projection_tests::historical_projection_rejects_extra_suffix_or_changed_native_instruction",
+    "compact::tests::historical_typed_projection_tests::historical_projection_requires_fresh_summary_exact_parts_and_carry_chain",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::exact_completed_pair_seven_images_budget_six",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::interleaved_parallel_pairs_three_plus_four_and_empty_output",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::later_completed_without_fresh_summary_installs_nothing",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::later_typed_part_upstream_failure_installs_nothing",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::native_function_output_seven_images_budget_six",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::one_historical_message_seven_images_and_positional_metadata",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::real_token_cancelled_after_first_typed_part_summary",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::single_historical_text_512k_bytes_budget_256k",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::confirmed_current_turn_unicode_text_budget_256k",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::real_token_cancelled_after_first_text_byte_range_summary",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::later_text_byte_range_upstream_failure_installs_nothing",
+    "session::capacity_reset_continuation::tests::local_reset_with_old_gap_keeps_native_hook_and_writer_contract::post_native_hook_plan_retains_exact_old_assistant_and_current_suffix",
+    "session::capacity_reset_continuation::tests::local_reset_with_old_gap_keeps_native_hook_and_writer_contract::stopped_native_hook_changes_no_history_window_checkpoint_or_model",
+    "session::capacity_reset_continuation::tests::real_sampling_reset_then_413_fresh_old_gap_then_ordinary_preserves_current",
+    "desktop::service_station::tests::actual_interactive_native_null_bootstrap_readonly_without_station_grant",
+    "app_package::project_mode::tests::explicit_legacy_and_registered_cli_do_not_cross",
+    "app_package::project_mode::tests::host_checks_parent_mode_and_kernel_role",
+    "app_package::project_mode::tests::unknown_role_family_and_selector_fail_closed",
+    "namespace_coordination::tests::service_role_does_not_confuse_packaged_owner_with_tool_accounts",
+    "runtime_ownership::tests::project_namespace_binding_survives_missing_home_but_rejects_replacement"
+  ],
+  "actual_binary_list_checked": false,
+  "native_package_name": "CADSG.NativeRuntime",
+  "registry_key": "SOFTWARE\\CADSG\\WindowsSandboxService",
+  "pipe_prefix": "\\\\.\\pipe\\CADSG.WindowsSandbox",
+  "compiled": false,
+  "native_unit_executed": false,
+  "native_runtime_qualified": false,
+  "App_GUI_qualified": false,
+  "release_gate_opened": false,
+  "active_P9_lock_changed": false,
+  "loaded_P7_changed": false,
+  "pure_protocol_dependency_changed": true,
+  "cds_runtime_launcher_store_supervisor_copied": false,
+  "new_runtime_tool_or_agent_loop": false,
+  "stock_owner_record_changed": false,
+  "stock_App_changed": false,
+  "deployment_performed": false,
+  "trust_or_certificate_changed": false,
+  "superseded_lock_only_receipt": "Private prior candidate receipt.",
+  "original_native_source_receipt": "Private local source receipt."
+}

@@ -4,7 +4,7 @@
 
 ## 1. 下载并核对外部发行索引
 
-从 [v0.1.0 发行页](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/releases/tag/v0.1.0) 取得网关 zip、原生 tar.gz、`SHA256SUMS.json`。最终文件名、可用性、大小和 SHA 由该页的资产索引给出。**先确认索引来自可信仓库/标签，再复制对应 SHA**，不要用本地现算值充当可信期望值。
+从 [v0.2.0 发行页](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/releases/tag/v0.2.0) 取得网关 zip、原生 tar.gz、`SHA256SUMS.json`。最终文件名、可用性、大小和 SHA 由该页的资产索引给出。**先确认索引来自可信仓库/标签，再复制对应 SHA**，不要用本地现算值充当可信期望值。
 
 索引是单独发行资产，不塞回被其校验的归档。网关 zip 内应有 `install_gateway.ps1`、`release.json`、`wheels/`。网关 archive 和 `release.json` 的 SHA 在最终构建后写入外部索引，不硬编码回参与构建的本页。
 
@@ -16,11 +16,12 @@ $gatewayZip = Read-Host '已下载网关 zip 的完整路径'
 $gatewayZipSha = Read-Host '从可信 SHA256SUMS.json 复制该网关 zip 的 SHA256'
 $gatewaySha = Read-Host '从同一索引复制包内 release.json 的 SHA256'
 $nativeArchive = Read-Host '已下载原生 tar.gz 的完整路径'
-$nativeArchiveSha = '32b380bdeb24a09f223af9e037576566ade11018a083b90b472c75b3c58da03c'
-$rawNativeSha = '4cd522fbdf4fede602a30537cbbfca0fd53ab36c6e8f49ea8bfd8ff50966683e'
+$nativeArchiveSha = Read-Host '从 v0.2.0 外部校验索引复制 P19 原生 tar.gz 的 SHA256'
+$rawNativeSha = Read-Host '从同一索引复制 P19 原生 manifest.json 的 SHA256'
+$nativeMemberCount = [int](Read-Host '从同一发行页的原生包库存回执复制普通文件条目数')
 if ((Get-FileHash -LiteralPath $gatewayZip -Algorithm SHA256).Hash -ne $gatewayZipSha) { throw '网关归档 SHA 不符' }
 if ((Get-FileHash -LiteralPath $nativeArchive -Algorithm SHA256).Hash -ne $nativeArchiveSha) { throw '原生归档 SHA 不符' }
-$bundle = Join-Path $state 'downloads\gateway-v0.1.0'
+$bundle = Join-Path $state 'downloads\gateway-v0.2.0'
 if (Test-Path -LiteralPath $bundle) { throw '输出目录已存在，请先核原回执，不覆写' }
 Expand-Archive -LiteralPath $gatewayZip -DestinationPath $bundle
 $installer = Join-Path $bundle 'install_gateway.ps1'
@@ -59,7 +60,7 @@ Install 校验所有锁定 wheel，离线创建独立 venv，**不激活、不�
 正常退出占用本项目 profile 的 App，停止本项目网关。不要全局结束 Codex 或其他用户进程。
 
 ```powershell
-$nativeInput = Join-Path $state 'native-runtimes\o165-p7-32b380bdeb24'
+$nativeInput = Join-Path $state ('native-runtimes\o165-p19-' + $nativeArchiveSha.Substring(0,12))
 # 标准库 data filter；只解压已核定的固定发行归档，输出必须是全新目录。
 $extract = @'
 from pathlib import Path, PurePosixPath
@@ -68,7 +69,7 @@ archive, root = Path(sys.argv[1]), Path(sys.argv[2])
 if root.exists() or root.is_symlink(): raise SystemExit('Existing native directory: inspect, do not overwrite')
 with tarfile.open(archive, 'r:gz') as tf:
     members = tf.getmembers()
-    if len(members) != 3037: raise SystemExit('Unexpected native inventory')
+    if int(sys.argv[3]) <= 0 or len(members) != int(sys.argv[3]): raise SystemExit('Unexpected native inventory')
     seen = set()
     for item in members:
         p = PurePosixPath(item.name)
@@ -78,7 +79,7 @@ with tarfile.open(archive, 'r:gz') as tf:
     root.mkdir(parents=True)
     tf.extractall(root, filter='data')
 '@
-& $basePython -I -B -c $extract $nativeArchive $nativeInput
+& $basePython -I -B -c $extract $nativeArchive $nativeInput $nativeMemberCount
 if ($LASTEXITCODE -ne 0) { throw '解压未完成，保留原状态，不继续绑定' }
 $reply = & $cdag app-prepare-runtime --install-root $managed `
   --native-manifest (Join-Path $nativeInput 'manifest.json') --native-manifest-sha256 $rawNativeSha
@@ -89,9 +90,7 @@ $prepared = $reply | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw 'bind 失败' }
 ```
 
-prepare **就地**为这份原生目录物化匹配的本机官方 sidecar，并生成 `app-runtime-manifest.json`；不替你搬到永久目录。因此必须先完成上面的永久解压，不用 `Downloads` 临时 staging/build output 作为长期绑定。它核验 App 签名/资源与原生清单，不启动 App。
-
-Code Mode host 来自本机固定官方包，SHA256 为 `510687c53c57f52dbf105b8b0050f595d255ab6dafc968c00940c782aa5141c2`。**prepared manifest 含本机绝对路径和官方闭源资源，只是本机派生文件，不是公共资产，也不能重新打包上传。** bind 保存明确选择；跨已知 App cohort 时按正常接口保存相应回退输入，同 cohort 不伪造跨 cohort backup。
+prepare 在永久版本目录中校验 P19 的六个同源程序，并核对本机已安装的官方 App 和插件资源。生成的 `app-runtime-manifest.json` 包含本机路径，仅供当前用户绑定。多个版本可以并排保留，升级或回滚时使用各自的清单和 SHA。
 
 ## 4. 从选定 runtime 生成目录并配置
 
@@ -99,7 +98,7 @@ Code Mode host 来自本机固定官方包，SHA256 为 `510687c53c57f52dbf105b8
 
 ```powershell
 $native = Join-Path $nativeInput 'codex.exe'
-$metadata = Join-Path $state 'catalog-build\o165-p7-32b380bdeb24'
+$metadata = Join-Path $state ('catalog-build\o165-p19-' + $rawNativeSha.Substring(0,12))
 $makeCatalog = @'
 from pathlib import Path
 import hashlib, json, os, subprocess, sys
@@ -130,6 +129,14 @@ if ($LASTEXITCODE -ne 0) { throw 'app-configure 失败' }
 
 `gpt-5.6-luna`、`gpt-6-luna`、`gpt-6.1-sol` 是这份 App/runtime 的明确辅助路由别名，推理仍固定 DeepSeek。Guardian、记忆与压缩不能为通过验收而关闭。默认多智能体 V2；需要 V1 时，另生成 `multi_agent_version='v1'` 的目录并在 app-configure 显式选 v1，再开新 chat；已有会话保留其记录版本。
 
+### 升级已有网关时校准声明的原生版本
+
+已有安装沿用原 InstallRoot、DataHome 和监听端口。正常退出本项目 App、停止该网关。备份 DataHome 下 `gateway.json` 的原始字节和 SHA256，备份目录使用与配置相同的私有权限。prepare 完成后，从已核验的 manifest 读取 `codex.exe` 的 SHA，与发行索引和永久目录中的文件核对。
+
+若 `gateway.json` 声明了旧 `native_sha256`，在网关仍停止时只更新该字段。以备份的原始 SHA 为条件调用已安装模块 `codex_app_deepseek.app_config._atomic_write` 的 `expected_sha256` 参数；冲突则重新读取，不覆盖并发修改。解析写后 JSON 并确认其他键和值与原配置相同，保留原始、写后两个摘要供回滚。回滚时核验当前 native_sha256 等于本次安装值，再基于最新内容、以最新 SHA 作条件恢复旧字段，保留后续无关设置。省略该字段的已有配置可继续使用原选项。
+
+声明字段记录操作者选择的版本。`diagnose` 单独核对官方签名 App 自带的原生基线；`app-status` 以实际 App 与 backend 的 PID、出生时间、映像路径和 SHA 核验本次加载。切换后同时检查配置摘要、运行服务加载的配置以及实际进程身份。
+
 ## 5. 启动并回读同一次操作
 
 ```powershell
@@ -142,6 +149,8 @@ if ($LASTEXITCODE -ne 0) { throw '检查未通过，不 launch' }
 ```
 
 冷启动可能超过观察窗口。pending/timeout/unknown **不等于未创建**：先运行 app-status 找到实际 run ID，再用 `app-status --install-root $managed --run-id <实际32位run_id>` 回读原操作。不要重复 launch、全局 kill 或改回旧配置来制造成功。`app-check`、health 与已受理的 GUI 动作均不是整个真实任务通过；还要核实际 App/native 映像与界面。
+
+单次诊断可给 `app-launch` 增加 `--trace-root` 和用户拥有的本地目录。启动器为这次启动创建受保护的子目录，再核对实际 App 与 backend 的环境。官方 trace 会保存请求、图片和工具输出，请只在私有目录保留原始文件。日常启动无需启用该选项。
 
 ## 模型和网页后端
 

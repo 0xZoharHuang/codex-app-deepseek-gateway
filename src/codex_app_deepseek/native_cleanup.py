@@ -181,6 +181,29 @@ def _drained(home, executable, namespace, backend):
         except (psutil.AccessDenied, OSError) as error:
             raise lc.LifecycleError("Cannot verify a potential App/native process is unrelated") from error
 
+def _cleanup_bundle(manifest, digest, expected, backend, owner, home):
+    """Legacy cleanup stays native; Core teardown stays with its package lifecycle."""
+    from . import isolated_app as app, runtime_package as packages
+    app.require(app.sha(manifest) == digest, "native manifest checksum mismatch")
+    document = app.load_json(manifest)
+    if document.get("kind") == packages.KIND:
+        # Never reinterpret Core activation as the Legacy sandbox-uninstall API.
+        # The native service owns Core account teardown in package removal.
+        if document.get("mode") == "registered_core":
+            raise lc.LifecycleError("RegisteredCore requires native runtime package teardown; no Legacy sandbox cleanup or gateway retirement performed")
+        bundle = app.verify_launch_bundle(manifest, digest, expected, backend, owner, home)
+        bundle["cleanup_verification"] = {
+            "full_bundle_verified": True, "method": "installed-signed-runtime-package",
+            "mode": "legacy", "unexecuted_components": {},
+        }
+        return bundle
+    bundle = app.verify_bundle(manifest, digest, expected, cleanup_only=True)
+    snapshot = getattr(backend, "native_runtime_owner_snapshot", None)
+    if snapshot is not None:
+        packages.require_mode_available(None, snapshot(), owner, home)
+    return bundle
+
+
 @dataclass
 class Cleanup:
     root: Path
@@ -191,6 +214,7 @@ class Cleanup:
     inputs: dict
     status: str
     bundle_verification: dict | None = None
+    runtime_package: dict | None = None
 
     def verify(self):
         for path, expected in self.inputs.items():
@@ -202,6 +226,18 @@ class Cleanup:
             if current != self.namespace:
                 raise lc.LifecycleError("Native namespace changed after uninstall preflight")
             _drained(self.home, self.executable, self.namespace, self.backend)
+            if self.runtime_package is not None:
+                from . import app_delivery as delivery, isolated_app as app
+                expected = app.baseline(delivery.assets()[0])
+                bundle = _cleanup_bundle(Path(self.runtime_package["descriptor_path"]),
+                    self.runtime_package["descriptor_sha256"], expected, self.backend, owner, self.home)
+                if bundle.get("runtime_package") != self.runtime_package:
+                    raise lc.LifecycleError("Native runtime activation changed after uninstall preflight")
+            else:
+                from . import runtime_package as packages
+                snapshot = getattr(self.backend, "native_runtime_owner_snapshot", None)
+                if snapshot is not None:
+                    packages.require_mode_available(None, snapshot(), owner, self.home)
 
     def check_recovery(self, *, retry_unconfirmed=False):
         evidence = self.root / "native-uninstall.json"
@@ -267,7 +303,7 @@ class Cleanup:
                   "namespace": self.namespace["namespace"], "owner_sid": self.namespace["owner_sid"],
                   "executable": str(self.executable), "inputs": self.inputs,
                   "bundle_verification": self.bundle_verification,
-                  "argv": [str(self.executable), "sandbox", "uninstall"],
+                  "argv": [self.runtime_package["alias_path"] if self.runtime_package else str(self.executable), "sandbox", "uninstall"],
                   "ordinary_filesystem_acl_removed": False, "user_files_deleted": False}
         publish(record)
         environment = {k: v for k, v in os.environ.items()
@@ -275,6 +311,8 @@ class Cleanup:
                                         "COMPUTERNAME", "USERNAME", "USERDOMAIN", "USERPROFILE",
                                         "LOCALAPPDATA", "APPDATA", "PROGRAMDATA"}}
         environment["CODEX_HOME"] = str(self.home)
+        if self.runtime_package is not None:
+            environment["CODEX_WINDOWS_REGISTERED_CORE"] = "0"
         if environment["CODEX_HOME"] != str(self.home):
             raise lc.LifecycleError("Native uninstall requires the exact bound App home")
         try:
@@ -351,7 +389,7 @@ def admission(root, directory, receipt, *, backend=None, retry_unconfirmed=False
         manifest = Path(value["native_manifest"])
         resources.enter_context(_pinned_file(manifest, backend))
         baseline, _ = delivery.assets()
-        bundle = app.verify_bundle(manifest, value["native_manifest_sha256"], app.baseline(baseline), cleanup_only=True)
+        bundle = _cleanup_bundle(manifest, value["native_manifest_sha256"], app.baseline(baseline), backend, owner, home)
         cli = bundle["files"]["codex.exe"]
         executable = Path(cli["path"])
         resources.enter_context(_pinned_file(executable, backend))

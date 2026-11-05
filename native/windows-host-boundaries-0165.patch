@@ -1,0 +1,793 @@
+--- a/codex-rs/windows-sandbox-rs/src/private_acl_lock.rs
++++ b/codex-rs/windows-sandbox-rs/src/private_acl_lock.rs
+@@ -30,6 +30,21 @@
+         }
+     }
+ }
++// Keep one ACE for each canonical SID. Under SYSTEM the owner is also SY;
++// asking Windows to store two identical ACEs makes strict readback depend on
++// whether the OS coalesces them. Generate the same effective owner/SYSTEM/BA
++// policy once; validation below still requires exact owner, flags and rights.
++fn private_lock_sddl(owner_sid: &str) -> String {
++    let trustees = [owner_sid, "S-1-5-18", "S-1-5-32-544"];
++    let mut value = format!("O:{owner_sid}D:P");
++    for (index, sid) in trustees.iter().enumerate() {
++        if !trustees[..index].contains(sid) {
++            value.push_str(&format!("(A;;FA;;;{sid})"));
++        }
++    }
++    value
++}
++
+ pub(crate) struct PrivatePolicy {
+     descriptor: Descriptor,
+     user: Vec<u8>,
+@@ -45,9 +60,7 @@
+         let token = unsafe { OwnedHandle::from_raw_handle(token) };
+         let user = unsafe { crate::token::get_user_sid_bytes(token.as_raw_handle() as _) }?;
+         let user_text = crate::winutil::string_from_sid_bytes(&user).map_err(anyhow::Error::msg)?;
+-        let text = crate::winutil::to_wide(format!(
+-            "O:{user_text}D:P(A;;FA;;;{user_text})(A;;FA;;;SY)(A;;FA;;;BA)"
+-        ));
++        let text = crate::winutil::to_wide(private_lock_sddl(&user_text));
+         let mut descriptor = Descriptor(std::ptr::null_mut());
+         ensure!(
+             unsafe {
+@@ -267,6 +280,26 @@
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    #[test]
++    fn private_policy_canonical_owner_does_not_duplicate_system_or_admin_sid() {
++        assert_eq!(
++            private_lock_sddl("S-1-5-18"),
++            "O:S-1-5-18D:P(A;;FA;;;S-1-5-18)(A;;FA;;;S-1-5-32-544)"
++        );
++        assert_eq!(
++            private_lock_sddl("S-1-5-32-544"),
++            "O:S-1-5-32-544D:P(A;;FA;;;S-1-5-32-544)(A;;FA;;;S-1-5-18)"
++        );
++    }
++
++    #[test]
++    fn private_policy_ordinary_owner_keeps_exact_three_principals_and_rights() {
++        assert_eq!(
++            private_lock_sddl("S-1-5-21-1-2-3-2162"),
++            "O:S-1-5-21-1-2-3-2162D:P(A;;FA;;;S-1-5-21-1-2-3-2162)(A;;FA;;;S-1-5-18)(A;;FA;;;S-1-5-32-544)"
++        );
++    }
++
+     #[test]
+     fn live_and_waiting_handles_block_cleanup_and_reuse_same_file() -> Result<()> {
+         let temp = tempfile::tempdir()?;
+--- a/codex-rs/windows-sandbox-rs/src/identity.rs
++++ b/codex-rs/windows-sandbox-rs/src/identity.rs
+@@ -75,7 +75,27 @@
+ /// This is a coarse readiness check; `require_logon_sandbox_creds` performs the
+ /// additional runtime validation for offline firewall settings.
+ pub fn sandbox_setup_is_complete(codex_home: &Path) -> bool {
+-    let marker_ok = matches!(load_marker(codex_home), Ok(Some(marker)) if marker.version_matches());
++    let Ok(namespace) = crate::namespace::SandboxNamespace::current(codex_home) else {
++        return false;
++    };
++    setup_is_complete_in_namespace(codex_home, &namespace)
++}
++
++/// Elevated provisioning can be performed by a maintenance account for an
++/// explicit target user. Validate that exact payload owner's namespace; normal
++/// runtime readiness above remains bound to the requesting process token.
++pub(crate) fn sandbox_setup_is_complete_for_user(codex_home: &Path, real_user: &str) -> bool {
++    let Ok(namespace) = crate::namespace::SandboxNamespace::for_user(codex_home, real_user) else {
++        return false;
++    };
++    setup_is_complete_in_namespace(codex_home, &namespace)
++}
++
++fn setup_is_complete_in_namespace(
++    codex_home: &Path,
++    namespace: &crate::namespace::SandboxNamespace,
++) -> bool {
++    let marker_ok = matches!(load_marker_for_namespace(codex_home, namespace), Ok(Some(marker)) if marker.version_matches());
+     if !marker_ok {
+         return false;
+     }
+@@ -84,7 +104,7 @@
+     {
+         return false;
+     }
+-    matches!(load_users(codex_home), Ok(Some(users)) if users.version_matches())
++    matches!(load_users_for_namespace(codex_home, namespace), Ok(Some(users)) if users.version_matches())
+ }
+ 
+ /// Returns true when setup artifacts and provisioned network settings match.
+@@ -106,7 +126,15 @@
+ }
+ 
+ fn load_marker(codex_home: &Path) -> Result<Option<SetupMarker>> {
+-    crate::namespace::SandboxNamespace::current(codex_home)?.validate_existing_state()?;
++    let namespace = crate::namespace::SandboxNamespace::current(codex_home)?;
++    load_marker_for_namespace(codex_home, &namespace)
++}
++
++fn load_marker_for_namespace(
++    codex_home: &Path,
++    namespace: &crate::namespace::SandboxNamespace,
++) -> Result<Option<SetupMarker>> {
++    namespace.validate_existing_state()?;
+     let path = setup_marker_path(codex_home);
+     let marker = match fs::read_to_string(&path) {
+         Ok(contents) => match serde_json::from_str::<SetupMarker>(&contents) {
+@@ -132,7 +160,15 @@
+ }
+ 
+ fn load_users(codex_home: &Path) -> Result<Option<SandboxUsersFile>> {
+-    crate::namespace::SandboxNamespace::current(codex_home)?.validate_existing_state()?;
++    let namespace = crate::namespace::SandboxNamespace::current(codex_home)?;
++    load_users_for_namespace(codex_home, &namespace)
++}
++
++fn load_users_for_namespace(
++    codex_home: &Path,
++    namespace: &crate::namespace::SandboxNamespace,
++) -> Result<Option<SandboxUsersFile>> {
++    namespace.validate_existing_state()?;
+     let path = sandbox_users_path(codex_home);
+     let file = match fs::read_to_string(&path) {
+         Ok(contents) => contents,
+@@ -519,6 +555,138 @@
+ 
+ #[cfg(test)]
+ mod tests {
++
++    fn scoped_setup_readiness_fixture() -> anyhow::Result<(
++        tempfile::TempDir,
++        String,
++        String,
++        crate::namespace::SandboxNamespace,
++    )> {
++        let home = tempfile::tempdir()?;
++        let caller = crate::runtime_ownership::current_setup_user()?;
++        let caller_sid = crate::winutil::resolve_sid(&caller)?;
++        let caller_sid =
++            crate::winutil::string_from_sid_bytes(&caller_sid).map_err(anyhow::Error::msg)?;
++        // Resolve a real local built-in user without relying on its localized,
++        // renamed or disabled account name, and without creating/logging in users.
++        use windows_sys::Win32::NetworkManagement::NetManagement as net;
++        use windows_sys::Win32::Security::{GetLengthSid, IsValidSid};
++        let mut buffer = std::ptr::null_mut();
++        let status = unsafe { net::NetUserModalsGet(std::ptr::null(), 2, &mut buffer) };
++        let domain_result = (|| -> anyhow::Result<String> {
++            anyhow::ensure!(
++                status == net::NERR_Success,
++                "read local account domain: {status}"
++            );
++            anyhow::ensure!(!buffer.is_null(), "missing local account-domain metadata");
++            let info = unsafe { &*buffer.cast::<net::USER_MODALS_INFO_2>() };
++            anyhow::ensure!(
++                unsafe { IsValidSid(info.usrmod2_domain_id) } != 0,
++                "invalid local account-domain SID"
++            );
++            let length = unsafe { GetLengthSid(info.usrmod2_domain_id) } as usize;
++            let bytes =
++                unsafe { std::slice::from_raw_parts(info.usrmod2_domain_id.cast::<u8>(), length) };
++            crate::winutil::string_from_sid_bytes(bytes).map_err(anyhow::Error::msg)
++        })();
++        if !buffer.is_null() {
++            unsafe { net::NetApiBufferFree(buffer.cast()) };
++        }
++        let domain = domain_result?;
++        let administrator = format!("{domain}-500");
++        let target_sid = if caller_sid == administrator {
++            format!("{domain}-501")
++        } else {
++            administrator
++        };
++        anyhow::ensure!(
++            target_sid != caller_sid,
++            "fixture target must differ from actual caller"
++        );
++        let target_sid = crate::token::LocalSid::from_string(&target_sid)?;
++        let target = unsafe { crate::winutil::account_name_from_sid(target_sid.as_ptr()) }?;
++        let namespace = crate::namespace::SandboxNamespace::for_user(home.path(), &target)?;
++        namespace.reserve_owner()?;
++        std::fs::create_dir_all(crate::setup::sandbox_dir(home.path()))?;
++        // Native 0.165 keeps namespace ownership in the serialized sidecar
++        // checked by SandboxNamespace, not a field on these public structs.
++        // Preserve that actual on-disk format without restoring 0.164 fields.
++        let marker = serde_json::json!({
++            "namespace": namespace.key.id(),
++            "version": crate::setup::SETUP_VERSION,
++            "offline_username": namespace.key.offline(),
++            "online_username": namespace.key.online(),
++            "created_at": null,
++            "proxy_ports": [],
++            "allow_local_binding": false,
++        });
++        let users = serde_json::json!({
++            "namespace": namespace.key.id(),
++            "version": crate::setup::SETUP_VERSION,
++            "offline": {"username":namespace.key.offline(), "password":""},
++            "online": {"username":namespace.key.online(), "password":""},
++        });
++        std::fs::write(
++            crate::setup::setup_marker_path(home.path()),
++            serde_json::to_vec(&marker)?,
++        )?;
++        std::fs::write(
++            crate::setup::sandbox_users_path(home.path()),
++            serde_json::to_vec(&users)?,
++        )?;
++        Ok((home, caller, target, namespace))
++    }
++
++    #[test]
++    fn setup_readiness_explicit_target_does_not_adopt_maintenance_caller_namespace()
++    -> anyhow::Result<()> {
++        let (home, caller, target, _namespace) = scoped_setup_readiness_fixture()?;
++        let marker_path = crate::setup::setup_marker_path(home.path());
++        let users_path = crate::setup::sandbox_users_path(home.path());
++        let before = (std::fs::read(&marker_path)?, std::fs::read(&users_path)?);
++        assert!(super::sandbox_setup_is_complete_for_user(
++            home.path(),
++            &target
++        ));
++        assert!(!super::sandbox_setup_is_complete_for_user(
++            home.path(),
++            &caller
++        ));
++        assert!(
++            !super::sandbox_setup_is_complete(home.path()),
++            "ordinary runtime must still use its actual caller token"
++        );
++        assert_eq!(
++            (std::fs::read(marker_path)?, std::fs::read(users_path)?),
++            before
++        );
++        Ok(())
++    }
++
++    #[test]
++    fn setup_readiness_explicit_target_rejects_wrong_names_and_version() -> anyhow::Result<()> {
++        let (home, _caller, target, _namespace) = scoped_setup_readiness_fixture()?;
++        let users_path = crate::setup::sandbox_users_path(home.path());
++        let original_users = std::fs::read(&users_path)?;
++        let mut wrong: serde_json::Value = serde_json::from_slice(&original_users)?;
++        wrong["offline"]["username"] = serde_json::json!("UNOWNED-ACCOUNT-METADATA-ONLY");
++        std::fs::write(&users_path, serde_json::to_vec(&wrong)?)?;
++        assert!(!super::sandbox_setup_is_complete_for_user(
++            home.path(),
++            &target
++        ));
++        std::fs::write(&users_path, original_users)?;
++        let marker_path = crate::setup::setup_marker_path(home.path());
++        let mut marker: serde_json::Value = serde_json::from_slice(&std::fs::read(&marker_path)?)?;
++        marker["version"] = serde_json::json!(crate::setup::SETUP_VERSION.wrapping_add(1));
++        std::fs::write(&marker_path, serde_json::to_vec(&marker)?)?;
++        assert!(!super::sandbox_setup_is_complete_for_user(
++            home.path(),
++            &target
++        ));
++        Ok(())
++    }
++
+     use super::desired_offline_proxy_settings;
+     use super::remove_sandbox_users_file;
+     use crate::WindowsSandboxProxySettingsMode;
+--- a/codex-rs/windows-sandbox-rs/src/setup.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup.rs
+@@ -22,7 +22,6 @@
+ use crate::deny_read_resolver::resolve_windows_deny_read_paths;
+ use crate::helper_materialization::bundled_executable_path_for_exe;
+ use crate::helper_materialization::helper_bin_dir;
+-use crate::identity::sandbox_setup_is_complete;
+ use crate::logging::current_log_file_path;
+ use crate::logging::log_note;
+ use crate::path_normalization::canonical_path_key;
+@@ -926,8 +925,8 @@
+     }
+ }
+ 
+-fn verify_setup_completed(codex_home: &Path) -> Result<()> {
+-    if sandbox_setup_is_complete(codex_home) {
++fn verify_setup_completed(codex_home: &Path, real_user: &str) -> Result<()> {
++    if crate::identity::sandbox_setup_is_complete_for_user(codex_home, real_user) {
+         Ok(())
+     } else {
+         Err(failure(
+@@ -957,10 +956,22 @@
+     if !retained_handles.is_empty() {
+         // Service requests are serialized and must not join a bare setup flight
+         // whose helper was started without these directory protections.
+-        return run_setup_exe_payload(&payload_b64, needs_elevation, codex_home, retained_handles);
++        return run_setup_exe_payload(
++            &payload_b64,
++            needs_elevation,
++            codex_home,
++            &payload.real_user,
++            retained_handles,
++        );
+     }
+     run_setup_singleflight(payload_b64.clone(), || {
+-        run_setup_exe_payload(&payload_b64, needs_elevation, codex_home, retained_handles)
++        run_setup_exe_payload(
++            &payload_b64,
++            needs_elevation,
++            codex_home,
++            &payload.real_user,
++            retained_handles,
++        )
+     })
+ }
+ 
+@@ -968,6 +979,7 @@
+     payload_b64: &str,
+     needs_elevation: bool,
+     codex_home: &Path,
++    real_user: &str,
+     retained_handles: &[BorrowedHandle<'_>],
+ ) -> Result<()> {
+     use windows_sys::Win32::System::Threading::GetExitCodeProcess;
+@@ -1018,7 +1030,7 @@
+                 status.code(),
+             ));
+         }
+-        verify_setup_completed(codex_home)?;
++        verify_setup_completed(codex_home, real_user)?;
+         if let Err(err) = clear_setup_error_report(codex_home) {
+             log_note(
+                 &format!(
+@@ -1070,7 +1082,7 @@
+             ));
+         }
+     }
+-    verify_setup_completed(codex_home)?;
++    verify_setup_completed(codex_home, real_user)?;
+     if let Err(err) = clear_setup_error_report(codex_home) {
+         log_note(
+             &format!("setup orchestrator: failed to clear setup_error.json after success: {err}"),
+@@ -1544,7 +1556,8 @@
+     #[test]
+     fn setup_completion_requires_ready_artifacts() {
+         let codex_home = TempDir::new().expect("tempdir");
+-        let err = verify_setup_completed(codex_home.path())
++        let real_user = crate::runtime_ownership::current_setup_user().expect("requesting user");
++        let err = verify_setup_completed(codex_home.path(), &real_user)
+             .expect_err("missing setup artifacts should fail");
+ 
+         assert_eq!(
+--- a/codex-rs/windows-sandbox-rs/src/desktop.rs
++++ b/codex-rs/windows-sandbox-rs/src/desktop.rs
+@@ -30,6 +30,7 @@
+ use std::sync::Mutex;
+ use std::sync::OnceLock;
+ use windows_sys::Win32::Foundation::CloseHandle;
++use windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
+ use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+ use windows_sys::Win32::Foundation::GetLastError;
+ use windows_sys::Win32::Foundation::HLOCAL;
+@@ -61,8 +62,11 @@
+ use windows_sys::Win32::System::StationsAndDesktops::DESKTOP_WRITE_DAC;
+ use windows_sys::Win32::System::StationsAndDesktops::DESKTOP_WRITE_OWNER;
+ use windows_sys::Win32::System::StationsAndDesktops::DESKTOP_WRITEOBJECTS;
++use windows_sys::Win32::System::StationsAndDesktops::GetProcessWindowStation;
++use windows_sys::Win32::System::StationsAndDesktops::GetUserObjectInformationW;
+ use windows_sys::Win32::System::StationsAndDesktops::HDESK;
+ use windows_sys::Win32::System::StationsAndDesktops::OpenDesktopW;
++use windows_sys::Win32::System::StationsAndDesktops::UOI_NAME;
+ 
+ const PRIVATE_DESKTOP_PREFIX: &str = "CodexSandboxDesktop-";
+ 
+@@ -145,6 +149,95 @@
+     }
+ }
+ 
++// Object names are taken from the actual process station. Preserve their UTF-16
++// exactly instead of applying a lossy Unicode conversion or guessing WinSta0.
++const MAX_STARTUP_DESKTOP_UNITS: usize = 32 * 1024;
++
++fn validate_private_desktop_name(name: &str) -> Result<()> {
++    if !name
++        .strip_prefix(PRIVATE_DESKTOP_PREFIX)
++        .is_some_and(|nonce| {
++            !nonce.is_empty()
++                && nonce.len() <= 32
++                && nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
++        })
++    {
++        anyhow::bail!("invalid private desktop name");
++    }
++    Ok(())
++}
++
++fn startup_desktop_name(station: &[u16], private_name: &str) -> Result<Vec<u16>> {
++    validate_private_desktop_name(private_name)?;
++    if station.is_empty() || station.iter().any(|unit| matches!(*unit, 0 | 47 | 92)) {
++        anyhow::bail!("invalid current window station name");
++    }
++    let units = station
++        .len()
++        .checked_add(private_name.len() + 2)
++        .filter(|units| *units <= MAX_STARTUP_DESKTOP_UNITS)
++        .ok_or_else(|| anyhow::anyhow!("startup desktop name exceeds bound"))?;
++    let mut value = Vec::with_capacity(units);
++    value.extend_from_slice(station);
++    value.push(b'\\' as u16);
++    value.extend(private_name.encode_utf16());
++    value.push(0);
++    Ok(value)
++}
++
++fn current_window_station_name() -> Result<Vec<u16>> {
++    // This is a borrowed process handle. It must not be closed or rebound.
++    let station = unsafe { GetProcessWindowStation() };
++    if station.is_null() {
++        anyhow::bail!("GetProcessWindowStation failed: {}", unsafe {
++            GetLastError()
++        });
++    }
++    let mut needed = 0_u32;
++    let probe =
++        unsafe { GetUserObjectInformationW(station, UOI_NAME, ptr::null_mut(), 0, &mut needed) };
++    let probe_error = if probe == 0 {
++        unsafe { GetLastError() }
++    } else {
++        0
++    };
++    if probe != 0
++        || probe_error != ERROR_INSUFFICIENT_BUFFER
++        || needed < 4
++        || needed % 2 != 0
++        || needed as usize > MAX_STARTUP_DESKTOP_UNITS * 2
++    {
++        anyhow::bail!("window station name query failed or exceeded bound: {probe_error}");
++    }
++    let mut name = vec![0_u16; needed as usize / 2];
++    let mut returned = needed;
++    let ok = unsafe {
++        GetUserObjectInformationW(
++            station,
++            UOI_NAME,
++            name.as_mut_ptr().cast(),
++            needed,
++            &mut returned,
++        )
++    };
++    if ok == 0 {
++        anyhow::bail!("GetUserObjectInformationW failed: {}", unsafe {
++            GetLastError()
++        });
++    }
++    if returned < 4 || returned % 2 != 0 || returned > needed {
++        anyhow::bail!("window station name length changed or is invalid");
++    }
++    name.truncate(returned as usize / 2);
++    if name.pop() != Some(0)
++        || name.is_empty()
++        || name.iter().any(|unit| matches!(*unit, 0 | 47 | 92))
++    {
++        anyhow::bail!("invalid current window station name");
++    }
++    Ok(name)
++}
++
+ pub struct LaunchDesktop {
+     _private_desktop: PrivateDesktop,
+     startup_name: Vec<u16>,
+@@ -215,7 +308,8 @@
+ 
+     pub fn prepare(logs_base_dir: Option<&Path>) -> Result<Self> {
+         let private_desktop = PrivateDesktop::create(logs_base_dir)?;
+-        let startup_name = to_wide(format!("Winsta0\\{}", private_desktop.name));
++        let startup_name =
++            startup_desktop_name(&current_window_station_name()?, &private_desktop.name)?;
+         Ok(Self {
+             _private_desktop: private_desktop,
+             startup_name,
+@@ -224,16 +318,8 @@
+ 
+     /// Opens the caller-owned private desktop without creating one or falling back to Default.
+     pub fn open_private(name: &str) -> Result<Self> {
+-        if !name
+-            .strip_prefix(PRIVATE_DESKTOP_PREFIX)
+-            .is_some_and(|nonce| {
+-                !nonce.is_empty()
+-                    && nonce.len() <= 32
+-                    && nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+-            })
+-        {
+-            anyhow::bail!("invalid private desktop name");
+-        }
++        validate_private_desktop_name(name)?;
++        let startup_name = startup_desktop_name(&current_window_station_name()?, name)?;
+         let name_wide = to_wide(name);
+         let handle = unsafe {
+             OpenDesktopW(
+@@ -251,7 +337,7 @@
+                 handle,
+                 name: name.to_owned(),
+             },
+-            startup_name: to_wide(format!("Winsta0\\{name}")),
++            startup_name,
+         })
+     }
+ 
+@@ -470,3 +556,68 @@
+ #[cfg(test)]
+ #[path = "desktop_tests.rs"]
+ mod tests;
++
++#[cfg(test)]
++mod bootstrap_startup_name_tests {
++    use super::startup_desktop_name;
++    const PRIVATE: &str = "CodexSandboxDesktop-0123456789abcdef";
++
++    #[test]
++    fn session0_bootstrap_preserves_actual_service_station() {
++        let station = "Service-0x0-1234$".encode_utf16().collect::<Vec<_>>();
++        let actual = startup_desktop_name(&station, PRIVATE).unwrap();
++        let expected = format!("Service-0x0-1234$\\{PRIVATE}\0")
++            .encode_utf16()
++            .collect::<Vec<_>>();
++        assert_eq!(actual, expected);
++    }
++
++    #[test]
++    fn session0_bootstrap_preserves_interactive_station_without_assuming_it() {
++        let station = "WinSta0".encode_utf16().collect::<Vec<_>>();
++        let expected = format!("WinSta0\\{PRIVATE}\0")
++            .encode_utf16()
++            .collect::<Vec<_>>();
++        assert_eq!(startup_desktop_name(&station, PRIVATE).unwrap(), expected);
++    }
++
++    #[test]
++    fn session0_bootstrap_preserves_exact_station_utf16() {
++        let station = vec![b'S' as u16, 0xd83d, 0xde00, 0xd800];
++        let actual = startup_desktop_name(&station, PRIVATE).unwrap();
++        assert_eq!(&actual[..station.len()], station.as_slice());
++        assert_eq!(actual[station.len()], b'\\' as u16);
++        assert_eq!(actual.last(), Some(&0));
++    }
++
++    #[test]
++    fn session0_bootstrap_rejects_empty_injected_or_oversized_station() {
++        for station in [
++            vec![],
++            vec![0],
++            vec![b'S' as u16, 0],
++            vec![b'S' as u16, b'\\' as u16],
++            vec![b'S' as u16, b'/' as u16],
++            vec![b'A' as u16; 32 * 1024],
++        ] {
++            assert!(startup_desktop_name(&station, PRIVATE).is_err());
++        }
++    }
++
++    #[test]
++    fn session0_bootstrap_rejects_default_and_injected_private_names() {
++        for name in [
++            "Default",
++            "WinSta0\\Default",
++            "CodexSandboxDesktop-",
++            "CodexSandboxDesktop-abcd\0Default",
++            "CodexSandboxDesktop-abcd/Default",
++            "CodexSandboxDesktop-0123456789abcdef0123456789abcdef0",
++        ] {
++            assert!(
++                startup_desktop_name(&[b'S' as u16], name).is_err(),
++                "{name:?}"
++            );
++        }
++    }
++}
+--- a/codex-rs/windows-sandbox-rs/src/elevated/runner_client.rs
++++ b/codex-rs/windows-sandbox-rs/src/elevated/runner_client.rs
+@@ -1,6 +1,7 @@
+ use crate::app_package::registered_core_requested;
+ use crate::app_package::verify_registered_core_runner;
+ use crate::desktop::DesktopPolicy;
++use crate::desktop::LaunchDesktop;
+ use crate::desktop::shared_private_desktop_for_user;
+ use crate::identity::SandboxCreds;
+ use crate::ipc_framed::ErrorPayload;
+@@ -41,11 +42,14 @@
+ use windows_sys::Win32::Foundation::ERROR_SERVICE_ALREADY_RUNNING;
+ use windows_sys::Win32::Foundation::GetLastError;
+ use windows_sys::Win32::Foundation::HANDLE;
++use windows_sys::Win32::Foundation::WAIT_FAILED;
++use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
+ use windows_sys::Win32::System::Diagnostics::Debug::SetErrorMode;
+ use windows_sys::Win32::System::IO::CancelSynchronousIo;
+ use windows_sys::Win32::System::Threading::CreateProcessWithLogonW;
+ use windows_sys::Win32::System::Threading::GetCurrentProcess;
+ use windows_sys::Win32::System::Threading::GetCurrentThread;
++use windows_sys::Win32::System::Threading::GetExitCodeProcess;
+ use windows_sys::Win32::System::Threading::LOGON_WITH_PROFILE;
+ use windows_sys::Win32::System::Threading::PROCESS_INFORMATION;
+ use windows_sys::Win32::System::Threading::STARTF_FORCEOFFFEEDBACK;
+@@ -343,6 +347,75 @@
+     result
+ }
+ 
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++enum RunnerProcessObservation {
++    Exited(u32),
++    StillActive,
++    InspectionFailed { operation: &'static str, code: u32 },
++    UnexpectedWait(u32),
++}
++
++impl std::fmt::Display for RunnerProcessObservation {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        match self {
++            Self::Exited(code) => write!(
++                f,
++                "runner exited before IPC readiness (exit_code=0x{code:08x})"
++            ),
++            Self::StillActive => {
++                f.write_str("runner was still active when IPC startup failure was inspected")
++            }
++            Self::InspectionFailed { operation, code } => write!(
++                f,
++                "runner state inspection failed during {operation} (Windows error {code})"
++            ),
++            Self::UnexpectedWait(value) => write!(
++                f,
++                "runner state inspection returned unexpected wait result {value}"
++            ),
++        }
++    }
++}
++
++fn classify_runner_process(
++    wait_result: u32,
++    wait_error: u32,
++    read_exit_code: impl FnOnce() -> std::result::Result<u32, u32>,
++) -> RunnerProcessObservation {
++    match wait_result {
++        WAIT_OBJECT_0 => match read_exit_code() {
++            Ok(code) => RunnerProcessObservation::Exited(code),
++            Err(code) => RunnerProcessObservation::InspectionFailed {
++                operation: "GetExitCodeProcess",
++                code,
++            },
++        },
++        WAIT_TIMEOUT => RunnerProcessObservation::StillActive,
++        WAIT_FAILED => RunnerProcessObservation::InspectionFailed {
++            operation: "WaitForSingleObject",
++            code: wait_error,
++        },
++        other => RunnerProcessObservation::UnexpectedWait(other),
++    }
++}
++
++fn observe_runner_process(process: HANDLE) -> RunnerProcessObservation {
++    let wait_result = unsafe { WaitForSingleObject(process, 0) };
++    let wait_error = if wait_result == WAIT_FAILED {
++        unsafe { GetLastError() }
++    } else {
++        0
++    };
++    classify_runner_process(wait_result, wait_error, || {
++        let mut code = 0_u32;
++        if unsafe { GetExitCodeProcess(process, &mut code) } == 0 {
++            Err(unsafe { GetLastError() })
++        } else {
++            Ok(code)
++        }
++    })
++}
++
+ pub(crate) fn spawn_runner_transport(
+     codex_home: &Path,
+     cwd: &Path,
+@@ -367,6 +440,13 @@
+             log_dir,
+         )?);
+     }
++    // Keep this private desktop handle and UTF-16 startup name alive through
++    // the existing runner IPC handshake. No station/Default ACL is changed.
++    let bootstrap_desktop = spawn_request
++        .private_desktop_name
++        .as_deref()
++        .map(LaunchDesktop::open_private)
++        .transpose()?;
+     let (pipe_in_name, pipe_out_name) = pipe_pair();
+     let pipe_write = unsafe {
+         File::from_raw_handle(create_named_pipe(
+@@ -406,6 +486,9 @@
+     let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
+     si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+     si.dwFlags = STARTF_FORCEOFFFEEDBACK;
++    if let Some(desktop) = bootstrap_desktop.as_ref() {
++        si.lpDesktop = desktop.startup_info_desktop();
++    }
+     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+ 
+     let previous_error_mode = unsafe { SetErrorMode(RUNNER_ERROR_MODE_FLAGS) };
+@@ -461,10 +544,13 @@
+         Ok(())
+     })();
+     if let Err(err) = startup_result {
++        // Observe the original pinned process before the existing retirement.
++        // A timeout alone does not establish any initialization exit code.
++        let observation = observe_runner_process(pi.hProcess);
+         unsafe {
+             let _ = TerminateProcess(pi.hProcess, 1);
+         }
+-        return Err(err);
++        return Err(err.context(observation.to_string()));
+     }
+ 
+     if registered_alias.is_some() {
+@@ -641,3 +727,70 @@
+         );
+     }
+ }
++
++#[cfg(test)]
++mod startup_observation_tests {
++    use super::{
++        RunnerLogonError, RunnerProcessObservation, WAIT_OBJECT_0, classify_runner_process,
++    };
++    use windows_sys::Win32::Foundation::{WAIT_FAILED, WAIT_TIMEOUT};
++
++    #[test]
++    fn session0_bootstrap_reports_only_actual_signaled_exit_code() {
++        for code in [0, 1, 259, 0xc0000142] {
++            assert_eq!(
++                classify_runner_process(WAIT_OBJECT_0, 0, || Ok(code)),
++                RunnerProcessObservation::Exited(code)
++            );
++        }
++    }
++
++    #[test]
++    fn session0_bootstrap_still_active_does_not_query_or_invent_exit() {
++        assert_eq!(
++            classify_runner_process(WAIT_TIMEOUT, 0, || panic!("not exited")),
++            RunnerProcessObservation::StillActive
++        );
++    }
++
++    #[test]
++    fn session0_bootstrap_wait_failure_is_not_an_exit_code() {
++        assert_eq!(
++            classify_runner_process(WAIT_FAILED, 5, || panic!("wait failed")),
++            RunnerProcessObservation::InspectionFailed {
++                operation: "WaitForSingleObject",
++                code: 5
++            }
++        );
++    }
++
++    #[test]
++    fn session0_bootstrap_exit_query_failure_retains_its_own_error() {
++        assert_eq!(
++            classify_runner_process(WAIT_OBJECT_0, 0, || Err(6)),
++            RunnerProcessObservation::InspectionFailed {
++                operation: "GetExitCodeProcess",
++                code: 6
++            }
++        );
++    }
++
++    #[test]
++    fn session0_bootstrap_unexpected_wait_is_explicit() {
++        assert_eq!(
++            classify_runner_process(0x80, 0, || panic!("unexpected wait")),
++            RunnerProcessObservation::UnexpectedWait(0x80)
++        );
++    }
++
++    #[test]
++    fn session0_bootstrap_diagnostic_context_preserves_original_classification() {
++        let original = anyhow::Error::new(RunnerLogonError { code: 1326 });
++        let contextual = original.context(RunnerProcessObservation::StillActive.to_string());
++        assert_eq!(
++            contextual.downcast_ref::<RunnerLogonError>().unwrap().code,
++            1326
++        );
++        assert!(format!("{contextual:#}").contains("CreateProcessWithLogonW failed: 1326"));
++    }
++}

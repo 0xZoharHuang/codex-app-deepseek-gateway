@@ -1,0 +1,130 @@
+{
+  "status": "CONCRETE_NATIVE_RESTORATION_PREPARATION_NOT_IMPLEMENTED_BUILT_SIGNED_OR_DEPLOYED",
+  "package_name": "CADSG.NativeRuntime",
+  "manifest_publisher_proposal": "CN=CADSG Native Runtime",
+  "manifest_version_is_proposal_only": "0.0.0.1",
+  "production_App_version_or_native_lock_changed": false,
+  "native_source_base": "O165-P11; 720fec862a608ae1e5878d1eecb04fb93192e93c /0.165.0-alpha.1.2; lock32923acc9502840d9bb38dfb77da1c0474100ddb7a72be61e1c9a6e836717499",
+  "native_graph_unchanged": [
+    "threads",
+    "sampling",
+    "tool dispatch",
+    "sandbox permissions/approvals",
+    "capacity P35 hooks/fence/owned persistence",
+    "IPC protocol payloads"
+  ],
+  "source_changes": [
+    {
+      "paths": [
+        "codex-rs/windows-sandbox-rs/src/app_package.rs"
+      ],
+      "minimum_change": "Extend existing registered_core_requested mode selection only for the actual OS-assigned own runtime ApplicationID RuntimeRegisteredCore (and own CodeModeHost entry as required). RuntimeLegacy requests original Legacy. Keep original explicit environment behavior for ordinary supported callers; no environment package-family spoofing.",
+      "API": "GetCurrentApplicationUserModelId/GetPackageFullName for a held/current real process, never SetCurrentProcessExplicitAppUserModelID or injected token identity.",
+      "authority": "ApplicationID is a mode request only. Original service same-family, exact same-version codex/host image and authenticated token checks remain the authority.",
+      "why_required": "Original fixed App bc() always deletes CODEX_WINDOWS_REGISTERED_CORE for source=override; merely removing Python REMOVED does not make registered mode arrive."
+    },
+    {
+      "paths": [
+        "codex-rs/windows-sandbox-rs/src/provisioning_client.rs",
+        "codex-rs/windows-sandbox-rs/src/provisioning_protocol.rs",
+        "codex-rs/windows-sandbox-rs/src/service_identity.rs"
+      ],
+      "minimum_change": "Restore original request/connect/SCM-PID authentication/explicit setup-start/registration client functions instead of unconditional unavailable stubs. Use only own package-qualified endpoint; Legacy retains original Unavailable helper fallback and Registered retains no-fallback error.",
+      "namespace": "Own pipe base \\\\.\\pipe\\CADSG.WindowsSandbox + actual own package family; service name CADSGSandboxService.CADSG.NativeRuntime (existing family-to-name factory matches manifest). Do not connect stock OpenAI pipe or accept another family.",
+      "protocol_schema": "No new RPC message or namespace field: derive namespace on authenticated server from existing codex_home plus authenticated real user and retained directory identity."
+    },
+    {
+      "paths": [
+        "codex-rs/windows-sandbox-rs/src/installation_record.rs",
+        "codex-rs/windows-sandbox-rs/src/runtime_ownership.rs",
+        "codex-rs/windows-sandbox-service/src/installation_record.rs",
+        "codex-rs/windows-sandbox-service/src/package_lifecycle.rs"
+      ],
+      "minimum_change": "Move only this project installation/RegisteredCore keys to SOFTWARE/CADSG/WindowsSandboxService. Preserve the original single-owner/single-home equality, shutdown/retiring fences, per-resource receipts and rollback.",
+      "stock_untouched": "SOFTWARE/OpenAI/Codex/WindowsSandboxService and its current admin/.codex owner never read for adoption, rewritten or retired by the own service.",
+      "multi_home": "No new multi-home manager: one bound home per service installation; other homes receive original Unavailable/helper fallback where permitted.",
+      "durable_namespace_binding": "Own InstallationRecord optional namespace_id is written under original authenticated owner/home pins before account creation, preserving cleanup after home removal. Stock/CP/RPC schemas unchanged."
+    },
+    {
+      "paths": [
+        "codex-rs/windows-sandbox-rs/src/namespace.rs",
+        "codex-rs/windows-sandbox-rs/src/setup.rs",
+        "codex-rs/windows-sandbox-rs/src/setup_provisioning.rs",
+        "codex-rs/windows-sandbox-rs/src/identity.rs",
+        "codex-rs/windows-sandbox-service/src/provisioning.rs",
+        "codex-rs/windows-sandbox-service/src/provisioning/registered.rs",
+        "codex-rs/windows-sandbox-service/src/registered_runtime.rs"
+      ],
+      "minimum_change": "Restore original service-owned Registered setup branches currently rejected unconditionally. Use existing NamespaceKey::for_directory/for_user with real authenticated owner SID plus canonical pinned home directory volume/file ID. Replace fixed-account selectors only with this existing factory throughout native setup and registration.",
+      "invariants": [
+        "Stock global CodexSandboxOffline/Online cannot be adopted or rotated.",
+        "A preexisting account without exact owner reservation is rejected.",
+        "Only same-version helper inside own protected package directory runs as SYSTEM.",
+        "Keep native directory handles/no-reparse validation through helper wait.",
+        "Native helper fallback remains Legacy; never counterfeit a Registered receipt."
+      ]
+    },
+    {
+      "paths": [
+        "codex-rs/windows-sandbox-rs/src/app_package.rs",
+        "codex-rs/windows-sandbox-service/src/registered_runtime/metadata.rs",
+        "codex-rs/windows-sandbox-service/src/package_identity.rs",
+        "codex-rs/windows-sandbox-service/src/package_identity/registered.rs"
+      ],
+      "minimum_change": "Select project-unique runner alias cadsg-core-command-runner.exe and native NamespaceKey account selectors while preserving RuntimeAccount enum/OS alias result receipts.",
+      "must_not_change": [
+        "Real client/service package family equality",
+        "Exact service version-directory image check for codex.exe/codex-code-mode-host.exe",
+        "Real token owner verification",
+        "Release-mode rejection of unpackaged self-family exceptions",
+        "No-debug/foreground trust bypass"
+      ]
+    },
+    {
+      "paths": [
+        "scripts/build_native.py",
+        "native/build-lock.O165-<next-source>.json"
+      ],
+      "minimum_change": "Add codex-windows-sandbox-service and own codex-code-mode-host producer targets from the same final native source graph. Keep original pinned Rust/MSVC/profile; compile once only after all source changes are frozen and CDS P36 resource lane is free. No reuse of original signed stock helper/service binaries."
+    },
+    {
+      "paths": [
+        "src/codex_app_deepseek/isolated_app.py",
+        "native/runtime-package descriptor"
+      ],
+      "minimum_change": "Add a separate strict package-alias launch descriptor branch. Existing P7/P11 absolute-file branch stays exact. Set official CODEX_CLI_PATH to unique console alias cadsg-native.exe for Core or cadsg-native-legacy.exe for Legacy; keep CODEX_HOME/frontend isolation and official stdio backend.",
+      "before_launch_binding": [
+        "Installed package family/full-name/version and publisher/signature must match own package receipt.",
+        "OS alias registration belongs to that exact package and current owner.",
+        "Expected real native codex.exe path/SHA is inside exact own package version directory.",
+        "Service/kernel package identity and own owner/home record are bound; no stock record adoption."
+      ],
+      "after_launch_binding": [
+        "Query actual native process kernel family/AUMID, real image and SHA.",
+        "Do not compare actual process image to zero-byte/reparse execution-alias path.",
+        "Preserve existing SID/session/birth/role and native app-server observations."
+      ],
+      "no_closed_App_changes": true
+    }
+  ],
+  "official_App_contract": {
+    "fixed_bootstrap_sha256": "40934ad23aa51de1170cb7eb79daa3a4b5f8b947bb0a43ef7bc0e32cd555f88a",
+    "network_startup_module_sha256": "c4497beb1a68f4322acd6ec2fd1a44c06c24025b115b12324aefae5569849e9d",
+    "Ec": "Bare CODEX_CLI_PATH is an explicit override; Oc supplies normal app-server args.",
+    "StdioConnection": "Node spawn resolved executable, original args and stdio=[pipe,pipe,pipe]; no protocol relay needed.",
+    "bc": "Explicit override removes registered-core/package-family environment selectors.",
+    "actual_alias_activation_and_native_IPC_tested": false
+  },
+  "required_later_existing_native_acceptance": [
+    "Normal qualified source/build/package receipt with complete runtime executable closure.",
+    "Real own alias activation returns expected kernel family/ApplicationID and preserves app-server stdin/stdout/EOF/exit/ownership (no models required for first initialize proof).",
+    "Own service Legacy provisioning/fallback and Registered registration, same-home cold reuse and owner mismatch rejection; stock owner/SCM/account data unchanged.",
+    "Actual original closed App selects own alias; native tool/approval/cancel/cold capacity behavior and GUI evidence; no source-only claim."
+  ],
+  "rollback": "Stop only own native owners naturally, use original native registered-runtime teardown/receipts and remove only own package/service/aliases/key. Keep old P7/P9 profiles/artifacts and official App/stock owner untouched. No wildcard service or package removal.",
+  "deployment_precondition_not_waived": true,
+  "implementation_stage": "Private development worktree; source change inventory is retained here.",
+  "implemented_mode_request": "Process-local OnceLock from actual own kernel family/AUMID and exact staged image; no process-global env mutation. Parent host command carries the existing selector for consistency, which host rejects on mismatch. Separate registered/legacy host aliases are explicit.",
+  "implemented_alias_locator": "Exact current-user OS-known package-qualified execution alias path; original App absolute override checks exists/isFile and preserves original stdio. No PATH shadowing or bare alias inference.",
+  "implementation_status": "Native sparse WIP and Python strict alias branch implemented; not frozen/compiled/deployed."
+}

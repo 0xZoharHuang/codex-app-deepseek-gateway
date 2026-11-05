@@ -744,3 +744,154 @@ async def test_cleanup_max_assets_leaves_honest_deferred_count(tmp_path):
     assert second['deleted']==2 and second['remaining_assets']==1
     final=await tr.cleanup(all_unpinned=True,max_assets=2)
     assert final['all_owned_files_deleted'] and final['remaining_assets']==0
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('terminal', ['completed', 'failed', 'incomplete', 'http_rejected'])
+async def test_verified_terminal_pin_recovers_after_release_failure_with_live_owner(tmp_path, monkeypatch, terminal):
+    from contextlib import asynccontextmanager
+    backend = FakeFiles()
+    tr = transport(tmp_path, backend, owner_alive=lambda *_: True)
+    original_db = tr._db
+
+    @asynccontextmanager
+    async def unavailable_during_release(directory):
+        raise OSError('temporary lease-release failure')
+        yield  # pragma: no cover - retain the async context manager shape
+
+    with pytest.raises(OSError, match='temporary lease-release failure'):
+        async with tr.prepare(payload()) as prepared:
+            await prepared.mark_upstream_started('request-settled-release-failure')
+            if terminal == 'http_rejected':
+                await prepared.mark_upstream_rejected(429)
+            else:
+                await prepared.mark_upstream_settled('gen-settled-release-failure', terminal)
+            monkeypatch.setattr(tr, '_db', unavailable_during_release)
+    monkeypatch.setattr(tr, '_db', original_db)
+
+    # Prove the interrupted local release left the already-settled lease behind;
+    # no dead-PID inference, new inference, re-upload, or replay is needed.
+    _, directory = await tr._scope('test-key-a')
+    with closing(sqlite3.connect((directory / 'files.sqlite').as_uri() + '?mode=ro', uri=True)) as db:
+        assert db.execute('SELECT phase FROM pins').fetchall() == [('settled',)]
+    assert len(backend.uploaded) == 1 and not backend.deleted
+    assert tr.owner_alive(tr.pid, tr.birth) is True
+
+    result = await tr.cleanup(all_unpinned=True)
+    assert result['all_owned_files_deleted'] and result['pinned'] == 0
+    assert result['deleted'] == 1 and len(backend.uploaded) == 1
+    assert len(backend.deleted) == 1 and not backend.files
+    assert (await tr.diagnostics())['active_transport_pins'] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('phase', ['prepared', 'upstream_unknown'])
+async def test_live_unsettled_image_pin_survives_recovery_opens(tmp_path, phase):
+    backend = FakeFiles()
+    tr = transport(tmp_path, backend, owner_alive=lambda *_: True)
+    async with tr.prepare(payload()) as prepared:
+        if phase == 'upstream_unknown':
+            await prepared.mark_upstream_started('request-unsettled-remains-protected')
+        # A new transport facade and repeated ledger opens must not turn
+        # elapsed time, a live owner, or a cleanup request into terminal proof.
+        reopened = transport(tmp_path, backend, owner_alive=lambda *_: True)
+        result = await reopened.cleanup(all_unpinned=True)
+        assert result['pinned'] == 1 and not result['all_owned_files_deleted']
+        assert not backend.deleted
+        assert (await reopened.diagnostics())['active_transport_pins'] == 1
+        if phase == 'upstream_unknown':
+            await prepared.mark_upstream_settled('gen-unsettled-now-completed', 'completed')
+    assert (await tr.cleanup(all_unpinned=True))['all_owned_files_deleted']
+
+@pytest.mark.parametrize('location', [
+    'function_parameters', 'function_output_schema', 'responses_schema',
+    'openai_schema', 'metadata', 'client_metadata', 'namespaced_function',
+])
+def test_file_reference_count_ignores_opaque_schema_and_metadata(location):
+    from codex_app_deepseek.image_transport import count_file_references
+    examples = [{'file_id': 'or_file_schema_example_' + str(i).zfill(10)} for i in range(17)]
+    schema = {'type': 'object', 'properties': {'file_id': {'type': 'string'}},
+              'required': ['file_id'], 'additionalProperties': False, 'examples': examples}
+    value = payload()
+    function = {'type': 'function', 'name': 'lookup_file', 'parameters': {'type': 'object'}}
+    if location == 'function_parameters':
+        function['parameters'] = schema
+        value['tools'] = [function]
+    elif location == 'function_output_schema':
+        function['output_schema'] = schema
+        value['tools'] = [function]
+    elif location == 'namespaced_function':
+        function['parameters'] = schema
+        value['tools'] = [{'type': 'namespace', 'name': 'files', 'tools': [function]}]
+    elif location == 'responses_schema':
+        value['text'] = {'format': {'type': 'json_schema', 'name': 'result', 'schema': schema}}
+    elif location == 'openai_schema':
+        value['response_format'] = {'type': 'json_schema', 'json_schema': {'name': 'result', 'schema': schema}}
+    else:
+        # A business tracking value is not an uploaded input-file reference.
+        value[location] = {'file_id': 'business-record-only'}
+    before = copy.deepcopy(value)
+    assert count_file_references(value) == 0
+    assert value == before
+
+
+@pytest.mark.asyncio
+async def test_schema_file_id_examples_do_not_block_actual_prepared_image_request(tmp_path):
+    from codex_deepseek.protocol import MODEL, prepare
+    from codex_app_deepseek.image_transport import count_file_references
+    parameters = {'type': 'object', 'properties': {'file_id': {'type': 'string'}},
+                  'examples': [{'file_id': 'or_file_schema_example_' + str(i).zfill(10)} for i in range(17)]}
+    native = {'model': MODEL, 'stream': True,
+              'input': [{'type': 'message', 'role': 'user', 'content': [part()]}],
+              'tools': [{'type': 'function', 'name': 'lookup_file', 'parameters': parameters}]}
+    original = copy.deepcopy(native)
+    normalized, _ = prepare(native)
+    backend = FakeFiles()
+    tr = transport(tmp_path, backend)
+    async with tr.prepare(normalized) as prepared:
+        assert count_file_references(prepared.payload) == 1
+        assert prepared.existing_file_references == 0 and prepared.converted_occurrences == 1
+        assert prepared.payload['tools'][0]['parameters'] == parameters
+        assert prepared.uploads == 1 and prepared.reused == 0
+        assert prepared.references[0]['sha256'] == hashlib.sha256(png()).hexdigest()
+    assert native == original
+    assert (await tr.cleanup(all_unpinned=True))['all_owned_files_deleted']
+
+
+def test_real_reference_occurrences_and_unclassified_file_fields_remain_reserved():
+    from codex_app_deepseek.image_transport import count_file_references
+    same_id = 'or_file_same_resource'
+    value = payload([
+        {'type': 'input_image', 'file_id': same_id},
+        {'type': 'input_file', 'file_id': same_id},
+    ])
+    value['input'] += [
+        {'type': 'function_call_output', 'call_id': 'first', 'output': [
+            {'type': 'input_image', 'file_id': same_id}, {'type': 'input_file', 'file_id': same_id}]},
+        {'type': 'custom_tool_call_output', 'call_id': 'second', 'output': [
+            {'type': 'input_image', 'file_id': same_id}]},
+    ]
+    value['tools'] = [
+        {'type': 'code_interpreter', 'container': {'type': 'auto', 'file_ids': [same_id, same_id]}},
+        {'type': 'openrouter:bash', 'parameters': {'environment': {
+            'type': 'container_auto', 'file_ids': [same_id, same_id]}}},
+        {'type': 'openrouter:shell', 'parameters': {'environment': {
+            'type': 'container_reference', 'id': 'session-owned-elsewhere', 'file_ids': [same_id]}}},
+        {'type': 'image_generation', 'input_image_mask': {'file_id': same_id}},
+    ]
+    # Unknown locations remain conservatively counted rather than silently
+    # treated as opaque data. This does not declare new access-program support.
+    value['access_programs'] = {'future': {'file_ids': [same_id]}}
+    value['future_extension'] = {'file_id': same_id}
+    assert count_file_references(value) == 13
+
+
+def test_file_reference_counter_never_parses_arguments_or_text_outputs():
+    from codex_app_deepseek.image_transport import count_file_references
+    text = json.dumps({'file_id': 'or_file_text_only', 'file_ids': ['or_file_text_only'] * 17})
+    value = payload()
+    value['input'] += [
+        {'type': 'function_call', 'name': 'lookup_file', 'call_id': 'first', 'arguments': text},
+        {'type': 'function_call_output', 'call_id': 'first', 'output': text},
+        {'type': 'custom_tool_call_output', 'call_id': 'second', 'output': text},
+    ]
+    assert count_file_references(value) == 0

@@ -31,6 +31,13 @@ NATIVE_TARGETS = {
     "codex-windows-sandbox-setup.exe": ("codex-windows-sandbox", "codex-windows-sandbox-setup"),
     "codex-windows-managed-deny-probe.exe": ("codex-windows-sandbox", "codex-windows-managed-deny-probe"),
 }
+# Explicit runtime-only package candidates can build these open native targets
+# from the same pinned graph; the historical four-target release gate is separate.
+NATIVE_PACKAGE_TARGETS = {
+    **NATIVE_TARGETS,
+    "codex-windows-sandbox-service.exe": ("codex-windows-sandbox-service", "codex-windows-sandbox-service"),
+    "codex-code-mode-host.exe": ("codex-code-mode-host", "codex-code-mode-host"),
+}
 
 def build_jobs_policy(override: int | None = None) -> dict:
     maximum = int(PROFILE["CARGO_BUILD_JOBS"])
@@ -41,11 +48,16 @@ def build_jobs_policy(override: int | None = None) -> dict:
             "build_jobs_override": override}
 
 
-def build_commands(toolchain: Path, binaries: list[str], *, jobs: int | None = None) -> list[list[str]]:
+def build_commands(toolchain: Path, binaries: list[str], *, jobs: int | None = None, runtime_package: bool = False) -> list[list[str]]:
+    require(type(runtime_package) is bool, "Runtime package mode must be explicit")
+    targets = NATIVE_PACKAGE_TARGETS if runtime_package else NATIVE_TARGETS
+    require(not runtime_package or (isinstance(binaries, list) and len(binaries) == 6
+            and set(binaries) == set(NATIVE_PACKAGE_TARGETS)),
+            "Runtime package must build exactly the six own native targets")
     require(isinstance(binaries, list) and bool(binaries)
-            and all(isinstance(name, str) and name in NATIVE_TARGETS for name in binaries)
+            and all(isinstance(name, str) and name in targets for name in binaries)
             and len(binaries) == len(set(binaries)), "Unsupported or duplicate native binary targets")
-    packages = list(dict.fromkeys(NATIVE_TARGETS[name][0] for name in binaries))
+    packages = list(dict.fromkeys(targets[name][0] for name in binaries))
     build_jobs_policy(jobs)
     command = [str(toolchain / "cargo.exe"), "build", "--locked", "--release"]
     if jobs is not None:
@@ -53,7 +65,7 @@ def build_commands(toolchain: Path, binaries: list[str], *, jobs: int | None = N
     for package in packages:
         command.extend(["-p", package])
     for name in binaries:
-        command.extend(["--bin", NATIVE_TARGETS[name][1]])
+        command.extend(["--bin", targets[name][1]])
     return [command]
 
 
@@ -63,6 +75,72 @@ def sha(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             value.update(chunk)
     return value.hexdigest()
+
+def verified_rusty_v8_inputs(source: Path, directory: Path, target: str) -> dict:
+    """Use the exact Codex-built sandbox pair and checksum chain used upstream.
+
+    See the pinned source .github/actions/setup-rusty-v8/action.yml. Inputs may
+    be downloaded beforehand; never substitute upstream's non-sandbox pair.
+    """
+    import re
+    import tomllib
+
+    require(target in {"x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"},
+            "Unsupported V8 target")
+    versions = {row["version"] for row in tomllib.loads(
+        (source / "codex-rs/Cargo.lock").read_text(encoding="utf8"))["package"]
+        if row["name"] == "v8"}
+    require(len(versions) == 1, "Expected exactly one pinned V8 crate version")
+    version = versions.pop()
+    require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is not None,
+            "Unsupported V8 version")
+    profile = "ptrcomp_sandbox_release"
+    manifest_name = f"rusty_v8_{profile}_{target}.sha256"
+    archive_name = f"rusty_v8_{profile}_{target}.lib.gz"
+    binding_name = f"src_binding_{profile}_{target}.rs"
+    trusted = source / "third_party/v8" / (
+        "rusty_v8_" + version.replace(".", "_") + "_release_manifests.sha256")
+
+    def checksums(data: bytes) -> dict[str, str]:
+        result = {}
+        for line in data.decode("utf8").splitlines():
+            if not line.strip():
+                continue
+            fields = line.split()
+            require(len(fields) == 2 and re.fullmatch(r"[0-9a-f]{64}", fields[0])
+                    and Path(fields[1]).name == fields[1] and fields[1] not in result,
+                    "Invalid or duplicate V8 checksum entry")
+            result[fields[1]] = fields[0]
+        return result
+
+    pinned = checksums(trusted.read_bytes())
+    require(manifest_name in pinned, "Pinned source has no V8 manifest for this target")
+    directory = directory.absolute()
+    for ancestor in [directory, *directory.parents]:
+        require(not ancestor.is_symlink() and not (
+            hasattr(ancestor, "is_junction") and ancestor.is_junction()),
+            "V8 input directory must not be redirected")
+    records = []
+    def verified(name: str, expected: str) -> Path:
+        path = directory / name
+        require(path.is_file() and not path.is_symlink() and path.stat().st_nlink == 1,
+                f"Missing or unsafe official V8 input: {name}; prepare setup-rusty-v8 artifacts")
+        require(sha(path) == expected, f"Official V8 checksum mismatch: {name}")
+        records.append({"file": str(path), "sha256": expected, "size": path.stat().st_size})
+        return path
+
+    manifest = verified(manifest_name, pinned[manifest_name])
+    pair = checksums(manifest.read_bytes())
+    require(set(pair) == {archive_name, binding_name},
+            "V8 manifest must name exactly the sandbox archive and binding")
+    archive = verified(archive_name, pair[archive_name])
+    binding = verified(binding_name, pair[binding_name])
+    return {"version": version, "target": target, "profile": profile,
+            "source_manifest": str(trusted), "source_manifest_sha256": sha(trusted),
+            "official_base_url": f"https://github.com/openai/codex/releases/download/rusty-v8-v{version}",
+            "files": records, "environment": {"RUSTY_V8_ARCHIVE": str(archive),
+                                                  "RUSTY_V8_SRC_BINDING_PATH": str(binding)}}
+
 
 def extended(path: Path) -> Path:
     prefix = chr(92) * 2 + "?" + chr(92)
@@ -200,7 +278,8 @@ def build_environment(work: Path, toolchain: Path, cache_dir: Path | None = None
     cache = cache_dir if cache_dir is not None else work
     environment = dict(os.environ)
     for key in list(environment):
-        if key.startswith("CARGO_PROFILE_RELEASE_") or key in {
+        if key.startswith(("CARGO_PROFILE_RELEASE_", "RUSTY_V8_")) or key in {
+            "V8_FROM_SOURCE", "V8_FORCE_DEBUG", "DENO_TRYBUILD", "DOCS_RS",
             "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
             "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS",
         }:
@@ -356,6 +435,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--build-lock", type=Path, default=REPO / "native/build-lock.json", help="Explicit pinned source/target lock; defaults to the current CLI candidate")
     parser.add_argument("--jobs", type=int, choices=range(1, int(PROFILE["CARGO_BUILD_JOBS"]) + 1),
                         help="Official Cargo concurrency override, bounded by the locked maximum")
+    parser.add_argument("--rusty-v8-dir", type=Path, help="Official Codex V8 sandbox archive/binding/checksum directory, required for code-mode-host")
     parser.add_argument("--dry-run", action="store_true", help="Verify inputs/tool versions and print the plan without writing")
     args = parser.parse_args(argv)
     require(os.name == "nt", "this candidate targets Windows; use a Windows x64 MSVC Developer shell")
@@ -386,7 +466,9 @@ def main(argv: list[str] | None = None) -> int:
     require(git is not None and linker is not None and bool(os.environ.get("LIB")),
             "Git and the MSVC linker/LIB environment are required; open an x64 Developer shell")
     # One invocation for exactly the locked targets; never --bins.
-    commands = build_commands(toolchain, lock["binaries"], jobs=args.jobs)
+    require(lock.get("package_mode") in (None, "cadsg-native-msix"), "Unsupported native package mode")
+    commands = build_commands(toolchain, lock["binaries"], jobs=args.jobs,
+                              runtime_package=lock.get("package_mode") == "cadsg-native-msix")
     plan = {"schema_version": 1, "mode": "dry-run" if args.dry_run else "build",
             "build_lock_sha256": sha(lock_path), "upstream_commit": lock["upstream_commit"],
             "native_version": lock["native_version"],
@@ -431,6 +513,12 @@ def main(argv: list[str] | None = None) -> int:
         summary = {"changed_files": [change["path"] for change in changes], "source_changes": changes}
         report.update(summary)
         atomic(work / "source-manifest.json", {**before, **summary})
+        if "codex-code-mode-host.exe" in lock["binaries"]:
+            inputs = args.rusty_v8_dir or work / "build-inputs/rusty-v8"
+            report["rusty_v8"] = verified_rusty_v8_inputs(source, inputs, lock["target"])
+            environment.update(report["rusty_v8"]["environment"])
+            plan["rusty_v8"] = report["rusty_v8"]
+            atomic(report_path, report)
         # Foreground subprocesses, exactly as in an ordinary developer shell; no service or runner.
         for command in commands:
             phase = {"command": command, "status": "building"}
@@ -441,6 +529,8 @@ def main(argv: list[str] | None = None) -> int:
                                        creationflags=subprocess.BELOW_NORMAL_PRIORITY_CLASS)
             phase.update(exit_code=completed.returncode, status="passed" if completed.returncode == 0 else "failed")
             require(completed.returncode == 0, "native compiler failed; inspect its output and the retained build directory")
+        for item in report.get("rusty_v8", {}).get("files", []):
+            require(sha(Path(item["file"])) == item["sha256"], "V8 build input changed during compilation")
         after = source_state(source)
         require(before == after, "source changed during build; outputs are invalid and will not be copied")
         require(sha(archive) == plan["archive_sha256"], "upstream archive changed during compilation")

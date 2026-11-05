@@ -1,0 +1,208 @@
+{
+  "status": "FINAL_SOURCE_PROPOSAL_NOT_COMPILED_NOT_DEPLOYED",
+  "base_P13_lock_sha256": "e616de2b5a2f98a2d164894246087940fcef5c7d4a1e79733ae8244e34da8509",
+  "candidate_lock_sha256": "c858006cee98b5dab092d06b494fa3a0b64f3dd376ae593a0f51729bc08e206a",
+  "patch": {
+    "file": "cadsg-native-service-finalizer-0165.patch",
+    "sha256": "94be9dbe861cd97f834d86bc362e5aed1bfe9e5008ac7c206d9eab6387de1197"
+  },
+  "prepared_source_sha256": "61974cd36d19f0f8ff5b5172986658d5a415051b2999d68bc0a255b3a7c972fe",
+  "prepared_source_files": 9525,
+  "scope": [
+    {
+      "path": "codex-rs/cli/src/doctor/sandbox.rs",
+      "before": {
+        "sha256": "6ec677f3fbe98c2ef8c1ccebb4c647934bc46e7448f1859cdcb1bf17cf5a2b97",
+        "size": 16297
+      },
+      "after": {
+        "sha256": "70609a110dd9f6fc46b5840e13387d608d2fd22dccb32e55749fbdbc5231d763",
+        "size": 16979
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/identity.rs",
+      "before": {
+        "sha256": "2afb3ca886a89ccc61ba46cf99f85f516a4569d651b31531d755c206c79765be",
+        "size": 31716
+      },
+      "after": {
+        "sha256": "edef8af27bc1ef237e679521363e6881ed7e121fe9e769ac121961709a8ce344",
+        "size": 32062
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/lib.rs",
+      "before": {
+        "sha256": "7002495d2d692ddf13baac0acff86d8a26a411403ed9755fce7a89b44fc2f4bc",
+        "size": 38443
+      },
+      "after": {
+        "sha256": "e2040a11ebf87b7dfe7769da14dd9178e127c7941e251633852714a1b5e2dec8",
+        "size": 38613
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/runtime_ownership.rs",
+      "before": {
+        "sha256": "42a82a04d71ff969c5b5eac1d4946b08b6e632e816b2f088f23a5feea2cf74ed",
+        "size": 11311
+      },
+      "after": {
+        "sha256": "0d26e0b9846f29415afc9b52421766588264d9891034a01b8547191e10dbe8f3",
+        "size": 11554
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-rs/src/runtime_ownership_tests.rs",
+      "before": {
+        "sha256": "32774067de67d7e53df495ac8d8bd1b999fab9d4eee50df98c2c9f0aa0d0941e",
+        "size": 11000
+      },
+      "after": {
+        "sha256": "72809f9b10f9c80b0b556afcabddec15224da30400f07b7643f4c8deed527b28",
+        "size": 11132
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-service/src/package_lifecycle.rs",
+      "before": {
+        "sha256": "1f0037523a7e6ab01b13d283d51887bc867b540c8897a804e59512fa5762eecd",
+        "size": 13022
+      },
+      "after": {
+        "sha256": "541ab74906b25bcd486d8b7b7bf076f18b71882dd4b5f496547397dfa3f53d20",
+        "size": 14058
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-service/src/registered_runtime/removal.ps1",
+      "before": {
+        "sha256": "7f7fdb31fb40f14af9ff5fcf636636dc9fb330417e36daf0b3dc8af778e7c02f",
+        "size": 14848
+      },
+      "after": {
+        "sha256": "e6b9bc131804b4e59baa375d1891cb36121491dd93c85cae693674a542ce42c7",
+        "size": 15775
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-service/src/registered_runtime/removal.rs",
+      "before": {
+        "sha256": "6759ebaf5d079613369316d19b45cc219502d988a66cebea8c047f61509912c9",
+        "size": 11158
+      },
+      "after": {
+        "sha256": "92cd9a638b47c95a390fabcba029d47d27af16717e9e212b5b147458abc6ed17",
+        "size": 11976
+      }
+    },
+    {
+      "path": "codex-rs/windows-sandbox-service/src/registered_runtime/removal_tests.rs",
+      "before": {
+        "sha256": "0a753c7cbef395fb5ccccb308af3555ca420ed8b5a5a6701aba943383940d267",
+        "size": 5841
+      },
+      "after": {
+        "sha256": "a7b0204f56fe83f432532ee28182bc48cc2b820deef5d880f1846c646e16d3dc",
+        "size": 9951
+      }
+    }
+  ],
+  "same_73_planned_native_names": [
+    "context_manager::history::tests::request_capacity_restored_calls_use_native_aborted_outputs_without_mutating_live_history::function",
+    "context_manager::history::tests::request_capacity_restored_calls_use_native_aborted_outputs_without_mutating_live_history::custom",
+    "context_manager::history::tests::request_capacity_restored_calls_use_native_aborted_outputs_without_mutating_live_history::local_shell",
+    "context_manager::history::tests::request_capacity_restored_calls_use_native_aborted_outputs_without_mutating_live_history::tool_search",
+    "context_manager::history::tests::request_capacity_restored_custom_call_output_id_is_stable_across_independent_rebuilds",
+    "compact::tests::request_capacity_byte_prefix_bounds_dense_data_instead_of_counting_small_notes",
+    "compact::tests::request_capacity_byte_prefix_dominant_first_input_does_not_retry_every_trailing_note",
+    "compact::tests::request_capacity_byte_prefix_requires_new_real_input_after_the_previous_summary",
+    "context_manager::history::tests::request_capacity_fresh_summary_keeps_current_turn_and_completes_only_restored_old_pairs",
+    "context_manager::history::tests::request_capacity_fresh_summary_requires_current_turn_and_stops_before_ambiguous_input",
+    "context_manager::history::tests::request_capacity_fresh_summary_does_not_cross_pair_ending_in_current_turn",
+    "compact::tests::request_capacity_fresh_summary_recovers_old_cp6_without_manual_or_ordinary_warmup::old_cp6_direct_fresh_summary",
+    "compact::tests::request_capacity_fresh_summary_recovers_old_cp6_without_manual_or_ordinary_warmup::byte_bounded_subset_preserves_all_unsent_history",
+    "compact::tests::request_capacity_fresh_summary_recovers_old_cp6_without_manual_or_ordinary_warmup::completed_without_summary_cannot_install",
+    "compact::tests::request_capacity_fresh_summary_recovers_old_cp6_without_manual_or_ordinary_warmup::failed_upstream_cannot_install",
+    "compact::tests::request_capacity_fresh_summary_recovers_old_cp6_without_manual_or_ordinary_warmup::changed_native_lifetime_cannot_install",
+    "compact::tests::request_capacity_fresh_summary_recovers_old_cp6_without_manual_or_ordinary_warmup::changed_auth_owner_cannot_install",
+    "compact::tests::request_capacity_fresh_summary_recovers_old_cp6_without_manual_or_ordinary_warmup::seven_image_budget_six_requires_whole_transaction",
+    "compact::tests::request_capacity_fresh_summary_recovers_old_cp6_without_manual_or_ordinary_warmup::cancelled_after_partial_response_cannot_install",
+    "context_manager::history::tests::request_capacity_prefix_protects_crossing_and_unfinished_native_pairs::function_pair",
+    "context_manager::history::tests::request_capacity_prefix_protects_crossing_and_unfinished_native_pairs::custom_pair",
+    "context_manager::history::tests::request_capacity_prefix_protects_crossing_and_unfinished_native_pairs::local_shell_function_output_pair",
+    "context_manager::history::tests::request_capacity_prefix_protects_crossing_and_unfinished_native_pairs::client_tool_search_pair",
+    "context_manager::history::tests::request_capacity_prefix_rechecks_pairs_after_moving_boundary_back",
+    "context_manager::history::tests::request_capacity_prefix_keeps_native_standalone_server_tool_search_output",
+    "compact::tests::byte_capacity_compaction_preserves_unconsumed_suffix_and_fences_epoch",
+    "compact::tests::irreducible_capacity_failure_keeps_history_and_failed_attempt_fence",
+    "compact::tests::capacity_token_budget_reset_preserves_pending_and_concurrent_suffix_without_model",
+    "compact::tests::capacity_token_budget_without_confirmed_cursor_preserves_input",
+    "compact::tests::capacity_token_budget_stale_prefix_returns_original_http413",
+    "compact::tests::manual_partition_does_not_treat_other_http_errors_as_byte_capacity::unauthorized",
+    "compact::tests::manual_partition_does_not_treat_other_http_errors_as_byte_capacity::rate_limited",
+    "compact::tests::manual_partition_does_not_treat_other_http_errors_as_byte_capacity::unavailable",
+    "compact::tests::capacity_installer_rechecks_real_cancel_token_after_waiting_for_native_state_lock",
+    "compact::tests::capacity_token_budget_already_cancelled_helper_preserves_native_state_without_model",
+    "compact::tests::capacity_token_cancel_prevents_summary_install_without_dropping_future::cancel_and_release_final_summary_inside_native_grace",
+    "compact::tests::capacity_token_cancel_prevents_summary_install_without_dropping_future::stopped_helper_emits_no_request",
+    "session::tests::capacity_commit_tests::capacity_complete_cancel_before_guard_keeps_real_window_history_and_writer_unchanged",
+    "session::tests::capacity_commit_tests::capacity_owned_commit_survives_native_force_abort_and_orders_real_writer::after_add_ack_withheld_with_native_interruption_marker",
+    "session::tests::capacity_commit_tests::capacity_owned_commit_survives_native_force_abort_and_orders_real_writer::after_add_ack_withheld_without_native_interruption_marker",
+    "session::tests::capacity_commit_tests::capacity_owned_commit_survives_native_force_abort_and_orders_real_writer::before_add_with_native_interruption_marker",
+    "session::tests::capacity_commit_tests::capacity_owned_commit_survives_native_force_abort_and_orders_real_writer::before_add_without_native_interruption_marker",
+    "session::tests::capacity_commit_tests::capacity_owned_commit_survives_native_force_abort_and_orders_real_writer::shutdown_admission_closes_before_add_finishes",
+    "session::tests::capacity_commit_tests::capacity_owned_commit_survives_native_force_abort_and_orders_real_writer::shutdown_admission_closes_while_append_ack_withheld",
+    "compact::tests::historical_typed_projection_tests::historical_projection_message_keeps_positional_metadata_and_media",
+    "compact::tests::historical_typed_projection_tests::historical_projection_refuses_unattributed_current_or_incomplete_items::_current_expects",
+    "compact::tests::historical_typed_projection_tests::historical_projection_refuses_unattributed_current_or_incomplete_items::_encrypted_expects",
+    "compact::tests::historical_typed_projection_tests::historical_projection_refuses_unattributed_current_or_incomplete_items::_in_progress_expects",
+    "compact::tests::historical_typed_projection_tests::historical_projection_refuses_unattributed_current_or_incomplete_items::_incomplete_expects",
+    "compact::tests::historical_typed_projection_tests::historical_projection_refuses_unattributed_current_or_incomplete_items::_missing_output_expects",
+    "compact::tests::historical_typed_projection_tests::historical_projection_refuses_unattributed_current_or_incomplete_items::_unknown_expects",
+    "compact::tests::historical_typed_projection_tests::historical_projection_rejects_extra_suffix_or_changed_native_instruction",
+    "compact::tests::historical_typed_projection_tests::historical_projection_requires_fresh_summary_exact_parts_and_carry_chain",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::exact_completed_pair_seven_images_budget_six",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::interleaved_parallel_pairs_three_plus_four_and_empty_output",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::later_completed_without_fresh_summary_installs_nothing",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::later_typed_part_upstream_failure_installs_nothing",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::native_function_output_seven_images_budget_six",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::one_historical_message_seven_images_and_positional_metadata",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::real_token_cancelled_after_first_typed_part_summary",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::single_historical_text_512k_bytes_budget_256k",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::confirmed_current_turn_unicode_text_budget_256k",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::real_token_cancelled_after_first_text_byte_range_summary",
+    "compact::tests::historical_typed_projection_tests::historical_typed_projection_reads_all_parts_before_one_durable_install::later_text_byte_range_upstream_failure_installs_nothing",
+    "session::capacity_reset_continuation::tests::local_reset_with_old_gap_keeps_native_hook_and_writer_contract::post_native_hook_plan_retains_exact_old_assistant_and_current_suffix",
+    "session::capacity_reset_continuation::tests::local_reset_with_old_gap_keeps_native_hook_and_writer_contract::stopped_native_hook_changes_no_history_window_checkpoint_or_model",
+    "session::capacity_reset_continuation::tests::real_sampling_reset_then_413_fresh_old_gap_then_ordinary_preserves_current",
+    "desktop::service_station::tests::actual_interactive_native_null_bootstrap_readonly_without_station_grant",
+    "app_package::project_mode::tests::explicit_legacy_and_registered_cli_do_not_cross",
+    "app_package::project_mode::tests::host_checks_parent_mode_and_kernel_role",
+    "app_package::project_mode::tests::unknown_role_family_and_selector_fail_closed",
+    "namespace_coordination::tests::service_role_does_not_confuse_packaged_owner_with_tool_accounts",
+    "runtime_ownership::tests::project_namespace_binding_survives_missing_home_but_rejects_replacement"
+  ],
+  "additional_existing_service_nodes": [
+    "registered_runtime::removal::tests::finalizer_script_parses_and_native_bindings_compile",
+    "registered_runtime::removal::tests::finalizer_preserves_utf8_plan_and_requires_commit_and_stdin_eof"
+  ],
+  "actual_binary_list_verified": false,
+  "finalizer_all_record_accounts_exact_names_and_SID": true,
+  "namespace_CAS_for_Core_and_parent": true,
+  "Legacy_true_missing_home_watchers_restored": true,
+  "Registered_original_missing_credentials_limit_preserved": true,
+  "doctor_queries_only_owned_native_factory_names": true,
+  "unknown_namespace_stock_lookup_fallback": false,
+  "shared_native_setup_mutex_preserved": true,
+  "targeted_literal_review": "Private source inventory audit; original digest retained.",
+  "independent_review": "r333 bounded P14 source review delivered 2026-11-04: no remaining must-fix blocker; receipt to follow",
+  "actual_PS_pure_contract": "Private PowerShell contract receipt; original digest retained.",
+  "actual_PS_cleanup_body_or_SAM_invoked": false,
+  "compiled": false,
+  "native_unit_executed": false,
+  "App_GUI_qualified": false,
+  "release_gate_open": false,
+  "active_P9_changed": false
+}

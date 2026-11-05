@@ -1,0 +1,133 @@
+diff --git a/codex-rs/windows-sandbox-rs/src/namespace_coordination.rs b/codex-rs/windows-sandbox-rs/src/namespace_coordination.rs
+index 0ce85852b636a8bd8a63a3d46e57b43779160184..a1699780211badceaaf3495f999420dc19e9e754 100644
+--- a/codex-rs/windows-sandbox-rs/src/namespace_coordination.rs
++++ b/codex-rs/windows-sandbox-rs/src/namespace_coordination.rs
+@@ -29,9 +29,18 @@ fn enabled(attributes: u32) -> bool {
+ }
+ 
+ fn select_namespace(user_name: &str, groups: &[GroupObservation]) -> Result<NamespaceKey> {
++    namespace_role(user_name, groups, true)?
++        .context("runner token has no enabled local namespace alias")
++}
++
++fn namespace_role(
++    user_name: &str,
++    groups: &[GroupObservation],
++    require_enabled: bool,
++) -> Result<Option<NamespaceKey>> {
+     let mut selected = None;
+     for group in groups {
+-        if !enabled(group.attributes)
++        if (require_enabled && !enabled(group.attributes))
+             || !group.local_domain
+             || !NamespaceKey::claims_group_name(&group.name)
+         {
+@@ -54,7 +63,7 @@ fn select_namespace(user_name: &str, groups: &[GroupObservation]) -> Result<Name
+         );
+         selected = Some(key);
+     }
+-    selected.context("runner token has no enabled local namespace alias")
++    Ok(selected)
+ }
+ 
+ pub(crate) fn account_name(sid: &[u8]) -> Result<(String, i32)> {
+@@ -161,7 +170,9 @@ pub unsafe fn token_is_home_sandbox_account(token: HANDLE) -> Result<bool> {
+     let (user_name, kind) = account_name(&user)?;
+     let mut observations = Vec::new();
+     for group in unsafe { token_groups(token, 1_048_576) }? {
+-        if !enabled(group.attributes) || !same_domain(&user, &group.sid)? {
++        // A disabled/deny-only alias still identifies the native tool account.
++        // It grants no authority; the coordination selector separately requires enabled groups.
++        if !same_domain(&user, &group.sid)? {
+             continue;
+         }
+         let (name, kind) = account_name(&group.sid)?;
+@@ -190,11 +201,7 @@ pub unsafe fn token_is_home_sandbox_account(token: HANDLE) -> Result<bool> {
+ }
+ 
+ fn is_namespace_sandbox_role(name: &str, observations: &[GroupObservation]) -> Result<bool> {
+-    if observations.is_empty() {
+-        return Ok(false);
+-    }
+-    select_namespace(name, observations)?;
+-    Ok(true)
++    Ok(namespace_role(name, observations, false)?.is_some())
+ }
+ 
+ /// Derives only a coordination name, after binding the actual user and local alias.
+@@ -305,6 +312,21 @@ mod tests {
+         assert!(!is_namespace_sandbox_role("normal_core_owner", &[]).unwrap());
+         assert!(is_namespace_sandbox_role(&key().offline(), &[group()]).unwrap());
+         assert!(is_namespace_sandbox_role(&key().online(), &[group()]).unwrap());
++        for attributes in [0, SE_GROUP_USE_FOR_DENY_ONLY as u32] {
++            let mut restricted = group();
++            restricted.attributes = attributes;
++            // Restrictions do not turn the account into a legitimate Core owner.
++            assert!(
++                is_namespace_sandbox_role(&key().offline(), std::slice::from_ref(&restricted))
++                    .unwrap()
++            );
++            assert!(
++                is_namespace_sandbox_role(&key().online(), std::slice::from_ref(&restricted))
++                    .unwrap()
++            );
++            // The same disabled membership still cannot authorize coordination.
++            assert!(select_namespace(&key().offline(), std::slice::from_ref(&restricted)).is_err());
++        }
+         // Another home's native key still classifies as a tool token; no target-home argument can adopt it.
+         let other =
+             NamespaceKey::for_directory("c:\\other-owned-home", "S-1-5-21-1-2-3-1001", 4, [8; 16]);
+diff --git a/codex-rs/windows-sandbox-rs/src/runtime_ownership_tests.rs b/codex-rs/windows-sandbox-rs/src/runtime_ownership_tests.rs
+index bd641509c188a408baacdc860d6ef48d55acb2db..31da7cdcc8d3716e4dbb6d135b1ce854f148ac77 100644
+--- a/codex-rs/windows-sandbox-rs/src/runtime_ownership_tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/runtime_ownership_tests.rs
+@@ -293,8 +293,18 @@ fn project_namespace_binding_survives_missing_home_but_rejects_replacement() ->
+     };
+     let offline = crate::SandboxRuntimeAccount::Offline.username_for(&record)?;
+     assert_eq!(offline, namespace.key.offline());
++    let mut verbatim_record = record.clone();
++    verbatim_record.codex_home = std::fs::canonicalize(&home)?;
++    assert_eq!(
++        crate::uninstall_windows::cleanup_home_for_installation(&verbatim_record)?,
++        namespace.home
++    );
+     crate::runtime_ownership::validate_installation_namespace(&record)?;
+     std::fs::remove_dir_all(&home)?;
++    assert_eq!(
++        crate::uninstall_windows::cleanup_home_for_installation(&verbatim_record)?,
++        verbatim_record.codex_home
++    );
+     assert_eq!(
+         crate::SandboxRuntimeAccount::Offline.username_for(&record)?,
+         offline
+diff --git a/codex-rs/windows-sandbox-rs/src/uninstall_windows.rs b/codex-rs/windows-sandbox-rs/src/uninstall_windows.rs
+index 75ae4fb8ac9a3e2a14ae0d09cd90e76ca2b4f52e..867865aa57779ba7fdf0bd3eff2595502ff14a50 100644
+--- a/codex-rs/windows-sandbox-rs/src/uninstall_windows.rs
++++ b/codex-rs/windows-sandbox-rs/src/uninstall_windows.rs
+@@ -97,6 +97,17 @@ pub fn prepare_packaged_windows_sandbox_cleanup_with_retained_tokens(
+     prepare_for_namespace_key(namespace.key, namespace.home, tokens, setup_lock)
+ }
+ 
++/// Match the native finish-side canonical form without requiring a deleted home to reappear.
++pub(crate) fn cleanup_home_for_installation(
++    installation: &crate::InstallationRecord,
++) -> Result<std::path::PathBuf> {
++    if installation.codex_home.exists() {
++        Ok(dunce::canonicalize(&installation.codex_home)?)
++    } else {
++        Ok(installation.codex_home.clone())
++    }
++}
++
+ /// Service-owned resources use the protected record, never SYSTEM's CODEX_HOME.
+ pub fn prepare_packaged_windows_sandbox_cleanup_for_installation(
+     installation: &crate::InstallationRecord,
+@@ -106,7 +117,7 @@ pub fn prepare_packaged_windows_sandbox_cleanup_for_installation(
+     crate::runtime_ownership::validate_installation_namespace(installation)?;
+     prepare_for_namespace_key(
+         crate::runtime_ownership::installation_namespace_key(installation)?,
+-        installation.codex_home.clone(),
++        cleanup_home_for_installation(installation)?,
+         tokens,
+         setup_lock,
+     )

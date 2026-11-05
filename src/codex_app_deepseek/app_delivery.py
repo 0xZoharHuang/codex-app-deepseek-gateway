@@ -17,7 +17,7 @@ from .atomic_io import target_state
 from . import gateway_policy as gp
 from . import native_app_tools as tools
 
-LAUNCHER_SHA256 = "9a9269f2439aacca2c5b859a82497a1f8ad41a3b1fd111638e5c8701e8025507"
+LAUNCHER_SHA256 = "586b96f7f2df599f6b1bca7befbbb7f329900a4ab068fb95db1eb3b5dceeb31a"
 AUTH_ARGS = ("-I", "-m", "codex_app_deepseek.cli", "auth-token")
 # Only this previously shipped, retained cohort is eligible for an explicit
 # upgrade. Normal reads still require the current baseline exactly.
@@ -232,12 +232,13 @@ def _backup_prior_binding(installation, raw, retained, applied_sha256):
     return str(directory)
 
 
-def native_request(binding, *, accessibility=False, observation_seconds=60):
+def native_request(binding, *, accessibility=False, observation_seconds=60, trace_root=None):
     baseline, _ = assets()
     return {"baseline": str(baseline), "native_manifest": binding["native_manifest"],
             "native_manifest_sha256": binding["native_manifest_sha256"],
             "app_args": ["--force-renderer-accessibility"] if accessibility else [],
-            "timeout_seconds": observation_seconds}
+            "timeout_seconds": observation_seconds,
+            **({"trace_root": str(trace_root)} if trace_root is not None else {})}
 
 
 def prepare_runtime(root, manifest, digest, *, backend=None):
@@ -269,7 +270,11 @@ def bind(root, manifest, digest, *, backend=None):
         except app.LaunchError as error:
             raise DeliveryError(str(error)) from error
         app.verify_package(backend.package(expected), expected)
-        app.verify_bundle(manifest, digest, expected)
+        bundle = app.verify_launch_bundle(manifest, digest, expected, backend, owner, paths["home"])
+        snapshot = getattr(backend, "native_runtime_owner_snapshot", None)
+        if snapshot is not None:
+            from . import runtime_package
+            runtime_package.require_mode_available(bundle.get("runtime_package"), snapshot(), owner, paths["home"])
         value = {"schema_version": 1, "project": lc.PROJECT,
                  "gateway_release_id": installation.receipt["release_id"], "owner_sid": owner["sid"],
                  "native_manifest": str(manifest), "native_manifest_sha256": digest,
@@ -320,7 +325,8 @@ def configure(root, catalog, catalog_sha256, *, port=42817, backend=None):
             raise DeliveryError(str(error)) from error
         value = read_binding(installation, backend, verify_catalog=False)
         package = app.verify_package(backend.package(expected), expected)
-        bundle = app.verify_bundle(value["native_manifest"], value["native_manifest_sha256"], expected)
+        bundle = app.verify_launch_bundle(value["native_manifest"], value["native_manifest_sha256"],
+                                         expected, backend, owner, paths["home"])
         inventory = tools.load_inventory()
         tools.preflight(paths["home"])
         resources_source = Path(package["package"]["location"]) / inventory["source_relative"]
@@ -370,11 +376,15 @@ def configure(root, catalog, catalog_sha256, *, port=42817, backend=None):
             if published is not None:
                 checkpoint, registered = published
             _, native_receipt = tools.receipt_paths(installation.data)
+            native_options = {}
+            if "runtime_package" in bundle:
+                native_options["runtime_package"] = bundle["runtime_package"]
             native_tools = tools.bootstrap(paths["home"], bundle["files"]["codex.exe"]["path"],
                 bundle["files"]["codex.exe"]["sha256"], inventory, native_receipt,
                 owner_sid=owner["sid"], catalog_path=target, catalog_sha256=catalog_sha256,
                 backup_dir=installation.data / "native-app-tools/policy-backups", source_root=resources_source,
-                native_manifest=value["native_manifest"], native_manifest_sha256=value["native_manifest_sha256"])
+                native_manifest=value["native_manifest"], native_manifest_sha256=value["native_manifest_sha256"],
+                **native_options)
             # Never apply a stale PreparedConfig captured before native CLI edits.
             final = prepare(paths["home"] / "config.toml", catalog_path=target,
                             auth_command=str(executable), auth_args=AUTH_ARGS, port=port)
@@ -408,7 +418,7 @@ def owned_gateway(installation):
             "upstream_model_request_performed": False}
 
 
-def check(root, *, backend=None, accessibility=False, observation_seconds=60):
+def check(root, *, backend=None, accessibility=False, observation_seconds=60, trace_root=None):
     installation = installed(root)
     backend = backend or app.WindowsBackend()
     value = read_binding(installation, backend)
@@ -417,7 +427,7 @@ def check(root, *, backend=None, accessibility=False, observation_seconds=60):
     catalog_models = gp.catalog_model_ids(value["catalog"]["path"], value["catalog"]["sha256"])
     policy = gp.load_service_config(installation.data)
     gp.require_app_policy(policy, catalog_models)
-    request = native_request(value, accessibility=accessibility, observation_seconds=observation_seconds)
+    request = native_request(value, accessibility=accessibility, observation_seconds=observation_seconds, trace_root=trace_root)
     checked = app.validate_request(request, backend)
     config_bytes = (app.defaults()["home"] / "config.toml").read_bytes()
     if hashlib.sha256(config_bytes).hexdigest() != checked["config_sha256"]:
@@ -431,9 +441,12 @@ def check(root, *, backend=None, accessibility=False, observation_seconds=60):
         raise DeliveryError("Private App config points outside the selected installed helper/catalog")
     inventory = tools.load_inventory()
     _, tools_receipt = tools.receipt_paths(installation.data)
+    native_options = {}
+    if "runtime_package" in checked["bundle"]:
+        native_options["runtime_package"] = checked["bundle"]["runtime_package"]
     native_tools = tools.configured(app.defaults()["home"], checked["bundle"]["files"]["codex.exe"]["path"],
         checked["bundle"]["files"]["codex.exe"]["sha256"], inventory, tools_receipt,
-        owner_sid=checked["owner"]["sid"])
+        owner_sid=checked["owner"]["sid"], **native_options)
     gateway = owned_gateway(installation)
     if provider.get("base_url") != f"http://127.0.0.1:{gateway['port']}/v1":
         raise DeliveryError("Private App provider does not address this owned gateway listener")
@@ -455,14 +468,14 @@ def check(root, *, backend=None, accessibility=False, observation_seconds=60):
 
 
 def launch(root, *, accessibility=False, observation_seconds=60, wait_seconds=60,
-           backend=None, run=subprocess.run):
+           trace_root=None, backend=None, run=subprocess.run):
     installation = installed(root)
     if type(wait_seconds) is not int or not 1 <= wait_seconds <= 120:
         raise DeliveryError("App launch wait must be 1 through 120 seconds")
     # No implicit service start, current-App restart, native update, or retry.
     with lc._operation_lease(installation.root):
         ready = check(root, backend=backend, accessibility=accessibility,
-                      observation_seconds=observation_seconds)
+                      observation_seconds=observation_seconds, trace_root=trace_root)
         baseline, launcher = assets()
         request = ready["request"]
         expected_config = request.get("expected_config_sha256")
@@ -478,6 +491,8 @@ def launch(root, *, accessibility=False, observation_seconds=60, wait_seconds=60
                      "-ObservationSeconds", str(observation_seconds), "-WaitSeconds", str(wait_seconds)]
         if accessibility:
             arguments.append("-Accessibility")
+        if trace_root is not None:
+            arguments.extend(["-TraceRoot", ready["launch"]["trace_root"]])
         try:
             result = run(arguments, capture_output=True, text=True, encoding="utf-8", timeout=wait_seconds + 30)
         except subprocess.TimeoutExpired:

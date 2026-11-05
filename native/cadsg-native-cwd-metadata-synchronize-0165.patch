@@ -1,0 +1,395 @@
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/cwd_metadata.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning/cwd_metadata.rs
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning/cwd_metadata.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning/cwd_metadata.rs
+@@ -11,7 +11,11 @@
+ use std::path::{Path, PathBuf};
+ use windows_sys::Win32::Storage::FileSystem::{
+     FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, READ_CONTROL,
++    SYNCHRONIZE,
+ };
++
++// Attribute handles also need SYNCHRONIZE; this grants no list or file data access.
++const METADATA_ACCESS: u32 = FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+ 
+ fn checked_path(path: &Path) -> Result<PathBuf> {
+     Ok(AbsolutePathBuf::from_absolute_path_checked(path)?.to_path_buf())
+@@ -85,13 +89,13 @@
+             crate::ensure_allow_mask_aces_with_inheritance(
+                 path,
+                 &[sandbox_group_psid],
+-                FILE_READ_ATTRIBUTES,
++                METADATA_ACCESS,
+                 0,
+             )
+         }?;
+         // This is the primitive's ACL-mask readback, not a full token access proof.
+         ensure!(
+-            crate::path_mask_allows(path, &[sandbox_group_psid], FILE_READ_ATTRIBUTES, true,)?,
++            crate::path_mask_allows(path, &[sandbox_group_psid], METADATA_ACCESS, true,)?,
+             "required cwd-parent metadata ACE was not materialized on {}",
+             path.display()
+         );
+@@ -100,7 +104,7 @@
+             super::log_line(
+                 log,
+                 &format!(
+-                    "granted non-inheriting cwd-parent read-attributes ACE on {}",
++                    "granted non-inheriting cwd-parent metadata-handle ACE on {}",
+                     path.display()
+                 ),
+             )?;
+@@ -194,14 +198,26 @@
+                 .unwrap();
+             let mut current_acl = std::ptr::null_mut();
+             let mut current_descriptor = std::ptr::null_mut();
+-            assert_eq!(GetSecurityInfo(
+-                directory.as_raw_handle() as _, 1, DACL_SECURITY_INFORMATION,
+-                std::ptr::null_mut(), std::ptr::null_mut(), &mut current_acl,
+-                std::ptr::null_mut(), &mut current_descriptor,
+-            ), 0);
++            assert_eq!(
++                GetSecurityInfo(
++                    directory.as_raw_handle() as _,
++                    1,
++                    DACL_SECURITY_INFORMATION,
++                    std::ptr::null_mut(),
++                    std::ptr::null_mut(),
++                    &mut current_acl,
++                    std::ptr::null_mut(),
++                    &mut current_descriptor,
++                ),
++                0
++            );
+             let status = SetSecurityInfo(
+-                directory.as_raw_handle() as _, 1, DACL_SECURITY_INFORMATION,
+-                std::ptr::null_mut(), std::ptr::null_mut(), current_acl,
++                directory.as_raw_handle() as _,
++                1,
++                DACL_SECURITY_INFORMATION,
++                std::ptr::null_mut(),
++                std::ptr::null_mut(),
++                current_acl,
+                 std::ptr::null_mut(),
+             );
+             LocalFree(current_descriptor as HLOCAL);
+@@ -214,143 +230,185 @@
+ 
+     #[test]
+     fn owned_worktree_parent_metadata_is_narrow_and_idempotent() -> Result<()> {
+-        let temp = tempfile::tempdir()?;
+-        let home = temp.path().join("home");
+-        let worktrees = home.join("worktrees");
+-        let parent = worktrees.join("fresh");
+-        let workspace = parent.join("workspace");
+-        let descendant = workspace.join("nested");
+-        let sibling = worktrees.join("sibling");
+-        std::fs::create_dir_all(&descendant)?;
+-        std::fs::create_dir(&sibling)?;
+-        let file = descendant.join("canary.txt");
+-        std::fs::write(&file, b"cwd-metadata-canary\n")?;
+-        let user = crate::runtime_ownership::current_setup_user()?;
+-        let namespace = SandboxNamespace::for_user(&home, &user)?;
+-        namespace.reserve_owner()?;
+-        let group = LocalSid::from_string("S-1-5-21-915763429-1123581321-271828182-4501")?;
+-        let cap = LocalSid::from_string("S-1-5-21-915763429-1123581321-271828182-4502")?;
+-        let deny = "S-1-5-21-915763429-1123581321-271828182-4503";
+-        protect(&home, &namespace.owner_sid, None);
+-        protect(&parent, &namespace.owner_sid, Some(deny));
+-        for path in [&home, &worktrees] {
+-            unsafe {
+-                crate::ensure_allow_mask_aces_with_inheritance(
+-                    path,
+-                    &[group.as_ptr()],
+-                    FILE_READ_ATTRIBUTES,
+-                    0,
+-                )
+-            }?;
+-        }
+-        unsafe { crate::ensure_allow_write_aces(&workspace, &[group.as_ptr(), cap.as_ptr()]) }?;
+-        let paths = [
+-            &home,
+-            &worktrees,
+-            &parent,
+-            &workspace,
+-            &descendant,
+-            &sibling,
+-            &file,
+-        ];
+-        let before = paths.iter().map(|path| snapshot(path)).collect::<Vec<_>>();
+-        let directories = [
+-            &home,
+-            &worktrees,
+-            &parent,
+-            &workspace,
+-            &descendant,
+-            &sibling,
+-        ];
+-        let identities = directories
+-            .iter()
+-            .map(|path| {
+-                SandboxNamespace::for_user(path, &user).map(|value| value.key.id().to_string())
+-            })
+-            .collect::<Result<Vec<_>>>()?;
+-        let mut payload: Payload = serde_json::from_value(serde_json::json!({
+-            "version": crate::SETUP_VERSION,
+-            "offline_username": namespace.key.offline(), "online_username": namespace.key.online(),
+-            "codex_home": home, "command_cwd": workspace, "read_roots": [],
+-            "write_roots": [sibling], "proxy_ports": [], "real_user": user,
+-        }))?;
+-        let mut log = Vec::new();
+-        assert_eq!(
+-            ensure_owned_cwd_parent_metadata(&payload, &namespace, group.as_ptr(), &mut log)?,
+-            0
+-        );
+-        assert_eq!(
+-            paths.iter().map(|path| snapshot(path)).collect::<Vec<_>>(),
+-            before
+-        );
+-        payload.command_cwd = PathBuf::from(r"\\server\share\workspace");
+-        assert_eq!(
+-            ensure_owned_cwd_parent_metadata(&payload, &namespace, group.as_ptr(), &mut log)?,
+-            0
+-        );
+-        assert_eq!(
+-            paths.iter().map(|path| snapshot(path)).collect::<Vec<_>>(),
+-            before
+-        );
+-        payload.command_cwd = workspace.clone();
+-        payload.write_roots = vec![workspace.clone()];
+-        assert_eq!(
+-            ensure_owned_cwd_parent_metadata(&payload, &namespace, group.as_ptr(), &mut log)?,
+-            1
+-        );
+-        let after = paths.iter().map(|path| snapshot(path)).collect::<Vec<_>>();
+-        for index in [0, 1, 3, 4, 5, 6] {
+-            assert_eq!(
+-                after[index], before[index],
+-                "only the required parent may change"
+-            );
+-        }
+-        assert_eq!(after[2].0, before[2].0);
+-        let added = after[2]
+-            .1
+-            .iter()
+-            .filter(|ace| !before[2].1.contains(ace))
+-            .collect::<Vec<_>>();
+-        assert_eq!(added.len(), 1);
+-        let ace = added[0];
+-        assert_eq!((ace[0], ace[1]), (0, 0), "one non-inheriting allow ACE");
+-        assert_eq!(
+-            u32::from_le_bytes(ace[4..8].try_into().unwrap()),
+-            FILE_READ_ATTRIBUTES
+-        );
+-        let sid = unsafe {
+-            std::slice::from_raw_parts(
+-                group.as_ptr().cast::<u8>(),
+-                GetLengthSid(group.as_ptr()) as usize,
+-            )
+-        };
+-        assert_eq!(&ace[8..], sid);
+-        assert_eq!(
+-            after[2]
++        for legacy in [false, true] {
++            let temp = tempfile::tempdir()?;
++            let home = temp.path().join("home");
++            let worktrees = home.join("worktrees");
++            let parent = worktrees.join("fresh");
++            let workspace = parent.join("workspace");
++            let descendant = workspace.join("nested");
++            let sibling = worktrees.join("sibling");
++            std::fs::create_dir_all(&descendant)?;
++            std::fs::create_dir(&sibling)?;
++            let file = descendant.join("canary.txt");
++            std::fs::write(&file, b"cwd-metadata-canary\n")?;
++            let user = crate::runtime_ownership::current_setup_user()?;
++            let namespace = SandboxNamespace::for_user(&home, &user)?;
++            namespace.reserve_owner()?;
++            let group = LocalSid::from_string("S-1-5-21-915763429-1123581321-271828182-4501")?;
++            let cap = LocalSid::from_string("S-1-5-21-915763429-1123581321-271828182-4502")?;
++            let deny = "S-1-5-21-915763429-1123581321-271828182-4503";
++            protect(&home, &namespace.owner_sid, None);
++            protect(&parent, &namespace.owner_sid, Some(deny));
++            for path in [&home, &worktrees] {
++                unsafe {
++                    crate::ensure_allow_mask_aces_with_inheritance(
++                        path,
++                        &[group.as_ptr()],
++                        if legacy {
++                            FILE_READ_ATTRIBUTES
++                        } else {
++                            METADATA_ACCESS
++                        },
++                        0,
++                    )
++                }?;
++            }
++            unsafe { crate::ensure_allow_write_aces(&workspace, &[group.as_ptr(), cap.as_ptr()]) }?;
++            let paths = [
++                &home,
++                &worktrees,
++                &parent,
++                &workspace,
++                &descendant,
++                &sibling,
++                &file,
++            ];
++            let before = paths.iter().map(|path| snapshot(path)).collect::<Vec<_>>();
++            let directories = [
++                &home,
++                &worktrees,
++                &parent,
++                &workspace,
++                &descendant,
++                &sibling,
++            ];
++            let identities = directories
++                .iter()
++                .map(|path| {
++                    SandboxNamespace::for_user(path, &user).map(|value| value.key.id().to_string())
++                })
++                .collect::<Result<Vec<_>>>()?;
++            let mut payload: Payload = serde_json::from_value(serde_json::json!({
++                "version": crate::SETUP_VERSION,
++                "offline_username": namespace.key.offline(), "online_username": namespace.key.online(),
++                "codex_home": home, "command_cwd": workspace, "read_roots": [],
++                "write_roots": [sibling], "proxy_ports": [], "real_user": user,
++            }))?;
++            let mut log = Vec::new();
++            assert_eq!(
++                ensure_owned_cwd_parent_metadata(&payload, &namespace, group.as_ptr(), &mut log)?,
++                0
++            );
++            assert_eq!(
++                paths.iter().map(|path| snapshot(path)).collect::<Vec<_>>(),
++                before
++            );
++            payload.command_cwd = PathBuf::from(r"\\server\share\workspace");
++            assert_eq!(
++                ensure_owned_cwd_parent_metadata(&payload, &namespace, group.as_ptr(), &mut log)?,
++                0
++            );
++            assert_eq!(
++                paths.iter().map(|path| snapshot(path)).collect::<Vec<_>>(),
++                before
++            );
++            payload.command_cwd = workspace.clone();
++            payload.write_roots = vec![workspace.clone()];
++            assert_eq!(
++                ensure_owned_cwd_parent_metadata(&payload, &namespace, group.as_ptr(), &mut log)?,
++                if legacy { 3 } else { 1 }
++            );
++            let after = paths.iter().map(|path| snapshot(path)).collect::<Vec<_>>();
++            let unchanged = if legacy {
++                vec![3, 4, 5, 6]
++            } else {
++                vec![0, 1, 3, 4, 5, 6]
++            };
++            for index in unchanged {
++                assert_eq!(
++                    after[index], before[index],
++                    "only the required parent may change"
++                );
++            }
++            assert_eq!(after[2].0, before[2].0);
++            let added = after[2]
+                 .1
+                 .iter()
+-                .filter(|candidate| *candidate != ace)
+-                .cloned()
+-                .collect::<Vec<_>>(),
+-            before[2].1
+-        );
+-        assert_eq!(
+-            ensure_owned_cwd_parent_metadata(&payload, &namespace, group.as_ptr(), &mut log)?,
+-            0
+-        );
+-        assert_eq!(
+-            paths.iter().map(|path| snapshot(path)).collect::<Vec<_>>(),
+-            after
+-        );
+-        assert_eq!(std::fs::read(&file)?, b"cwd-metadata-canary\n");
+-        assert_eq!(
+-            directories
+-                .iter()
+-                .map(|path| SandboxNamespace::for_user(path, &user)
+-                    .map(|value| value.key.id().to_string()))
+-                .collect::<Result<Vec<_>>>()?,
+-            identities
+-        );
++                .filter(|ace| !before[2].1.contains(ace))
++                .collect::<Vec<_>>();
++            assert_eq!(added.len(), 1);
++            let ace = added[0];
++            assert_eq!((ace[0], ace[1]), (0, 0), "one non-inheriting allow ACE");
++            assert_eq!(
++                u32::from_le_bytes(ace[4..8].try_into().unwrap()),
++                METADATA_ACCESS
++            );
++            for path in [&home, &worktrees, &parent] {
++                ensure!(
++                    crate::path_mask_allows(path, &[group.as_ptr()], METADATA_ACCESS, true)?,
++                    "metadata handle rights missing"
++                );
++            }
++            let sid = unsafe {
++                std::slice::from_raw_parts(
++                    group.as_ptr().cast::<u8>(),
++                    GetLengthSid(group.as_ptr()) as usize,
++                )
++            };
++            assert_eq!(&ace[8..], sid);
++            if legacy {
++                for index in [0, 1] {
++                    assert_eq!(after[index].0, before[index].0);
++                    let own = |ace: &&Vec<u8>| ace.len() >= 8 && &ace[8..] == sid;
++                    let unrelated_before = before[index]
++                        .1
++                        .iter()
++                        .filter(|ace| !own(ace))
++                        .collect::<Vec<_>>();
++                    let unrelated_after = after[index]
++                        .1
++                        .iter()
++                        .filter(|ace| !own(ace))
++                        .collect::<Vec<_>>();
++                    assert_eq!(unrelated_after, unrelated_before);
++                    for entry in after[index].1.iter().filter(own) {
++                        assert_eq!((entry[0], entry[1]), (0, 0));
++                        assert_eq!(
++                            u32::from_le_bytes(entry[4..8].try_into().unwrap()) & !METADATA_ACCESS,
++                            0
++                        );
++                    }
++                }
++            }
++
++            assert_eq!(
++                after[2]
++                    .1
++                    .iter()
++                    .filter(|candidate| *candidate != ace)
++                    .cloned()
++                    .collect::<Vec<_>>(),
++                before[2].1
++            );
++            assert_eq!(
++                ensure_owned_cwd_parent_metadata(&payload, &namespace, group.as_ptr(), &mut log)?,
++                0
++            );
++            assert_eq!(
++                paths.iter().map(|path| snapshot(path)).collect::<Vec<_>>(),
++                after
++            );
++            assert_eq!(std::fs::read(&file)?, b"cwd-metadata-canary\n");
++            assert_eq!(
++                directories
++                    .iter()
++                    .map(|path| SandboxNamespace::for_user(path, &user)
++                        .map(|value| value.key.id().to_string()))
++                    .collect::<Result<Vec<_>>>()?,
++                identities
++            );
++        }
+         Ok(())
+     }
+ }

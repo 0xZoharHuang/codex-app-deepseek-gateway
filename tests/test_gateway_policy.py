@@ -22,7 +22,7 @@ def test_versioned_app_default_covers_actual_pinned_prepare_routes(tmp_path):
     config, receipt = gp.ensure_app_policy(tmp_path / "new")
     assert receipt["status"] == "created_fixed_app_policy"
     assert config.policy_origin["provider_reasons"]["primeintellect"] == "explicit_parallel_tool_calls_false"
-    assert config.policy_origin["protocol_commit"] == "a70417460d823a906ebc7274834e2412be1ebe53"
+    assert config.policy_origin["protocol_commit"] == "6d6ccd32c92d06fc52ecd72712140f24496c30a2"
 
 
 def test_config_snapshot_parses_and_hashes_same_single_read(tmp_path, monkeypatch):
@@ -184,3 +184,14 @@ def test_previous_origin_does_not_expand_a_narrowed_policy(tmp_path, known_origi
     with pytest.raises(gp.ServiceConfigError, match="policy lacks"):
         gp.ensure_app_policy(home)
     assert path.read_bytes() == raw
+
+
+def test_previous_published_069_policy_keeps_original_bytes(tmp_path):
+    home = tmp_path / "existing-069"; home.mkdir()
+    value = gp.default_app_policy(); value["policy_origin"] = gp.LEGACY_POLICY_ORIGIN_069
+    raw = json.dumps(value, indent=4).encode()
+    path = home / "gateway.json"; path.write_bytes(raw)
+    config, info = gp.ensure_app_policy(home)
+    assert path.read_bytes() == raw
+    assert config.policy_origin == gp.LEGACY_POLICY_ORIGIN_069
+    assert info["status"] == "existing_policy_preserved"

@@ -16,7 +16,7 @@ Codex 原生 runtime + 固定最小补丁
 
 本项目与 [CDS](https://github.com/0xZoharHuang/codex-deepseek-runtime) 独立：CDS 面向 CLI，CADSG 面向桌面 App。这里不通过 CDS 启动 App，不分发官方闭源 App，不迁移 OpenAI 会话；安装、数据和项目凭据项与现有 App/CDS 分开。
 
-**固定组合的本地 runtime 验收已按分层证据关闭。** 软件、P7 实际加载与会话保留、fresh profile 互读、真实网页任务，以及 typed 图像输入、实际 App 内嵌 PDF 预览和正确目录的宿主输出读取分别有证据，原始失败仍保留。范围与最终交付状态见[资格索引](docs/qualification-status.md)；下载可用性由发行页与外部校验资产确认，不根据安装说明推断。
+本版源码对应 CADSG 0.2.0。Windows 安装使用同一发行页中的网关包、P19 原生包和外部校验索引。P19 扩展长上下文请求恢复、取消和 Windows 权限处理，并把本地压缩接入官方可选诊断。实际验收范围和已知限制见[资格索引](docs/qualification-status.md)。0.1.0/P7 的历史结果单独保留。
 
 ## 固定组合
 
@@ -25,10 +25,10 @@ Codex 原生 runtime + 固定最小补丁
 | 宿主 | 已验证 Windows 10 x64，19045；目标用户的普通交互会话 |
 | Python | 本轮资格使用独立 CPython 3.13.3 x64；其他构建须按实际兼容检查 |
 | 官方 App | `26.1023.6621.0`，正常入口校验官方签名、包身份与资源 |
-| 原生 runtime | `0.165.0-alpha.1.2`；上游 `720fec862a608ae1e5878d1eecb04fb93192e93c`；P7 七补丁 |
+| 原生 runtime | `0.165.0-alpha.1.2`；上游 `720fec862a608ae1e5878d1eecb04fb93192e93c`；P19 精确源码锁，六个同源程序 |
 | 模型请求 ID | `deepseek/deepseek-v4.1-flash-1017` |
 | 上游版本身份 | `deepseek/deepseek-v4.1-flash-20261017` |
-| 协议依赖 | 已公开 CDS `0.6.9`，固定提交 `a70417460d823a906ebc7274834e2412be1ebe53` |
+| 协议依赖 | CDS `0.6.10`，固定提交 `6d6ccd32c92d06fc52ecd72712140f24496c30a2` |
 
 当前 Windows 结果不外推为 Linux/macOS 桌面 App、Win11 MXC 或系统安全桌面已验收。App 自动更新后需要重新确认组合，修改配置中的版本字符串不能代替兼容验证。
 
@@ -36,9 +36,9 @@ Codex 原生 runtime + 固定最小补丁
 
 完整的逐步命令在 **[Windows 安装与首次启动](docs/windows-quickstart.md)**。顺序是：
 
-1. 从 [v0.1.0 发行页](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/releases/tag/v0.1.0) 获取网关包、原生包和外部 `SHA256SUMS.json`，核对下载字节；下载可用性与最终发布状态以该页为准。
+1. 从 [v0.2.0 发行页](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/releases/tag/v0.2.0) 获取网关包、原生包和外部 `SHA256SUMS.json`，核对下载字节；下载可用性与最终发布状态以该页为准。
 2. 用独立 Python 3.13 正常 Install，再显式 Activate；`setup-credentials` 将 key 写入当前 Windows 用户的项目专用凭据存储。
-3. **把已核原生 tar 解压到永久版本目录**，再 prepare / bind。prepare 在该目录物化本机官方 Code Mode host，不能把生产绑定指向临时 build output。
+3. **把已核原生 tar 解压到永久版本目录**，再 prepare / bind。P19 包内的 Code Mode host 与 CLI 同源构建，prepare 校验该 host、官方 App 包身份和插件资源后生成本机清单。
 4. 从这次原生二进制的 `debug models --bundled` 生成匹配 catalog，正常 app-configure、service-start、app-check、app-launch。
 
 ```text

@@ -1,0 +1,88 @@
+{
+  "status": "RUNTIME_ONLY_MSIX_LAYOUT_AND_NATIVE_SOURCE_RESTORATION_PLAN_PREPARED_NOT_BUILT_SIGNED_OR_DEPLOYED",
+  "files": {
+    "deployment-readiness.json": {
+      "sha256": "18e444ed38132b3ffe09697b3062b60d3dab2f1fc40c8fe6cc6da454693aab23",
+      "size": 3181
+    },
+    "manifest-reader-validation.json": {
+      "sha256": "c803311686f617ee42dc40b32056fa4561edabdc5cc675a19c8fbbbb8b40be16",
+      "size": 520
+    },
+    "README.md": {
+      "sha256": "7f15d67f0605b36b6af789a7e7fcf5882392fbe20bb99c8015d0e2dec7a047c8",
+      "size": 2670
+    },
+    "required-runtime-assets.json": {
+      "sha256": "5d9dbe1a0b3d5da46c12580445c4cb57a3dfc48df5459272ec3fab73ea63e574",
+      "size": 2231
+    },
+    "SOURCE-RESTORATION-PLAN.json": {
+      "sha256": "f4973a16791f40d97441169e10642c848f3a5bd8f068949ceafe94c6c98dec82",
+      "size": 9985
+    },
+    "validate_manifest_reader.py": {
+      "sha256": "c0b171a3f8c1c26b59d2e17599325941f04a919ec6712ce7bf428954e6c1bbd6",
+      "size": 2644
+    },
+    "layout/AppxManifest.xml": {
+      "sha256": "c56013197c57830ff49cb90282ab13dfc8ea5bee18d07b340fa1791d3a976844",
+      "size": 4777
+    },
+    "manifest-validation-only/initial-manifest-reader-validation.json": {
+      "sha256": "b353658f7227dbac806049db16c3dddeff533313737a11362b3149a52a4de886",
+      "size": 600
+    },
+    "manifest-validation-only/initial-missing-multiple-instances.xml": {
+      "sha256": "abab53058a0f588cf39b3ef24adaec95f58d4b81d04a2b4bfbad975e6d75f8a5",
+      "size": 4609
+    },
+    "layout/Assets/Square150x150Logo.png": {
+      "sha256": "8e36569ed792f8111ed42e103dbc4efb3b5290df4e75ee568adbc43ac0b828c1",
+      "size": 349
+    },
+    "layout/Assets/Square44x44Logo.png": {
+      "sha256": "04614e17bc230800f882a18829dca35019119b642e765d05473aee27138c1d00",
+      "size": 119
+    },
+    "layout/Assets/StoreLogo.png": {
+      "sha256": "661bf8a5554ba834f4abd573675c851ec81a0fe2d6c1f55ad36170de9ecefab8",
+      "size": 128
+    }
+  },
+  "file_count": 12,
+  "layout_manifest_schema_reader_accepted": true,
+  "makeappx_complete_package_accepted": false,
+  "makeappx_failure": "Current draft after semantic fix fails solely for absent real executables; original invalid console multi-instance draft preserved.",
+  "layout_contains_closed_UI_or_placeholder_executables": false,
+  "project_unique_aliases": [
+    "cadsg-native.exe",
+    "cadsg-native-legacy.exe",
+    "cadsg-core-command-runner.exe",
+    "cadsg-code-mode-host.exe"
+  ],
+  "source_plan": "SOURCE-RESTORATION-PLAN.json",
+  "actual_alias_kernel_identity_or_IPC_proved": false,
+  "official_override_stdio_source_proved": true,
+  "DeveloperMode_changed": false,
+  "trust_certificates_or_private_keys_touched": false,
+  "service_registry_accounts_changed": false,
+  "native_Cargo_or_App_started": false,
+  "active_P9_or_P11_input_modified": false,
+  "CDS_Linux_or_Windows_build_inputs_modified": false,
+  "deployment_boundary": "Existing policy does not establish loose developer deployment; signed trusted MSIX can use normal Win10 path, but no real signing identity was chosen or accessed. Admin package installation with service is a later concrete step.",
+  "pending_source_implementation": true,
+  "private_source_plan_sha256": "3ca4edc16e8538c47e283bdc89cd564021a169fa9f86b098905c51afaa03061a",
+  "private_historical_logs": [
+    {
+      "name": "manifest-validation-only/makeappx-initial.log",
+      "sha256": "eef2c043e4a53e2087ca66729b9e3ebde0be6c04c0978f049fc055e7b8136953",
+      "size": 1392
+    },
+    {
+      "name": "manifest-validation-only/makeappx-multiple-instances.log",
+      "sha256": "e8b42077d6a876028d7883bdecd56a0fb2763f6dce967d5101fc45f77766dc09",
+      "size": 5200
+    }
+  ]
+}

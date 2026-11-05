@@ -1,0 +1,1838 @@
+diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
+index 7b05ca1230885c4906e576c68da268dce1a1d231..f35b2cdbb33c9577ef58a1d19a9d034d735781c4 100644
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -2762,6 +2762,7 @@ dependencies = [
+  "codex-otel-trace-websocket",
+  "codex-protocol",
+  "codex-utils-cargo-bin",
++ "codex-windows-sandbox",
+  "futures",
+  "pretty_assertions",
+  "prost",
+diff --git a/codex-rs/cli/src/main.rs b/codex-rs/cli/src/main.rs
+index f87786eafb0b0d3b41d3d3eb9f4ae8e4f64e5bf0..c741b12d586843bd0da17a93a443ef35115fa0db 100644
+--- a/codex-rs/cli/src/main.rs
++++ b/codex-rs/cli/src/main.rs
+@@ -1041,6 +1041,8 @@ fn stage_str(stage: Stage) -> &'static str {
+ }
+ 
+ fn main() -> anyhow::Result<()> {
++    #[cfg(windows)]
++    codex_windows_sandbox::initialize_project_runtime_mode()?;
+     codex_build_info::initialize!();
+     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
+     arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
+diff --git a/codex-rs/code-mode-host/Cargo.toml b/codex-rs/code-mode-host/Cargo.toml
+index d56661f7d0ad2ac661ae788812a23190241b2569..c7088b205e336ccc219079b8f07035b6727cfdb4 100644
+--- a/codex-rs/code-mode-host/Cargo.toml
++++ b/codex-rs/code-mode-host/Cargo.toml
+@@ -42,3 +42,6 @@ codex-code-mode = { workspace = true }
+ codex-utils-cargo-bin = { workspace = true }
+ pretty_assertions = { workspace = true }
+ tempfile = { workspace = true }
++
++[target.'cfg(windows)'.dependencies]
++codex-windows-sandbox = { workspace = true }
+diff --git a/codex-rs/code-mode-host/src/main.rs b/codex-rs/code-mode-host/src/main.rs
+index cc797ffa47d19b6ef8d1bcbabbb9aae2cd990e4a..6171d821eba466ebbbbfbe516b6328ef7d393418 100644
+--- a/codex-rs/code-mode-host/src/main.rs
++++ b/codex-rs/code-mode-host/src/main.rs
+@@ -38,6 +38,8 @@ struct Cli {
+ 
+ #[tokio::main(flavor = "current_thread")]
+ async fn main() -> anyhow::Result<()> {
++    #[cfg(windows)]
++    codex_windows_sandbox::initialize_project_runtime_mode()?;
+     let cli = Cli::parse();
+     let mut trace_transport = if let Some(trace_listen) = cli.otel_trace_listen.as_deref() {
+         Some(TraceWebSocket::start(trace_listen).await?)
+diff --git a/codex-rs/core/src/code_mode_host.rs b/codex-rs/core/src/code_mode_host.rs
+index de328875cbf47ff92593e9f669678e2731afb6ac..7370c22750dd49c0bcb6b6be45a00c2f6d1ac21b 100644
+--- a/codex-rs/core/src/code_mode_host.rs
++++ b/codex-rs/core/src/code_mode_host.rs
+@@ -99,6 +99,10 @@ impl HostConnection {
+             .stderr(Stdio::piped())
+             .kill_on_drop(/*kill_on_drop*/ true);
+         scrub_non_inheritable_env_vars(command.as_std_mut());
++        #[cfg(windows)]
++        if let Some(mode) = codex_windows_sandbox::project_runtime_host_selector() {
++            command.env("CODEX_WINDOWS_REGISTERED_CORE", mode);
++        }
+         let mut child = command.spawn()?;
+         let stdin = child
+             .stdin
+diff --git a/after/codex-rs/windows-sandbox-rs/src/app_package/project_mode.rs b/codex-rs/windows-sandbox-rs/src/app_package/project_mode.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..026c3841a27ede3b8c82f82ac034065fd021fe40
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/app_package/project_mode.rs
+@@ -0,0 +1,162 @@
++//! Process-local mode request from the OS activation identity, never an authorization substitute.
++use anyhow::{Context, Result, ensure};
++use std::sync::OnceLock;
++
++const PACKAGE_NAME: &str = "CADSG.NativeRuntime";
++const SELECTOR: &str = "CODEX_WINDOWS_REGISTERED_CORE";
++static MODE: OnceLock<Option<bool>> = OnceLock::new();
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum Role {
++    Cli,
++    Host,
++    Runner,
++}
++
++fn select(family: &str, application: &str, role: Role, inherited: Option<&str>) -> Result<bool> {
++    let (name, _) = family
++        .rsplit_once('_')
++        .context("invalid runtime package family")?;
++    ensure!(
++        name == PACKAGE_NAME,
++        "activation belongs to another runtime package"
++    );
++    let (actual_family, id) = application
++        .split_once('!')
++        .context("runtime activation has no application ID")?;
++    ensure!(
++        actual_family == family,
++        "runtime activation family differs from kernel package family"
++    );
++    let registered = match (role, id) {
++        (Role::Cli, "RuntimeRegisteredCore")
++        | (Role::Host, "RuntimeRegisteredCore" | "CodeModeHostRegistered")
++        | (Role::Runner, "CodexCoreCommandRunner") => true,
++        (Role::Cli, "RuntimeLegacy")
++        | (Role::Host, "RuntimeLegacy" | "CodeModeHostLegacy")
++        | (Role::Runner, "RuntimeLegacy") => false,
++        _ => anyhow::bail!("unknown or mismatched native runtime activation role"),
++    };
++    if let Some(inherited) = inherited {
++        ensure!(
++            matches!(inherited, "0" | "1"),
++            "invalid inherited native runtime mode"
++        );
++        ensure!(
++            (inherited == "1") == registered,
++            "inherited native runtime mode conflicts with OS activation"
++        );
++    }
++    Ok(registered)
++}
++
++/// Capture before native configuration, task or helper admission. No global environment write.
++pub fn initialize() -> Result<()> {
++    if MODE.get().is_some() {
++        return Ok(());
++    }
++    let image = std::env::current_exe().context("query native runtime image")?;
++    let name = image
++        .file_name()
++        .and_then(|n| n.to_str())
++        .unwrap_or_default();
++    let role = if name.eq_ignore_ascii_case("codex.exe") {
++        Some(Role::Cli)
++    } else if name.eq_ignore_ascii_case("codex-code-mode-host.exe") {
++        Some(Role::Host)
++    } else if name.eq_ignore_ascii_case("codex-command-runner.exe") {
++        Some(Role::Runner)
++    } else {
++        None
++    };
++    let family = unsafe {
++        crate::package_identity::process_package_family(
++            windows_sys::Win32::System::Threading::GetCurrentProcess(),
++        )
++    }?;
++    let selected = if let (Some(role), Some(family)) = (role, family) {
++        if family
++            .rsplit_once('_')
++            .is_some_and(|(name, _)| name == PACKAGE_NAME)
++        {
++            let application =
++                super::query_application_id()?.context("own runtime has no OS application ID")?;
++            let package = super::current_package_full_name()?
++                .context("own runtime has no package identity")?;
++            let root = super::staged_package_root(&crate::winutil::to_wide(package))?;
++            let expected = root.join("runtime").join(name);
++            ensure!(
++                dunce::canonicalize(image)?
++                    .as_os_str()
++                    .eq_ignore_ascii_case(dunce::canonicalize(expected)?.as_os_str()),
++                "own runtime image is outside its exact installed version directory"
++            );
++            let inherited = std::env::var(SELECTOR).ok();
++            Some(select(&family, &application, role, inherited.as_deref())?)
++        } else {
++            None
++        }
++    } else {
++        None
++    };
++    if MODE.set(selected).is_err() {
++        ensure!(
++            MODE.get() == Some(&selected),
++            "native runtime activation changed during capture"
++        );
++    }
++    Ok(())
++}
++
++pub(super) fn selected() -> Option<bool> {
++    MODE.get().copied().flatten()
++}
++
++/// A parent's captured request is carried only to its native host command and checked there.
++pub fn host_selector() -> Option<&'static str> {
++    selected().map(|mode| if mode { "1" } else { "0" })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    const FAMILY: &str = "CADSG.NativeRuntime_123456789abcd";
++    fn check(role: Role, id: &str, inherited: Option<&str>) -> Result<bool> {
++        select(FAMILY, &format!("{FAMILY}!{id}"), role, inherited)
++    }
++    #[test]
++    fn explicit_legacy_and_registered_cli_do_not_cross() {
++        assert_eq!(check(Role::Cli, "RuntimeLegacy", None).unwrap(), false);
++        assert_eq!(
++            check(Role::Cli, "RuntimeRegisteredCore", None).unwrap(),
++            true
++        );
++        assert!(check(Role::Cli, "RuntimeLegacy", Some("1")).is_err());
++        assert!(check(Role::Cli, "RuntimeRegisteredCore", Some("0")).is_err());
++    }
++    #[test]
++    fn host_checks_parent_mode_and_kernel_role() {
++        assert!(check(Role::Host, "RuntimeRegisteredCore", Some("1")).unwrap());
++        assert!(!check(Role::Host, "RuntimeLegacy", Some("0")).unwrap());
++        assert!(check(Role::Host, "CodeModeHostRegistered", Some("1")).unwrap());
++        assert!(!check(Role::Host, "CodeModeHostLegacy", Some("0")).unwrap());
++        assert!(check(Role::Host, "CodeModeHostLegacy", Some("1")).is_err());
++        assert!(check(Role::Host, "CodeModeHostRegistered", Some("0")).is_err());
++    }
++    #[test]
++    fn unknown_role_family_and_selector_fail_closed() {
++        assert!(check(Role::Cli, "Unknown", None).is_err());
++        assert!(check(Role::Host, "CodexCoreCommandRunner", None).is_err());
++        assert!(check(Role::Runner, "RuntimeRegisteredCore", None).is_err());
++        assert!(check(Role::Host, "RuntimeLegacy", Some("yes")).is_err());
++        assert!(
++            select(
++                "Other.Runtime_123456789abcd",
++                &format!("{FAMILY}!RuntimeLegacy"),
++                Role::Cli,
++                None
++            )
++            .is_err()
++        );
++    }
++}
+diff --git a/codex-rs/windows-sandbox-rs/src/app_package.rs b/codex-rs/windows-sandbox-rs/src/app_package.rs
+index c09fffa547cd2fd23f9976082febc7b567603c53..4442e08ec43b4c92ef4432d5a495cbddd47f7651 100644
+--- a/codex-rs/windows-sandbox-rs/src/app_package.rs
++++ b/codex-rs/windows-sandbox-rs/src/app_package.rs
+@@ -29,8 +29,34 @@ unsafe extern "system" {
+     ) -> i32;
+ }
+ 
++#[path = "app_package/project_mode.rs"]
++mod project_mode;
++pub use project_mode::host_selector as project_runtime_host_selector;
++pub use project_mode::initialize as initialize_project_runtime_mode;
++
++fn query_application_id() -> Result<Option<String>> {
++    #[link(name = "kernel32")]
++    unsafe extern "system" {
++        fn GetApplicationUserModelId(process: HANDLE, length: *mut u32, value: *mut u16) -> u32;
++    }
++    query_package_name(
++        |length, value| {
++            let code = unsafe { GetApplicationUserModelId(GetCurrentProcess(), length, value) };
++            if code == 15703 {
++                APPMODEL_ERROR_NO_PACKAGE
++            } else {
++                code
++            }
++        },
++        32768,
++    )
++}
++
+ /// Capture the startup request once; this flag never authorizes a package or process.
+ pub fn registered_core_requested() -> bool {
++    if let Some(mode) = project_mode::selected() {
++        return mode;
++    }
+     static REQUESTED: OnceLock<bool> = OnceLock::new();
+     *REQUESTED.get_or_init(|| {
+         requested_value(std::env::var_os("CODEX_WINDOWS_REGISTERED_CORE").as_deref())
+@@ -115,8 +141,7 @@ pub(crate) fn verify_registered_core_runner(process: HANDLE, expected_runner: &P
+     ensure!(
+         expected.as_os_str().eq_ignore_ascii_case(
+             staged
+-                .join("app")
+-                .join("resources")
++                .join("runtime")
+                 .join("codex-command-runner.exe")
+                 .as_os_str()
+         ),
+@@ -142,11 +167,10 @@ pub(crate) fn verify_registered_core_runner(process: HANDLE, expected_runner: &P
+ 
+ /// Checks the service's committed receipt without provisioning or mutating either account.
+ pub(crate) fn registered_setup_is_ready(codex_home: &Path) -> Result<bool> {
+-    for account in [
+-        crate::setup::OFFLINE_USERNAME,
+-        crate::setup::ONLINE_USERNAME,
+-    ] {
+-        if crate::winutil::local_user_flags(account)?
++    let namespace = crate::namespace::SandboxNamespace::current(codex_home)?;
++    namespace.validate_existing_state()?;
++    for account in [namespace.key.offline(), namespace.key.online()] {
++        if crate::winutil::local_user_flags(&account)?
+             .is_none_or(|flags| flags & UF_ACCOUNTDISABLE != 0)
+         {
+             return Ok(false);
+@@ -184,9 +208,11 @@ pub(crate) fn registered_runner_alias(
+     codex_home: &Path,
+     sandbox_username: &str,
+ ) -> anyhow::Result<PathBuf> {
+-    let account = if sandbox_username.eq_ignore_ascii_case(crate::setup::OFFLINE_USERNAME) {
++    let namespace = crate::namespace::SandboxNamespace::current(codex_home)?;
++    namespace.require_owned_state()?;
++    let account = if sandbox_username.eq_ignore_ascii_case(&namespace.key.offline()) {
+         crate::SandboxRuntimeAccount::Offline
+-    } else if sandbox_username.eq_ignore_ascii_case(crate::setup::ONLINE_USERNAME) {
++    } else if sandbox_username.eq_ignore_ascii_case(&namespace.key.online()) {
+         crate::SandboxRuntimeAccount::Online
+     } else {
+         bail!("app runtime registration requires a managed sandbox account");
+diff --git a/codex-rs/windows-sandbox-rs/src/app_package_tests.rs b/codex-rs/windows-sandbox-rs/src/app_package_tests.rs
+index d4d06e841e6ae719d66856fdd5e160d31bed7c39..b6a3a40881a6e9a1576cf32de560a853bc50fe1e 100644
+--- a/codex-rs/windows-sandbox-rs/src/app_package_tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/app_package_tests.rs
+@@ -48,6 +48,7 @@ fn runner_receipt_distinguishes_incomplete_setup_from_owner_and_removal() {
+         retiring: None,
+     };
+     let mut record = InstallationRecord {
++        namespace_id: None,
+         user_sid: owner.to_owned(),
+         codex_home: home.to_owned(),
+         session_id: 1,
+diff --git a/codex-rs/windows-sandbox-rs/src/bin/command_runner/main.rs b/codex-rs/windows-sandbox-rs/src/bin/command_runner/main.rs
+index 1e3c88b4436595940983984e30935cf84ee95cc8..91f5823dbc51d6bcae451242072364a9d5f89052 100644
+--- a/codex-rs/windows-sandbox-rs/src/bin/command_runner/main.rs
++++ b/codex-rs/windows-sandbox-rs/src/bin/command_runner/main.rs
+@@ -5,6 +5,7 @@ mod win;
+ 
+ #[cfg(target_os = "windows")]
+ fn main() -> anyhow::Result<()> {
++    codex_windows_sandbox::initialize_project_runtime_mode()?;
+     win::main()
+ }
+ 
+diff --git a/codex-rs/windows-sandbox-rs/src/identity.rs b/codex-rs/windows-sandbox-rs/src/identity.rs
+index 0cd0b658b9d71fc2224916d78e6f683437098c19..b643801dbb74e14fe26e9978924c0e623cea39ac 100644
+--- a/codex-rs/windows-sandbox-rs/src/identity.rs
++++ b/codex-rs/windows-sandbox-rs/src/identity.rs
+@@ -112,17 +112,39 @@ pub fn sandbox_setup_is_complete_with_settings(
+     codex_home: &Path,
+     settings: &crate::WindowsSandboxProvisioningSettings,
+ ) -> bool {
+-    let Ok(Some(mut marker)) = load_marker(codex_home) else {
++    let Ok(namespace) = crate::namespace::SandboxNamespace::current(codex_home) else {
+         return false;
+     };
++    setup_settings_in_namespace(codex_home, &namespace, settings)
++}
+ 
++/// The service uses its authenticated owner, never the SYSTEM process token.
++pub fn sandbox_setup_is_complete_with_settings_for_user(
++    codex_home: &Path,
++    real_user: &str,
++    settings: &crate::WindowsSandboxProvisioningSettings,
++) -> bool {
++    let Ok(namespace) = crate::namespace::SandboxNamespace::for_user(codex_home, real_user) else {
++        return false;
++    };
++    setup_settings_in_namespace(codex_home, &namespace, settings)
++}
++
++fn setup_settings_in_namespace(
++    codex_home: &Path,
++    namespace: &crate::namespace::SandboxNamespace,
++    settings: &crate::WindowsSandboxProvisioningSettings,
++) -> bool {
++    let Ok(Some(mut marker)) = load_marker_for_namespace(codex_home, namespace) else {
++        return false;
++    };
+     marker.proxy_ports.sort_unstable();
+     let mut proxy_ports = settings.proxy_ports.clone();
+     proxy_ports.sort_unstable();
+     marker.version_matches()
+         && marker.proxy_ports == proxy_ports
+         && marker.allow_local_binding == settings.allow_local_binding
+-        && matches!(load_users(codex_home), Ok(Some(users)) if users.version_matches())
++        && matches!(load_users_for_namespace(codex_home, namespace), Ok(Some(users)) if users.version_matches())
+ }
+ 
+ fn load_marker(codex_home: &Path) -> Result<Option<SetupMarker>> {
+@@ -223,6 +245,32 @@ pub fn logon_existing_sandbox_account(
+     account: SandboxRuntimeAccount,
+ ) -> Result<OwnedHandle> {
+     let namespace = crate::namespace::SandboxNamespace::current(codex_home)?;
++    logon_in_namespace(codex_home, account, namespace)
++}
++
++pub fn logon_existing_sandbox_account_for_installation(
++    codex_home: &Path,
++    account: SandboxRuntimeAccount,
++    installation: &crate::InstallationRecord,
++) -> Result<OwnedHandle> {
++    ensure!(
++        installation.codex_home == codex_home,
++        "credential home differs from protected installation"
++    );
++    let namespace =
++        crate::namespace::SandboxNamespace::for_owner_sid(codex_home, &installation.user_sid)?;
++    ensure!(
++        Some(namespace.key.id().as_str()) == installation.namespace_id.as_deref(),
++        "credential namespace differs from protected installation"
++    );
++    logon_in_namespace(codex_home, account, namespace)
++}
++
++fn logon_in_namespace(
++    codex_home: &Path,
++    account: SandboxRuntimeAccount,
++    namespace: crate::namespace::SandboxNamespace,
++) -> Result<OwnedHandle> {
+     namespace.require_owned_state()?;
+     let username = match account {
+         SandboxRuntimeAccount::Offline => namespace.key.offline(),
+diff --git a/codex-rs/windows-sandbox-rs/src/installation_record.rs b/codex-rs/windows-sandbox-rs/src/installation_record.rs
+index 3fc2f23ad25b7e427c6e74094f05bb180da7a2cc..7e7fa09e6611436ec929a2739595b62a16b29998 100644
+--- a/codex-rs/windows-sandbox-rs/src/installation_record.rs
++++ b/codex-rs/windows-sandbox-rs/src/installation_record.rs
+@@ -18,7 +18,7 @@ use crate::runtime_ownership::RuntimeRegistration;
+ use crate::winutil::to_wide;
+ 
+ // Package updates can replace the service key, so keep this record outside it.
+-pub const INSTALLATION_KEY: &str = r"SOFTWARE\OpenAI\Codex\WindowsSandboxService";
++pub const INSTALLATION_KEY: &str = r"SOFTWARE\CADSG\WindowsSandboxService";
+ pub const INSTALLATION_VALUE: &str = "ProvisionedInstallation";
+ const MAX_VALUE_UNITS: usize = 4096;
+ 
+@@ -30,6 +30,9 @@ pub struct DesktopInstallation {
+ 
+ #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+ pub struct InstallationRecord {
++    /// Project-owned native resource binding, persisted before any account creation.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub namespace_id: Option<String>,
+     pub user_sid: String,
+     pub codex_home: PathBuf,
+     pub session_id: u32,
+diff --git a/codex-rs/windows-sandbox-rs/src/lib.rs b/codex-rs/windows-sandbox-rs/src/lib.rs
+index d290eb499d3d0baa9991ee6018c8f4ba22baf096..b018cfffb27789c0fe1c9df4d1218997b0aed385 100644
+--- a/codex-rs/windows-sandbox-rs/src/lib.rs
++++ b/codex-rs/windows-sandbox-rs/src/lib.rs
+@@ -68,6 +68,10 @@ mod app_package;
+ #[cfg(target_os = "windows")]
+ mod private_acl_lock;
+ #[cfg(target_os = "windows")]
++pub use app_package::initialize_project_runtime_mode;
++#[cfg(target_os = "windows")]
++pub use app_package::project_runtime_host_selector;
++#[cfg(target_os = "windows")]
+ #[doc(hidden)]
+ pub use app_package::registered_core_needs_refresh;
+ #[cfg(target_os = "windows")]
+@@ -110,6 +114,8 @@ mod no_reparse_dir;
+ #[cfg(target_os = "windows")]
+ pub use namespace_coordination::sandbox_read_acl_mutex_name_for_token;
+ #[cfg(target_os = "windows")]
++pub use namespace_coordination::token_is_home_sandbox_account;
++#[cfg(target_os = "windows")]
+ mod package_identity;
+ #[cfg(target_os = "windows")]
+ mod path_normalization;
+@@ -305,12 +311,16 @@ pub use identity::SandboxAccountCredentialMismatch;
+ #[cfg(target_os = "windows")]
+ pub use identity::logon_existing_sandbox_account;
+ #[cfg(target_os = "windows")]
++pub use identity::logon_existing_sandbox_account_for_installation;
++#[cfg(target_os = "windows")]
+ pub use identity::require_logon_sandbox_creds;
+ #[cfg(target_os = "windows")]
+ pub use identity::sandbox_setup_is_complete;
+ #[cfg(target_os = "windows")]
+ pub use identity::sandbox_setup_is_complete_with_settings;
+ #[cfg(target_os = "windows")]
++pub use identity::sandbox_setup_is_complete_with_settings_for_user;
++#[cfg(target_os = "windows")]
+ pub use ipc_framed::ErrorPayload;
+ #[cfg(target_os = "windows")]
+ pub use ipc_framed::ErrorStage;
+@@ -421,6 +431,10 @@ pub use resolved_permissions::token_mode_for_permission_profile;
+ pub use runtime_ownership::APP_CORE_RUNNER_ALIAS;
+ #[cfg(target_os = "windows")]
+ pub use runtime_ownership::SandboxRuntimeAccount;
++#[cfg(target_os = "windows")]
++pub use runtime_ownership::namespace_id_for_owner;
++#[cfg(target_os = "windows")]
++pub use runtime_ownership::sandbox_group_for_installation;
+ 
+ #[cfg(target_os = "windows")]
+ pub use service_identity::windows_sandbox_service_name;
+@@ -514,6 +528,8 @@ pub use uninstall_windows::clean_up_packaged_windows_sandbox;
+ #[cfg(target_os = "windows")]
+ pub use uninstall_windows::prepare_packaged_windows_sandbox_cleanup;
+ #[cfg(target_os = "windows")]
++pub use uninstall_windows::prepare_packaged_windows_sandbox_cleanup_for_installation;
++#[cfg(target_os = "windows")]
+ pub use uninstall_windows::prepare_packaged_windows_sandbox_cleanup_with_retained_tokens;
+ #[cfg(target_os = "windows")]
+ pub use wfp::install_wfp_filters_for_account;
+diff --git a/codex-rs/windows-sandbox-rs/src/namespace.rs b/codex-rs/windows-sandbox-rs/src/namespace.rs
+index 8acb18e06b199ce35174f1fd09c0bcd2dce475ee..05bc56a468cde961c5ca279e7663bfcb93366f93 100644
+--- a/codex-rs/windows-sandbox-rs/src/namespace.rs
++++ b/codex-rs/windows-sandbox-rs/src/namespace.rs
+@@ -13,13 +13,18 @@ pub(crate) struct SandboxNamespace {
+ }
+ impl SandboxNamespace {
+     pub(crate) fn current(home: &Path) -> Result<Self> {
+-        Self::for_user(home, &crate::runtime_ownership::current_setup_user()?)
++        let namespace = Self::for_user(home, &crate::runtime_ownership::current_setup_user()?)?;
++        if !crate::registered_core_requested() {
++            namespace.ensure_legacy_runtime_unowned()?;
++        }
++        Ok(namespace)
+     }
+     pub(crate) fn for_user(home: &Path, real_user: &str) -> Result<Self> {
+-        ensure!(
+-            !crate::registered_core_requested(),
+-            "home-isolated runtime cannot use the shared RegisteredCore service"
+-        );
++        let sid = crate::winutil::resolve_sid(real_user).context("resolve namespace owner SID")?;
++        let owner_sid = crate::winutil::string_from_sid_bytes(&sid).map_err(anyhow::Error::msg)?;
++        Self::for_owner_sid(home, &owner_sid)
++    }
++    pub(crate) fn for_owner_sid(home: &Path, owner_sid: &str) -> Result<Self> {
+         ensure!(
+             home.is_absolute(),
+             "sandbox namespace requires an absolute home"
+@@ -29,9 +34,8 @@ impl SandboxNamespace {
+             .to_str()
+             .context("sandbox home is not valid Unicode")?
+             .to_lowercase();
+-        let sid = crate::winutil::resolve_sid(real_user).context("resolve namespace owner SID")?;
+-        let owner_sid = crate::winutil::string_from_sid_bytes(&sid).map_err(anyhow::Error::msg)?;
+-        ensure!(owner_sid.starts_with("S-1-"), "invalid namespace owner SID");
++        let _sid = crate::token::LocalSid::from_string(owner_sid)?;
++        let owner_sid = owner_sid.to_owned();
+         let (volume, file_id) = directory_identity(&home)?;
+         Ok(Self {
+             key: NamespaceKey::for_directory(&canonical, &owner_sid, volume, file_id),
+@@ -41,6 +45,21 @@ impl SandboxNamespace {
+             file_id,
+         })
+     }
++    pub(crate) fn ensure_legacy_runtime_unowned(&self) -> Result<()> {
++        if let Some(record) = crate::runtime_ownership::load_installation()?
++            && record.runtime.is_some()
++        {
++            let bound = record
++                .namespace_id
++                .as_deref()
++                .context("registered installation namespace is missing; repair required")?;
++            ensure!(
++                bound != self.key.id(),
++                "registered Core owns this namespace; use native package teardown before Legacy setup"
++            );
++        }
++        Ok(())
++    }
+     pub(crate) fn from_environment() -> Result<Self> {
+         let home = std::env::var_os("CODEX_HOME")
+             .context("isolated sandbox cleanup requires explicit CODEX_HOME")?;
+diff --git a/codex-rs/windows-sandbox-rs/src/namespace_coordination.rs b/codex-rs/windows-sandbox-rs/src/namespace_coordination.rs
+index ef52c49a0bf359168901f7a341eb5a1d23d75470..0ce85852b636a8bd8a63a3d46e57b43779160184 100644
+--- a/codex-rs/windows-sandbox-rs/src/namespace_coordination.rs
++++ b/codex-rs/windows-sandbox-rs/src/namespace_coordination.rs
+@@ -152,6 +152,51 @@ pub(crate) fn same_domain(user: &[u8], group: &[u8]) -> Result<bool> {
+     anyhow::bail!("compare runner token account domains failed: {error}")
+ }
+ 
++/// Read-only role classifier, including other homes. A user-name prefix alone is never enough.
++///
++/// # Safety
++/// The caller retains a valid TOKEN_QUERY handle through this call.
++pub unsafe fn token_is_home_sandbox_account(token: HANDLE) -> Result<bool> {
++    let user = unsafe { get_user_sid_bytes(token) }?;
++    let (user_name, kind) = account_name(&user)?;
++    let mut observations = Vec::new();
++    for group in unsafe { token_groups(token, 1_048_576) }? {
++        if !enabled(group.attributes) || !same_domain(&user, &group.sid)? {
++            continue;
++        }
++        let (name, kind) = account_name(&group.sid)?;
++        if NamespaceKey::claims_group_name(&name) {
++            observations.push(GroupObservation {
++                name,
++                kind,
++                attributes: group.attributes,
++                local_domain: true,
++            });
++        }
++    }
++    if !is_namespace_sandbox_role(&user_name, &observations)? {
++        return Ok(false);
++    }
++    ensure!(
++        kind == SidTypeUser,
++        "namespace token user is not a user account"
++    );
++    let local_user = local_user_sid(&user_name)?;
++    ensure!(
++        unsafe { EqualSid(user.as_ptr() as _, local_user.as_ptr() as _) } != 0,
++        "namespace token user is not the local SAM account"
++    );
++    Ok(true)
++}
++
++fn is_namespace_sandbox_role(name: &str, observations: &[GroupObservation]) -> Result<bool> {
++    if observations.is_empty() {
++        return Ok(false);
++    }
++    select_namespace(name, observations)?;
++    Ok(true)
++}
++
+ /// Derives only a coordination name, after binding the actual user and local alias.
+ ///
+ /// # Safety
+@@ -255,4 +300,19 @@ mod tests {
+             assert!(select_namespace(&key().offline(), &[value]).is_err());
+         }
+     }
++    #[test]
++    fn service_role_does_not_confuse_packaged_owner_with_tool_accounts() {
++        assert!(!is_namespace_sandbox_role("normal_core_owner", &[]).unwrap());
++        assert!(is_namespace_sandbox_role(&key().offline(), &[group()]).unwrap());
++        assert!(is_namespace_sandbox_role(&key().online(), &[group()]).unwrap());
++        // Another home's native key still classifies as a tool token; no target-home argument can adopt it.
++        let other =
++            NamespaceKey::for_directory("c:\\other-owned-home", "S-1-5-21-1-2-3-1001", 4, [8; 16]);
++        let mut other_group = group();
++        other_group.name = other.group();
++        assert!(is_namespace_sandbox_role(&other.offline(), &[other_group]).unwrap());
++        // A name alone is insufficient, and a conflicting observed namespace fails closed.
++        assert!(!is_namespace_sandbox_role(&key().offline(), &[]).unwrap());
++        assert!(is_namespace_sandbox_role("normal_core_owner", &[group()]).is_err());
++    }
+ }
+diff --git a/codex-rs/windows-sandbox-rs/src/namespace_key.rs b/codex-rs/windows-sandbox-rs/src/namespace_key.rs
+index 225e5d89049946729f8d68e5ca55983b493853a7..0d1e5bca5259144393e2e804461291fdc6311a6b 100644
+--- a/codex-rs/windows-sandbox-rs/src/namespace_key.rs
++++ b/codex-rs/windows-sandbox-rs/src/namespace_key.rs
+@@ -8,6 +8,9 @@ pub(crate) struct NamespaceKey {
+     digest: [u8; 32],
+ }
+ impl NamespaceKey {
++    pub(crate) fn from_id(id: &str) -> Option<Self> {
++        Self::from_group_name(&format!("{GROUP_PREFIX}{id}"))
++    }
+     pub(crate) fn claims_group_name(name: &str) -> bool {
+         name.get(..GROUP_PREFIX.len())
+             .is_some_and(|prefix| prefix.eq_ignore_ascii_case(GROUP_PREFIX))
+diff --git a/codex-rs/windows-sandbox-rs/src/provisioning_client.rs b/codex-rs/windows-sandbox-rs/src/provisioning_client.rs
+index 01e8ec4393d316fb31cbac15f7948ba79b10b773..95356e06305d13df2ae76f057b84dfd4842875ba 100644
+--- a/codex-rs/windows-sandbox-rs/src/provisioning_client.rs
++++ b/codex-rs/windows-sandbox-rs/src/provisioning_client.rs
+@@ -149,6 +149,7 @@ pub fn provision_windows_sandbox_via_service(
+     {
+         return service_unavailable();
+     }
++    crate::initialize_project_runtime_mode()?;
+     provision(codex_home, settings, listeners, ProvisioningIntent::Setup)
+ }
+ 
+@@ -158,10 +159,32 @@ fn provision(
+     listeners: WindowsSandboxProxyListeners,
+     intent: ProvisioningIntent,
+ ) -> anyhow::Result<WindowsSandboxProvisioningOutcome> {
+-    let _ = (codex_home, settings, listeners, intent);
+-    // A custom CLI has no authority to replace the packaged service's owner or accounts.
+-    // Preserve the upstream Legacy helper selection and RegisteredCore no-fallback error.
+-    service_unavailable()
++    if !crate::registered_core_requested() {
++        crate::namespace::SandboxNamespace::current(codex_home)?.ensure_legacy_runtime_unowned()?;
++    }
++    let request = crate::FramedProvisioningMessage {
++        version: crate::PROVISIONING_PROTOCOL_VERSION,
++        message: crate::ProvisioningMessage::ProvisionSandboxRequest {
++            payload: crate::SandboxProvisioningRequest {
++                codex_home: codex_home
++                    .to_str()
++                    .context("sandbox provisioning home is not valid UTF-8")?
++                    .to_owned(),
++                registered_core: crate::registered_core_requested(),
++                refresh_only: matches!(intent, ProvisioningIntent::RefreshRegistration),
++                settings,
++                listeners,
++            },
++        },
++    };
++
++    match send_service_request(&request, PROVISIONING_TIMEOUT)? {
++        crate::SandboxProvisioningResponse::Ok => {
++            Ok(WindowsSandboxProvisioningOutcome::Provisioned)
++        }
++        crate::SandboxProvisioningResponse::Unavailable => service_unavailable(),
++        crate::SandboxProvisioningResponse::Error { message } => Err(anyhow!(message)),
++    }
+ }
+ 
+ fn service_unavailable() -> anyhow::Result<WindowsSandboxProvisioningOutcome> {
+@@ -174,13 +197,52 @@ fn service_unavailable() -> anyhow::Result<WindowsSandboxProvisioningOutcome> {
+ /// Starts a stopped service only for explicit setup. The normal connection path
+ /// waits for startup and authenticates the pipe server; SCM authorizes the start.
+ pub fn start_windows_sandbox_service_for_setup() -> anyhow::Result<()> {
+-    bail!("home-isolated runtime cannot start the shared packaged sandbox service")
++    query_service_status()
++        .and_then(|status| {
++            if status.dwCurrentState == Services::SERVICE_STOPPED {
++                let service = open_service(Services::SERVICE_START)
++                    .context("request permission to start sandbox service for setup")?;
++                if unsafe { Services::StartServiceW(service.0, 0, ptr::null()) } == 0 {
++                    let error = io::Error::last_os_error();
++                    if error.raw_os_error() != Some(ERROR_SERVICE_ALREADY_RUNNING as i32) {
++                        return Err(error).context("start sandbox service for setup");
++                    }
++                }
++            }
++            Ok(())
++        })
++        .or_else(|error| {
++            if error.downcast_ref::<io::Error>().is_some_and(|error| {
++                matches!(error.raw_os_error(), Some(code)
++                if code == ERROR_SERVICE_DOES_NOT_EXIST as i32
++                    || code == ERROR_SERVICE_MARKED_FOR_DELETE as i32)
++            }) {
++                // The connection path preserves registered Core's no-fallback error.
++                Ok(())
++            } else {
++                Err(error)
++            }
++        })
+ }
+ 
+ /// Records desktop uninstall ownership without creating or enabling a sandbox.
+ pub fn register_desktop_installation(codex_home: &Path) -> anyhow::Result<()> {
+-    let _ = codex_home;
+-    bail!("home-isolated runtime does not register ownership with the shared packaged service")
++    let request = crate::FramedProvisioningMessage {
++        version: crate::PROVISIONING_PROTOCOL_VERSION,
++        message: crate::ProvisioningMessage::RegisterInstallationRequest {
++            codex_home: codex_home
++                .to_str()
++                .context("desktop home is not valid UTF-8")?
++                .to_owned(),
++        },
++    };
++    match send_service_request(&request, Duration::from_secs(5))? {
++        crate::SandboxProvisioningResponse::Ok => Ok(()),
++        crate::SandboxProvisioningResponse::Unavailable => {
++            bail!("desktop uninstall registration service is unavailable")
++        }
++        crate::SandboxProvisioningResponse::Error { message } => Err(anyhow!(message)),
++    }
+ }
+ 
+ fn send_service_request(
+diff --git a/codex-rs/windows-sandbox-rs/src/provisioning_protocol.rs b/codex-rs/windows-sandbox-rs/src/provisioning_protocol.rs
+index 6a8c978477fc3b644983b9b30e653c39a381da5b..6b14d58a5f1d661ef50ce1d29487ae9bf0212759 100644
+--- a/codex-rs/windows-sandbox-rs/src/provisioning_protocol.rs
++++ b/codex-rs/windows-sandbox-rs/src/provisioning_protocol.rs
+@@ -11,7 +11,7 @@ use std::io::Write;
+ pub const PROVISIONING_PROTOCOL_VERSION: u8 = 1;
+ 
+ /// Named pipe used by the machine-wide Windows sandbox provisioning service.
+-pub const SANDBOX_PROVISIONING_PIPE_NAME: &str = r"\\.\pipe\OpenAI.CodexSandbox";
++pub const SANDBOX_PROVISIONING_PIPE_NAME: &str = r"\\.\pipe\CADSG.WindowsSandbox";
+ 
+ /// Pre-dispatch refusal: the caller may reconnect once to the refreshed pipe.
+ pub const SANDBOX_GROUP_CHANGED: &str = "sandbox group changed before authentication";
+diff --git a/codex-rs/windows-sandbox-rs/src/runtime_ownership.rs b/codex-rs/windows-sandbox-rs/src/runtime_ownership.rs
+index d5ec71b6c0da1820786c2fc25785c4afb7a38cc8..df3baf38e452229db1636a995189be21d8de08cc 100644
+--- a/codex-rs/windows-sandbox-rs/src/runtime_ownership.rs
++++ b/codex-rs/windows-sandbox-rs/src/runtime_ownership.rs
+@@ -32,7 +32,7 @@ impl SetupRuntime {
+ }
+ 
+ /// Package-scoped execution alias declared for the app's sandbox runner.
+-pub const APP_CORE_RUNNER_ALIAS: &str = "codex-core-command-runner.exe";
++pub const APP_CORE_RUNNER_ALIAS: &str = "cadsg-core-command-runner.exe";
+ 
+ /// The service may register its package only for these managed sandbox accounts.
+ #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+@@ -43,6 +43,15 @@ pub enum SandboxRuntimeAccount {
+ }
+ 
+ impl SandboxRuntimeAccount {
++    /// Derive the exact managed name from the authenticated owner/home and native reservation.
++    pub fn username_for(self, installation: &InstallationRecord) -> Result<String> {
++        let namespace = installation_namespace_key(installation)?;
++        Ok(match self {
++            Self::Offline => namespace.offline(),
++            Self::Online => namespace.online(),
++        })
++    }
++
+     pub fn username(self) -> &'static str {
+         match self {
+             Self::Offline => crate::setup::OFFLINE_USERNAME,
+@@ -58,8 +67,7 @@ use crate::winutil::to_wide;
+ 
+ // Old services overwrite the parent value and delete its key on uninstall.
+ // A child key preserves Core state and makes that old whole-key delete fail.
+-pub const CORE_INSTALLATION_KEY: &str =
+-    r"SOFTWARE\OpenAI\Codex\WindowsSandboxService\RegisteredCore";
++pub const CORE_INSTALLATION_KEY: &str = r"SOFTWARE\CADSG\WindowsSandboxService\RegisteredCore";
+ 
+ /// Written before registration so a service restart cannot lose cleanup ownership.
+ #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+@@ -143,6 +151,51 @@ pub struct RuntimeAccountRegistration {
+     pub alias_path: Option<std::path::PathBuf>,
+ }
+ 
++/// Query the same owner/home namespace group without creating a SAM object.
++pub fn sandbox_group_for_installation(
++    installation: &InstallationRecord,
++) -> Result<Option<Vec<u8>>> {
++    let key = installation_namespace_key(installation)?;
++    if !crate::namespace::local_group_exists(&key.group())? {
++        return Ok(None);
++    }
++    Ok(Some(crate::winutil::resolve_sid(&key.group())?))
++}
++
++/// Derive while the authenticated owner's existing directory is pinned.
++pub fn namespace_id_for_owner(home: &std::path::Path, owner_sid: &str) -> Result<String> {
++    let namespace = crate::namespace::SandboxNamespace::for_owner_sid(home, owner_sid)?;
++    namespace.validate_existing_state()?;
++    Ok(namespace.key.id())
++}
++
++pub(crate) fn installation_namespace_key(
++    installation: &InstallationRecord,
++) -> Result<crate::namespace_key::NamespaceKey> {
++    crate::namespace_key::NamespaceKey::from_id(
++        installation
++            .namespace_id
++            .as_deref()
++            .context("installation namespace binding is missing")?,
++    )
++    .context("invalid installation namespace binding")
++}
++
++pub(crate) fn validate_installation_namespace(installation: &InstallationRecord) -> Result<()> {
++    if installation.codex_home.exists() {
++        let namespace = crate::namespace::SandboxNamespace::for_owner_sid(
++            &installation.codex_home,
++            &installation.user_sid,
++        )?;
++        namespace.require_owned_state()?;
++        ensure!(
++            Some(namespace.key.id().as_str()) == installation.namespace_id.as_deref(),
++            "installation home directory or namespace reservation changed"
++        );
++    }
++    Ok(())
++}
++
+ /// Capture the requesting process identity before elevation, never USERNAME.
+ pub(crate) fn current_setup_user() -> Result<String> {
+     use std::os::windows::io::FromRawHandle;
+diff --git a/codex-rs/windows-sandbox-rs/src/runtime_ownership_tests.rs b/codex-rs/windows-sandbox-rs/src/runtime_ownership_tests.rs
+index 6fade70a0d531dd0b09073083e2788ae8a4be7c5..bd641509c188a408baacdc860d6ef48d55acb2db 100644
+--- a/codex-rs/windows-sandbox-rs/src/runtime_ownership_tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/runtime_ownership_tests.rs
+@@ -7,6 +7,7 @@ use std::path::PathBuf;
+ 
+ fn record() -> InstallationRecord {
+     InstallationRecord {
++        namespace_id: None,
+         user_sid: "S-1-5-21-1-2-3-1000".into(),
+         codex_home: PathBuf::from(r"C:\Users\owner\.codex"),
+         session_id: 1,
+@@ -273,3 +274,41 @@ fn interrupted_cleanup_logon_blocks_admission_after_record_reload() {
+             .is_ok()
+     );
+ }
++
++#[test]
++fn project_namespace_binding_survives_missing_home_but_rejects_replacement() -> anyhow::Result<()> {
++    let temporary = tempfile::tempdir()?;
++    let home = temporary.path().join("owned-home");
++    std::fs::create_dir(&home)?;
++    let user = crate::runtime_ownership::current_setup_user()?;
++    let namespace = crate::namespace::SandboxNamespace::for_user(&home, &user)?;
++    namespace.reserve_owner()?;
++    let record = crate::InstallationRecord {
++        namespace_id: Some(namespace.key.id()),
++        user_sid: namespace.owner_sid.clone(),
++        codex_home: namespace.home.clone(),
++        session_id: 1,
++        desktop_installation: None,
++        runtime: None,
++    };
++    let offline = crate::SandboxRuntimeAccount::Offline.username_for(&record)?;
++    assert_eq!(offline, namespace.key.offline());
++    crate::runtime_ownership::validate_installation_namespace(&record)?;
++    std::fs::remove_dir_all(&home)?;
++    assert_eq!(
++        crate::SandboxRuntimeAccount::Offline.username_for(&record)?,
++        offline
++    );
++    crate::runtime_ownership::validate_installation_namespace(&record)?;
++    std::fs::create_dir(&home)?;
++    assert!(crate::runtime_ownership::validate_installation_namespace(&record).is_err());
++    assert_eq!(
++        crate::INSTALLATION_KEY,
++        r"SOFTWARE\CADSG\WindowsSandboxService"
++    );
++    assert_eq!(
++        crate::runtime_ownership::CORE_INSTALLATION_KEY,
++        r"SOFTWARE\CADSG\WindowsSandboxService\RegisteredCore"
++    );
++    Ok(())
++}
+diff --git a/codex-rs/windows-sandbox-rs/src/service_identity.rs b/codex-rs/windows-sandbox-rs/src/service_identity.rs
+index ce60848d136456d60ffae13d61c2e9e2573e1dba..06c00c367d697030211494ee0cb66a692286bee0 100644
+--- a/codex-rs/windows-sandbox-rs/src/service_identity.rs
++++ b/codex-rs/windows-sandbox-rs/src/service_identity.rs
+@@ -12,10 +12,10 @@ use crate::package_identity::process_package_family;
+ /// the legacy service lookup and may use ordinary elevated setup when it is absent.
+ pub fn windows_sandbox_service_name() -> Result<String> {
+     let Some(family) = service_package_family()? else {
+-        return Ok("CodexSandboxService".into());
++        return Ok("CADSGSandboxService".into());
+     };
+     let (name, _) = family.rsplit_once('_').context("invalid package family")?;
+-    Ok(format!("CodexSandboxService.{name}"))
++    Ok(format!("CADSGSandboxService.{name}"))
+ }
+ 
+ /// The full family, including publisher identity, qualifies the authenticated pipe.
+diff --git a/codex-rs/windows-sandbox-rs/src/setup.rs b/codex-rs/windows-sandbox-rs/src/setup.rs
+index 2fce2dce70242b6787ba9a97d45a53d6e57046e1..481c4eff9caea6429ff2db4f77e8ae063d3b1391 100644
+--- a/codex-rs/windows-sandbox-rs/src/setup.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup.rs
+@@ -1257,10 +1257,6 @@ pub fn run_elevated_provisioning_setup_with_retained_handles(
+     }
+     let namespace = crate::namespace::SandboxNamespace::for_user(codex_home, real_user)?;
+     namespace.validate_existing_state()?;
+-    anyhow::ensure!(
+-        runtime == SetupRuntime::Legacy,
+-        "home-isolated setup requires native Legacy runtime"
+-    );
+     let payload = ElevationPayload {
+         version: SETUP_VERSION,
+         offline_username: namespace.key.offline(),
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/service.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning/service.rs
+index df44fef0d473ebdeffdc1c5891e743b7abf6ebe3..5e21971bf9a9a911123b48bc5995daa583b42b03 100644
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning/service.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning/service.rs
+@@ -20,6 +20,36 @@ pub fn provision_sandbox_in_process(
+     settings: crate::WindowsSandboxProvisioningSettings,
+     runtime: SetupRuntime,
+ ) -> Result<()> {
+-    let _ = (codex_home, real_user, settings, runtime);
+-    anyhow::bail!("home-isolated runtime requires its native Legacy setup helper")
++    let namespace = crate::namespace::SandboxNamespace::for_user(codex_home, real_user)?;
++    if runtime == SetupRuntime::Legacy {
++        namespace.ensure_legacy_runtime_unowned()?;
++    }
++    namespace.reserve_owner()?;
++    let payload = Payload {
++        version: SETUP_VERSION,
++        offline_username: namespace.key.offline(),
++        online_username: namespace.key.online(),
++        codex_home: codex_home.to_path_buf(),
++        command_cwd: codex_home.to_path_buf(),
++        read_roots: Vec::new(),
++        write_roots: Vec::new(),
++        deny_read_paths: Vec::new(),
++        deny_write_paths: Vec::new(),
++        proxy_ports: settings.proxy_ports,
++        allow_local_binding: settings.allow_local_binding,
++        otel: codex_otel::global_statsig_metrics_settings(),
++        real_user: real_user.to_owned(),
++        user_profile: None,
++        mode: SetupMode::ProvisionOnly,
++        runtime,
++        refresh_only: false,
++    };
++    run_payload(&payload)?;
++    if let Err(err) = crate::setup_error::clear_setup_error_report(codex_home) {
++        log_note(
++            &format!("setup orchestrator: failed to clear setup_error.json after success: {err}"),
++            Some(&sandbox_dir(codex_home)),
++        );
++    }
++    Ok(())
+ }
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+index 092e76ebd93de0dcb5e074a50d33110b6e934101..7dc908514f7dd7a8d7fd7cafa2022df7856b276c 100644
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+@@ -565,6 +565,7 @@ fn real_main(setup_mode: &mut Option<SetupMode>) -> Result<()> {
+         let namespace =
+             crate::namespace::SandboxNamespace::for_user(&payload.codex_home, &payload.real_user)?;
+         namespace.validate_names(&payload.offline_username, &payload.online_username)?;
++        namespace.ensure_legacy_runtime_unowned()?;
+         namespace.reserve_owner()?;
+         Some(guard)
+     } else {
+@@ -574,10 +575,6 @@ fn real_main(setup_mode: &mut Option<SetupMode>) -> Result<()> {
+ }
+ 
+ fn run_payload(payload: &Payload) -> Result<()> {
+-    anyhow::ensure!(
+-        payload.runtime == SetupRuntime::Legacy,
+-        "home-isolated helper requires native Legacy runtime"
+-    );
+     let namespace =
+         crate::namespace::SandboxNamespace::for_user(&payload.codex_home, &payload.real_user)?;
+     namespace.validate_names(&payload.offline_username, &payload.online_username)?;
+@@ -999,9 +996,9 @@ fn run_setup_full(
+         )?;
+     }
+ 
+-    if let Err(error) = cwd_metadata::ensure_owned_cwd_parent_metadata(
+-        payload, namespace, sandbox_group_psid, log,
+-    ) {
++    if let Err(error) =
++        cwd_metadata::ensure_owned_cwd_parent_metadata(payload, namespace, sandbox_group_psid, log)
++    {
+         unsafe {
+             LocalFree(sandbox_group_psid as HLOCAL);
+         }
+diff --git a/codex-rs/windows-sandbox-rs/src/uninstall_windows/principals.rs b/codex-rs/windows-sandbox-rs/src/uninstall_windows/principals.rs
+index 6b29a0a45afb3b563e64b0bf3da902498a57b3bd..304072af3b528a22fe72892c35fcd281eecc4b4c 100644
+--- a/codex-rs/windows-sandbox-rs/src/uninstall_windows/principals.rs
++++ b/codex-rs/windows-sandbox-rs/src/uninstall_windows/principals.rs
+@@ -34,9 +34,12 @@ struct SandboxUser {
+ 
+ impl DisabledSandboxUsers {
+     pub(super) fn for_namespace(namespace: &crate::namespace::SandboxNamespace) -> Self {
++        Self::for_key(&namespace.key)
++    }
++    pub(super) fn for_key(key: &crate::namespace_key::NamespaceKey) -> Self {
+         Self {
+             users: Vec::new(),
+-            names: vec![namespace.key.offline(), namespace.key.online()],
++            names: vec![key.offline(), key.online()],
+         }
+     }
+     pub(super) fn disable(&mut self) -> Result<()> {
+diff --git a/codex-rs/windows-sandbox-rs/src/uninstall_windows.rs b/codex-rs/windows-sandbox-rs/src/uninstall_windows.rs
+index 24a63971c1874763b2ad6b57d1f7bcf4da93496c..75ae4fb8ac9a3e2a14ae0d09cd90e76ca2b4f52e 100644
+--- a/codex-rs/windows-sandbox-rs/src/uninstall_windows.rs
++++ b/codex-rs/windows-sandbox-rs/src/uninstall_windows.rs
+@@ -22,8 +22,16 @@ pub fn clean_up_legacy_windows_sandbox() -> Result<()> {
+         "sandbox cleanup requires administrator privileges"
+     );
+     let _setup_lock = crate::setup_mutex::acquire_sandbox_setup_lock(/*timeout_ms*/ 5_000)?;
+-    // Private cleanup never retires the stock service installation owner.
+-    crate::namespace::SandboxNamespace::from_environment()?.require_owned_state()?;
++    let namespace = crate::namespace::SandboxNamespace::from_environment()?;
++    namespace.require_owned_state()?;
++    // Retire only this project's exact owner/home binding. Other home fallback
++    // cleanup must not retire the active service owner; Core uses native package teardown.
++    if let Some(record) = crate::runtime_ownership::load_installation()?
++        && record.user_sid == namespace.owner_sid
++        && record.namespace_id.as_deref() == Some(namespace.key.id().as_str())
++    {
++        crate::runtime_ownership::remove_installation()?;
++    }
+     unsafe {
+         CoInitializeEx(/*pvreserved*/ None, COINIT_MULTITHREADED).ok()?
+     };
+@@ -60,7 +68,8 @@ pub fn clean_up_packaged_windows_sandbox(
+ /// remove protections, or undo work performed between the two phases.
+ #[must_use = "finish cleanup or leave the sandbox accounts disabled with their protections intact"]
+ pub struct PreparedWindowsSandboxCleanup {
+-    namespace: crate::namespace::SandboxNamespace,
++    namespace: crate::namespace_key::NamespaceKey,
++    home: std::path::PathBuf,
+     _setup_lock: crate::setup_mutex::SandboxSetupLock,
+     users: principals::DisabledSandboxUsers,
+     _retained_logons: retained_logons::RetainedLogons,
+@@ -83,10 +92,34 @@ pub fn prepare_packaged_windows_sandbox_cleanup_with_retained_tokens(
+     tokens: &[BorrowedHandle<'_>],
+ ) -> Result<PreparedWindowsSandboxCleanup> {
+     let setup_lock = crate::setup_mutex::acquire_sandbox_setup_lock(/*timeout_ms*/ 5_000)?;
+-    let mut errors = Vec::new();
+     let namespace = crate::namespace::SandboxNamespace::from_environment()?;
+     namespace.require_owned_state()?;
+-    let mut users = principals::DisabledSandboxUsers::for_namespace(&namespace);
++    prepare_for_namespace_key(namespace.key, namespace.home, tokens, setup_lock)
++}
++
++/// Service-owned resources use the protected record, never SYSTEM's CODEX_HOME.
++pub fn prepare_packaged_windows_sandbox_cleanup_for_installation(
++    installation: &crate::InstallationRecord,
++    tokens: &[BorrowedHandle<'_>],
++) -> Result<PreparedWindowsSandboxCleanup> {
++    let setup_lock = crate::setup_mutex::acquire_sandbox_setup_lock(/*timeout_ms*/ 5_000)?;
++    crate::runtime_ownership::validate_installation_namespace(installation)?;
++    prepare_for_namespace_key(
++        crate::runtime_ownership::installation_namespace_key(installation)?,
++        installation.codex_home.clone(),
++        tokens,
++        setup_lock,
++    )
++}
++
++fn prepare_for_namespace_key(
++    namespace: crate::namespace_key::NamespaceKey,
++    home: std::path::PathBuf,
++    tokens: &[BorrowedHandle<'_>],
++    setup_lock: crate::setup_mutex::SandboxSetupLock,
++) -> Result<PreparedWindowsSandboxCleanup> {
++    let mut errors = Vec::new();
++    let mut users = principals::DisabledSandboxUsers::for_key(&namespace);
+     let mut retained = retained_logons::RetainedLogons::default();
+     if let Err(error) = users.disable().and_then(|()| {
+         retained = retained_logons::RetainedLogons::capture(tokens, &users)?;
+@@ -102,6 +135,7 @@ pub fn prepare_packaged_windows_sandbox_cleanup_with_retained_tokens(
+ 
+     Ok(PreparedWindowsSandboxCleanup {
+         namespace,
++        home,
+         _setup_lock: setup_lock,
+         users,
+         _retained_logons: retained,
+@@ -124,7 +158,7 @@ impl PreparedWindowsSandboxCleanup {
+     ) -> Result<()> {
+         if let Some(home) = codex_home {
+             anyhow::ensure!(
+-                dunce::canonicalize(home)? == self.namespace.home,
++                dunce::canonicalize(home)? == self.home,
+                 "cleanup home differs from prepared namespace"
+             );
+         }
+@@ -166,17 +200,17 @@ impl PreparedWindowsSandboxCleanup {
+         for (operation, result) in [
+             (
+                 "remove WFP filters",
+-                crate::wfp::remove_namespaced_wfp_filters(&self.namespace.key),
++                crate::wfp::remove_namespaced_wfp_filters(&self.namespace),
+             ),
+             (
+                 "remove firewall rules",
+-                firewall::cleanup_firewall_rules(&self.namespace.key),
++                firewall::cleanup_firewall_rules(&self.namespace),
+             ),
+             (
+                 "remove hidden-user entries",
+                 crate::hide_users::unhide_sandbox_users(&[
+-                    self.namespace.key.offline().as_str(),
+-                    self.namespace.key.online().as_str(),
++                    self.namespace.offline().as_str(),
++                    self.namespace.online().as_str(),
+                 ]),
+             ),
+         ] {
+@@ -200,7 +234,7 @@ impl PreparedWindowsSandboxCleanup {
+                 .sids()
+                 .any(|sid| self._retained_logons.contains_sid(sid))
+         {
+-            match principals::remove_sandbox_principal(&self.namespace.key.group()) {
++            match principals::remove_sandbox_principal(&self.namespace.group()) {
+                 Ok(()) => report("remove sandbox group: completed"),
+                 Err(error) => {
+                     report(&format!("remove sandbox group: failed, {error:#}"));
+diff --git a/codex-rs/windows-sandbox-service/src/ipc/authentication.rs b/codex-rs/windows-sandbox-service/src/ipc/authentication.rs
+index 096e9358535950558145444ff11868ada3209393..03040cb8af0617377147b07df09370407a8323b9 100644
+--- a/codex-rs/windows-sandbox-service/src/ipc/authentication.rs
++++ b/codex-rs/windows-sandbox-service/src/ipc/authentication.rs
+@@ -41,7 +41,7 @@ pub(crate) struct ClientIdentity {
+ pub(super) fn authenticate_client(
+     pipe: BorrowedHandle<'_>,
+     authorized_process: &crate::package_identity::AuthorizedClientProcess,
+-    sandbox_sid: &[u8],
++    sandbox_sid: Option<&[u8]>,
+     request: &ServiceRequest,
+ ) -> Result<(ClientIdentity, Result<()>)> {
+     std::thread::scope(|scope| {
+@@ -74,15 +74,14 @@ pub(super) fn authenticate_client(
+ fn authenticate_impersonated_client(
+     pipe: BorrowedHandle<'_>,
+     authorized_process: &crate::package_identity::AuthorizedClientProcess,
+-    sandbox_sid: &[u8],
++    sandbox_sid: Option<&[u8]>,
+     request: &ServiceRequest,
+ ) -> Result<ClientIdentity> {
+     // Pin the group generation through identity capture.
+     // Release this lock before the provisioning worker checks machine policy.
+     let _setup_lock = codex_windows_sandbox::acquire_sandbox_setup_lock(/*timeout_ms*/ 5_000)?;
+     anyhow::ensure!(
+-        codex_windows_sandbox::resolve_sid(codex_windows_sandbox::SANDBOX_USERS_GROUP)
+-            .is_ok_and(|current| current == sandbox_sid),
++        super::listener::current_sandbox_group()?.as_deref() == sandbox_sid,
+         codex_windows_sandbox::SANDBOX_GROUP_CHANGED
+     );
+     if unsafe { pipes::ImpersonateNamedPipeClient(pipe.as_raw_handle()) } == 0 {
+@@ -122,19 +121,26 @@ fn authenticate_impersonated_client(
+         bail!("non-interactive service accounts cannot request provisioning");
+     }
+ 
+-    let mut is_sandbox_member = 0;
+-    if unsafe {
+-        security::CheckTokenMembership(
+-            token.as_raw_handle(),
+-            sandbox_sid.as_ptr() as *mut c_void,
+-            &mut is_sandbox_member,
+-        )
+-    } == 0
+-    {
+-        return Err(std::io::Error::last_os_error()).context("check sandbox group membership");
++    if let Some(sandbox_sid) = sandbox_sid {
++        let mut is_sandbox_member = 0;
++        if unsafe {
++            security::CheckTokenMembership(
++                token.as_raw_handle(),
++                sandbox_sid.as_ptr() as *mut c_void,
++                &mut is_sandbox_member,
++            )
++        } == 0
++        {
++            return Err(std::io::Error::last_os_error()).context("check sandbox group membership");
++        }
++        if is_sandbox_member != 0 {
++            bail!("sandbox accounts cannot request provisioning");
++        }
+     }
+-    if is_sandbox_member != 0 {
+-        bail!("sandbox accounts cannot request provisioning");
++    // Also reject another home's exact native namespace token. An ordinary packaged
++    // owner has no such local alias membership; package identity alone is not a role.
++    if unsafe { codex_windows_sandbox::token_is_home_sandbox_account(token.as_raw_handle()) }? {
++        bail!("home sandbox accounts cannot request provisioning");
+     }
+ 
+     let user = unsafe { codex_windows_sandbox::get_user_sid_bytes(token.as_raw_handle()) }
+diff --git a/codex-rs/windows-sandbox-service/src/ipc/listener.rs b/codex-rs/windows-sandbox-service/src/ipc/listener.rs
+index 3895e3a98b38519454d21d08819791280cb0e2ca..ed263f1bf9dcb98ff73fa4b0d153f9d9ba5b4e95 100644
+--- a/codex-rs/windows-sandbox-service/src/ipc/listener.rs
++++ b/codex-rs/windows-sandbox-service/src/ipc/listener.rs
+@@ -4,7 +4,6 @@
+ use anyhow::Context;
+ use anyhow::Result;
+ use anyhow::bail;
+-use codex_windows_sandbox::ensure_sandbox_users_group;
+ use codex_windows_sandbox::string_from_sid_bytes;
+ use codex_windows_sandbox::to_wide;
+ use std::mem::size_of;
+@@ -23,7 +22,7 @@ use super::pipe_security_descriptor;
+ 
+ pub(super) struct ProvisioningListener {
+     pub(super) pipe: OwnedHandle,
+-    pub(super) sandbox_sid: Vec<u8>,
++    pub(super) sandbox_sid: Option<Vec<u8>>,
+     _descriptor: SecurityDescriptor,
+ }
+ 
+@@ -38,8 +37,8 @@ impl ProvisioningListener {
+         {
+             bail!("interrupted sandbox cleanup requires repair");
+         }
+-        let sandbox_sid = ensure_sandbox_users_group()?;
+-        let (descriptor, pipe) = create_provisioning_pipe(&pipe_name, &sandbox_sid)?;
++        let sandbox_sid = current_sandbox_group()?;
++        let (descriptor, pipe) = create_provisioning_pipe(&pipe_name, sandbox_sid.as_deref())?;
+         Ok(Self {
+             pipe,
+             sandbox_sid,
+@@ -51,7 +50,7 @@ impl ProvisioningListener {
+         let current_group = {
+             let _setup_lock =
+                 codex_windows_sandbox::acquire_sandbox_setup_lock(/*timeout_ms*/ 5_000)?;
+-            codex_windows_sandbox::resolve_sid(codex_windows_sandbox::SANDBOX_USERS_GROUP)
++            current_sandbox_group()
+         };
+         if current_group.is_ok_and(|current| current == self.sandbox_sid) {
+             unsafe { pipes::DisconnectNamedPipe(self.pipe.as_raw_handle()) };
+@@ -64,6 +63,13 @@ impl ProvisioningListener {
+     }
+ }
+ 
++pub(super) fn current_sandbox_group() -> Result<Option<Vec<u8>>> {
++    crate::installation_record::load()?
++        .map(|record| codex_windows_sandbox::sandbox_group_for_installation(&record))
++        .transpose()
++        .map(Option::flatten)
++}
++
+ struct SecurityDescriptor(security::PSECURITY_DESCRIPTOR);
+ 
+ impl Drop for SecurityDescriptor {
+@@ -75,9 +81,13 @@ impl Drop for SecurityDescriptor {
+ /// Preserves the existing listener and descriptor lifetimes.
+ fn create_provisioning_pipe(
+     pipe_name: &str,
+-    sandbox_sid: &[u8],
++    sandbox_sid: Option<&[u8]>,
+ ) -> Result<(SecurityDescriptor, OwnedHandle)> {
+-    let sid_string = string_from_sid_bytes(sandbox_sid).map_err(anyhow::Error::msg)?;
++    let sid_string = sandbox_sid
++        .map(string_from_sid_bytes)
++        .transpose()
++        .map_err(anyhow::Error::msg)?
++        .unwrap_or_default();
+     let sddl = pipe_security_descriptor(&sid_string);
+     let mut descriptor: security::PSECURITY_DESCRIPTOR = ptr::null_mut();
+     if unsafe {
+diff --git a/codex-rs/windows-sandbox-service/src/ipc.rs b/codex-rs/windows-sandbox-service/src/ipc.rs
+index 2d8e9ad1d6f95171eff2812d1f60c90b9bc3fbf2..28d78bb40a11dbfeed8818b5b58f6c8134bede83 100644
+--- a/codex-rs/windows-sandbox-service/src/ipc.rs
++++ b/codex-rs/windows-sandbox-service/src/ipc.rs
+@@ -109,7 +109,7 @@ pub(crate) fn run(
+         let result = handle_request(
+             listener.pipe.as_handle(),
+             &authorized_process,
+-            &listener.sandbox_sid,
++            listener.sandbox_sid.as_deref(),
+             &shutdown,
+             &on_authenticated_user,
+         );
+@@ -254,13 +254,18 @@ pub(crate) fn wake(pipe_name: &str, is_stopped: impl Fn() -> bool) {
+ }
+ 
+ fn pipe_security_descriptor(sandbox_sid: &str) -> String {
+-    format!("D:P(D;;GA;;;{sandbox_sid})(A;;GA;;;SY)(A;;GA;;;BA)(A;;{PIPE_USER_ACCESS};;;IU)")
++    let deny = if sandbox_sid.is_empty() {
++        String::new()
++    } else {
++        format!("(D;;GA;;;{sandbox_sid})")
++    };
++    format!("D:P{deny}(A;;GA;;;SY)(A;;GA;;;BA)(A;;{PIPE_USER_ACCESS};;;IU)")
+ }
+ 
+ fn handle_request(
+     pipe: BorrowedHandle<'_>,
+     authorized_process: &crate::package_identity::AuthorizedClientProcess,
+-    sandbox_sid: &[u8],
++    sandbox_sid: Option<&[u8]>,
+     shutdown: &AtomicBool,
+     on_authenticated_user: &dyn Fn(
+         InstallationRecord,
+diff --git a/codex-rs/windows-sandbox-service/src/package_identity/registered.rs b/codex-rs/windows-sandbox-service/src/package_identity/registered.rs
+index 34414a29e0ba7c6ca3b16949f22a912f7d4fe07b..cae98d87a76554e86127de21d71a09f01b01fe33 100644
+--- a/codex-rs/windows-sandbox-service/src/package_identity/registered.rs
++++ b/codex-rs/windows-sandbox-service/src/package_identity/registered.rs
+@@ -22,9 +22,13 @@ pub(crate) fn authorize_setup_runtime(
+             Ok(SetupRuntime::Registered)
+         }
+         ServiceRequest::ProvisionSandbox(_) => {
++            // The client/helper forbid Legacy reuse of the exact Core-owned
++            // namespace. Other isolated homes retain native helper fallback.
+             anyhow::ensure!(
+                 crate::installation_record::load_runtime()?.is_none(),
+-                "registered Core owns these sandbox accounts; legacy provisioning is not permitted"
++                crate::ipc::ServiceUnavailable(
++                    "registered Core uses this service; use Legacy helper fallback"
++                )
+             );
+             Ok(SetupRuntime::Legacy)
+         }
+diff --git a/codex-rs/windows-sandbox-service/src/package_lifecycle/cleanup.rs b/codex-rs/windows-sandbox-service/src/package_lifecycle/cleanup.rs
+index 3d277159c8590740426d3ec5423070afebf7d33c..3ce87efb411bce2760adc3b11190be13fd803cd3 100644
+--- a/codex-rs/windows-sandbox-service/src/package_lifecycle/cleanup.rs
++++ b/codex-rs/windows-sandbox-service/src/package_lifecycle/cleanup.rs
+@@ -91,9 +91,13 @@ pub(super) fn clean_up(
+                     // Retained data must not keep permissions for the deleted sandbox group.
+                     record_result(
+                         "remove codex home sandbox permissions",
+-                        resolve_sid("CodexSandboxUsers")
+-                            .and_then(|mut sid| unsafe {
+-                                revoke_ace(home, sid.as_mut_ptr().cast())
++                        codex_windows_sandbox::sandbox_group_for_installation(&installation.record)
++                            .and_then(|sid| {
++                                if let Some(mut sid) = sid {
++                                    unsafe { revoke_ace(home, sid.as_mut_ptr().cast()) }
++                                } else {
++                                    Ok(())
++                                }
+                             })
+                             .map_err(io::Error::other),
+                     );
+diff --git a/codex-rs/windows-sandbox-service/src/package_lifecycle/registered.rs b/codex-rs/windows-sandbox-service/src/package_lifecycle/registered.rs
+index cbddff1399f7ddded5f54e7c9edc5edc73b40d7b..cae2c8347ca631e0d1af9fd76cca1f4344f84d78 100644
+--- a/codex-rs/windows-sandbox-service/src/package_lifecycle/registered.rs
++++ b/codex-rs/windows-sandbox-service/src/package_lifecycle/registered.rs
+@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
+ use anyhow::Context;
+ use anyhow::Result;
+ use anyhow::ensure;
+-use codex_windows_sandbox::prepare_packaged_windows_sandbox_cleanup_with_retained_tokens;
++use codex_windows_sandbox::prepare_packaged_windows_sandbox_cleanup_for_installation;
+ use windows::ApplicationModel::Package;
+ use windows::ApplicationModel::PackageUninstallingEventArgs;
+ use windows::Management::Deployment::PackageManager;
+@@ -88,7 +88,7 @@ pub(super) fn clean_up(lifecycle: &PackageLifecycle, record: InstallationRecord)
+         )?
+     };
+     let prepared =
+-        prepare_packaged_windows_sandbox_cleanup_with_retained_tokens(&removal.tokens())?;
++        prepare_packaged_windows_sandbox_cleanup_for_installation(&record, &removal.tokens())?;
+     // A reinstall before this boundary cancels without retiring resources.
+     ensure!(
+         owner_allows_cleanup(&lifecycle.uninstalling, &record)?,
+diff --git a/codex-rs/windows-sandbox-service/src/package_lifecycle.rs b/codex-rs/windows-sandbox-service/src/package_lifecycle.rs
+index 42e6adc0660f0c6a3e15e11630fe28163eeb7dae..b41ec9f3268d69fed8e7d038dfb5d9865842b14b 100644
+--- a/codex-rs/windows-sandbox-service/src/package_lifecycle.rs
++++ b/codex-rs/windows-sandbox-service/src/package_lifecycle.rs
+@@ -17,7 +17,7 @@ use anyhow::ensure;
+ use codex_windows_sandbox::DirectoryOpenDisposition;
+ use codex_windows_sandbox::PreparedWindowsSandboxCleanup;
+ use codex_windows_sandbox::create_directory_guard;
+-use codex_windows_sandbox::prepare_packaged_windows_sandbox_cleanup;
++use codex_windows_sandbox::prepare_packaged_windows_sandbox_cleanup_for_installation;
+ use codex_windows_sandbox::string_from_sid_bytes;
+ use windows::ApplicationModel::Package;
+ use windows::ApplicationModel::PackageCatalog;
+@@ -94,7 +94,15 @@ impl PackageLifecycle {
+             Some(installation) => Some(installation.record.clone()),
+             None => crate::installation_record::load()?,
+         };
++        let namespace_id =
++            codex_windows_sandbox::namespace_id_for_owner(&record.codex_home, &record.user_sid)?;
+         if let Some(previous) = previous {
++            anyhow::ensure!(
++                previous.namespace_id.as_deref() == Some(namespace_id.as_str()),
++                crate::ipc::ServiceUnavailable(
++                    "registered home directory namespace differs from the protected owner record"
++                )
++            );
+             // A missing watcher does not retire its owner; other clients can use elevated setup.
+             ensure!(
+                 previous.user_sid == record.user_sid && previous.codex_home == record.codex_home,
+@@ -106,6 +114,7 @@ impl PackageLifecycle {
+                 .desktop_installation
+                 .or(record.desktop_installation);
+         }
++        record.namespace_id = Some(namespace_id);
+         record = crate::installation_record::save(record)?;
+         if let Some(installation) = active.as_mut()
+             && installation.codex_home.is_some()
+@@ -262,9 +271,11 @@ impl PackageLifecycle {
+             return registered::clean_up(self, record);
+         }
+         // Preserve the legacy path's ownership retirement before native preparation.
++        let record =
++            crate::installation_record::load()?.context("native cleanup owner is missing")?;
+         crate::installation_record::remove()?;
+         self.clean_up_resources(
+-            &prepare_packaged_windows_sandbox_cleanup()?,
++            &prepare_packaged_windows_sandbox_cleanup_for_installation(&record, &[])?,
+             /*runtime*/ None,
+         )
+     }
+diff --git a/codex-rs/windows-sandbox-service/src/provisioning/registered.rs b/codex-rs/windows-sandbox-service/src/provisioning/registered.rs
+index d0291a22ec5a8bc826c138d3e33e815c3d807afd..fbbdfeef8b6527700357967cf6925fc9f1d44f9d 100644
+--- a/codex-rs/windows-sandbox-service/src/provisioning/registered.rs
++++ b/codex-rs/windows-sandbox-service/src/provisioning/registered.rs
+@@ -10,7 +10,7 @@ use anyhow::ensure;
+ use codex_windows_sandbox::SandboxAccountCredentialMismatch;
+ use codex_windows_sandbox::SandboxProvisioningResponse;
+ use codex_windows_sandbox::SandboxRuntimeAccount;
+-use codex_windows_sandbox::logon_existing_sandbox_account;
++use codex_windows_sandbox::logon_existing_sandbox_account_for_installation;
+ use codex_windows_sandbox::sandbox_secrets_dir;
+ 
+ use crate::ipc::ProvisioningRequest;
+@@ -30,7 +30,7 @@ mod tests;
+ pub(super) fn run(
+     identity: &ClientIdentity,
+     request: ProvisioningRequest,
+-    sandbox_sid: &[u8],
++    sandbox_sid: Option<&[u8]>,
+     shutdown: &AtomicBool,
+     on_authenticated_user: &dyn Fn(
+         InstallationRecord,
+@@ -41,8 +41,12 @@ pub(super) fn run(
+     // Keep admission, account provisioning and package registration in one transaction.
+     let _setup_lock = codex_windows_sandbox::acquire_sandbox_setup_lock(/*timeout_ms*/ 5_000)?;
+     ensure!(
+-        codex_windows_sandbox::resolve_sid(codex_windows_sandbox::SANDBOX_USERS_GROUP)
+-            .is_ok_and(|current| current == sandbox_sid),
++        crate::installation_record::load()?
++            .map(|record| codex_windows_sandbox::sandbox_group_for_installation(&record))
++            .transpose()?
++            .flatten()
++            .as_deref()
++            == sandbox_sid,
+         codex_windows_sandbox::SANDBOX_GROUP_CHANGED
+     );
+     let settings = request.settings;
+@@ -64,11 +68,11 @@ pub(super) fn run(
+             "registration refresh requires unchanged sandbox ownership and settings"
+         );
+         for entry in &runtime.accounts {
+-            let account = entry.account.username();
++            let account = entry.account.username_for(&previous)?;
+             ensure!(
+-                codex_windows_sandbox::local_user_flags(account)?
++                codex_windows_sandbox::local_user_flags(&account)?
+                     .is_some_and(|flags| flags & (UF_ACCOUNTDISABLE | UF_PASSWORD_EXPIRED) == 0)
+-                    && string_from_sid_bytes(&codex_windows_sandbox::resolve_sid(account)?)
++                    && string_from_sid_bytes(&codex_windows_sandbox::resolve_sid(&account)?)
+                         .map_err(anyhow::Error::msg)?
+                         == entry.user_sid,
+                 "registration refresh cannot repair or replace a sandbox account"
+@@ -90,10 +94,11 @@ pub(super) fn run(
+             .context("persist registered sandbox owner")?;
+         // Missing, disabled, or expired accounts require full setup before runtime logon.
+         for account in [
+-            codex_windows_sandbox::OFFLINE_USERNAME,
+-            codex_windows_sandbox::ONLINE_USERNAME,
++            SandboxRuntimeAccount::Offline,
++            SandboxRuntimeAccount::Online,
+         ] {
+-            setup_complete &= codex_windows_sandbox::local_user_flags(account)
++            let account = account.username_for(&installation)?;
++            setup_complete &= codex_windows_sandbox::local_user_flags(&account)
+                 .with_context(|| format!("inspect registered sandbox account {account}"))?
+                 .is_some_and(|flags| flags & (UF_ACCOUNTDISABLE | UF_PASSWORD_EXPIRED) == 0);
+         }
+@@ -109,7 +114,11 @@ pub(super) fn run(
+                                 &sandbox_secrets_dir(&identity.codex_home),
+                                 &mut pins,
+                             )?;
+-                            logon_existing_sandbox_account(&identity.codex_home, account)
++                            logon_existing_sandbox_account_for_installation(
++                                &identity.codex_home,
++                                account,
++                                &installation,
++                            )
+                         },
+                     )
+                     .with_context(|| format!("check registered sandbox account {account:?}"))
+@@ -186,6 +195,7 @@ fn credentials_need_repair(
+                     token.as_raw_handle() as _,
+                     account,
+                     expected.map(|entry| entry.user_sid.as_str()),
++                    installation,
+                 )?;
+             }
+             Err(error) if error.is::<SandboxAccountCredentialMismatch>() => needs_repair = true,
+@@ -199,7 +209,7 @@ fn credentials_need_repair(
+             SandboxRuntimeAccount::Offline,
+             SandboxRuntimeAccount::Online,
+         ] {
+-            let sid = codex_windows_sandbox::resolve_sid(account.username())?;
++            let sid = codex_windows_sandbox::resolve_sid(&account.username_for(installation)?)?;
+             let sid = string_from_sid_bytes(&sid).map_err(anyhow::Error::msg)?;
+             if let Some(entry) = runtime
+                 .accounts
+diff --git a/codex-rs/windows-sandbox-service/src/provisioning/registered_tests.rs b/codex-rs/windows-sandbox-service/src/provisioning/registered_tests.rs
+index 3ef3f880a0da8bcad82855d262196abbee5683d7..cc47cbd916eddd364a6bd7114487eafe46f092f1 100644
+--- a/codex-rs/windows-sandbox-service/src/provisioning/registered_tests.rs
++++ b/codex-rs/windows-sandbox-service/src/provisioning/registered_tests.rs
+@@ -24,6 +24,7 @@ use windows_sys::Win32::Security::LogonUserW;
+ 
+ fn recorded_installation(accounts: &[SandboxRuntimeAccount]) -> InstallationRecord {
+     InstallationRecord {
++        namespace_id: Some("00".repeat(32)),
+         user_sid: "S-1-5-21-0-0-0-1000".into(),
+         codex_home: std::path::PathBuf::from(r"C:\codex-registered-test"),
+         session_id: 0,
+@@ -111,17 +112,28 @@ fn native_successful_sibling_validation() -> Result<()> {
+         )?
+     };
+     let groups = std::env::var("SANDBOX_REPAIR_TEST_GROUPS")?;
+-    let mut record = recorded_installation(&[Offline, Online]);
++    let mut record: InstallationRecord = serde_json::from_slice(&std::fs::read(std::env::var(
++        "SANDBOX_REPAIR_TEST_INSTALLATION",
++    )?)?)?;
++    // The disposable fixture supplies its actual protected namespace binding and managed accounts.
++    anyhow::ensure!(
++        record.namespace_id.is_some(),
++        "fixture namespace binding is required"
++    );
++    let binding = record.clone();
+     for entry in &mut record.runtime_mut()?.accounts {
+-        entry.user_sid = string_from_sid_bytes(&resolve_sid(entry.account.username())?)
+-            .map_err(anyhow::Error::msg)?;
++        entry.user_sid =
++            string_from_sid_bytes(&resolve_sid(&entry.account.username_for(&binding)?)?)
++                .map_err(anyhow::Error::msg)?;
+     }
+ 
+     if groups == "healthy" {
+         // The fixture just made these accounts: no logon or LoadUserProfileW has run.
+         // Query both real SIDs, before profiles exist, through the production WinRT API.
++        let mut unrecorded = record.clone();
++        unrecorded.runtime_mut()?.accounts.clear();
+         assert!(credentials_need_repair(
+-            &recorded_installation(&[]),
++            &unrecorded,
+             |_| Err(anyhow!(SandboxAccountCredentialMismatch)),
+             registered_packages,
+         )?);
+@@ -183,7 +195,7 @@ fn native_successful_sibling_validation() -> Result<()> {
+         let mut token = std::ptr::null_mut();
+         let succeeded = unsafe {
+             LogonUserW(
+-                to_wide(account.username()).as_ptr(),
++                to_wide(account.username_for(&record)?).as_ptr(),
+                 to_wide(".").as_ptr(),
+                 to_wide("Codex-fixture-27967!").as_ptr(),
+                 LOGON32_LOGON_INTERACTIVE,
+diff --git a/codex-rs/windows-sandbox-service/src/provisioning.rs b/codex-rs/windows-sandbox-service/src/provisioning.rs
+index bc99a9e362899062ffa0fc674d22f1edbc195dd6..2f018e8ea4603e1bd43737e4f2d74a7d1fea0dde 100644
+--- a/codex-rs/windows-sandbox-service/src/provisioning.rs
++++ b/codex-rs/windows-sandbox-service/src/provisioning.rs
+@@ -35,6 +35,7 @@ fn register_owner(
+         .context("retain authenticated uninstall owner")?;
+     on_authenticated_user(
+         InstallationRecord {
++            namespace_id: None,
+             codex_home: identity.codex_home.clone(),
+             user_sid: identity.user_sid.clone(),
+             session_id: identity.session_id,
+@@ -52,8 +53,9 @@ fn setup_is_complete(
+ ) -> Result<bool> {
+     crate::package_lifecycle::with_owner_impersonation(identity.token.as_raw_handle(), || {
+         Ok(
+-            codex_windows_sandbox::sandbox_setup_is_complete_with_settings(
++            codex_windows_sandbox::sandbox_setup_is_complete_with_settings_for_user(
+                 &identity.codex_home,
++                &identity.account,
+                 settings,
+             ),
+         )
+@@ -63,7 +65,7 @@ fn setup_is_complete(
+ pub(crate) fn run(
+     identity: ClientIdentity,
+     request: ServiceRequest,
+-    sandbox_sid: &[u8],
++    sandbox_sid: Option<&[u8]>,
+     shutdown: &AtomicBool,
+     on_authenticated_user: &dyn Fn(
+         InstallationRecord,
+@@ -74,6 +76,7 @@ pub(crate) fn run(
+     let request = match request {
+         ServiceRequest::RegisterInstallation { .. } => {
+             let installation = InstallationRecord {
++                namespace_id: None,
+                 codex_home: identity.codex_home,
+                 user_sid: identity.user_sid,
+                 session_id: identity.session_id,
+diff --git a/codex-rs/windows-sandbox-service/src/registered_runtime/removal.rs b/codex-rs/windows-sandbox-service/src/registered_runtime/removal.rs
+index 79b11bc8c1e59d9bf659e2b5cabde3f20cf04598..fa1dfbd10244c271abb558130125c0aebde1be16 100644
+--- a/codex-rs/windows-sandbox-service/src/registered_runtime/removal.rs
++++ b/codex-rs/windows-sandbox-service/src/registered_runtime/removal.rs
+@@ -70,11 +70,12 @@ pub(crate) fn restore_disabled_accounts() -> Result<()> {
+         if !account.cleanup_logon_pending {
+             continue;
+         }
+-        super::validate_account_sid(account)?;
+-        let flags = codex_windows_sandbox::local_user_flags(account.account.username())?
+-            .context("cleanup account disappeared before flag restoration")?;
++        super::validate_account_sid(account, &record)?;
++        let flags =
++            codex_windows_sandbox::local_user_flags(&account.account.username_for(&record)?)?
++                .context("cleanup account disappeared before flag restoration")?;
+         codex_windows_sandbox::set_local_user_flags(
+-            account.account.username(),
++            &account.account.username_for(&record)?,
+             flags | UF_ACCOUNTDISABLE,
+         )?;
+         record.runtime_mut()?.accounts[index].cleanup_logon_pending = false;
+@@ -97,7 +98,8 @@ pub(crate) fn prepare(
+     let mut targets = Vec::new();
+     for index in 0..record.runtime()?.accounts.len() {
+         let account = record.runtime()?.accounts[index].clone();
+-        let Some(flags) = codex_windows_sandbox::local_user_flags(account.account.username())?
++        let Some(flags) =
++            codex_windows_sandbox::local_user_flags(&account.account.username_for(&record)?)?
+         else {
+             ensure!(
+                 super::registered_packages(&account.user_sid, &record.runtime()?.package_family)?
+@@ -113,7 +115,7 @@ pub(crate) fn prepare(
+             record.runtime_mut()?.ready_package = None;
+             crate::installation_record::save_runtime(record)?;
+             codex_windows_sandbox::set_local_user_flags(
+-                account.account.username(),
++                &account.account.username_for(&record)?,
+                 flags & !UF_ACCOUNTDISABLE,
+             )?;
+         }
+@@ -123,18 +125,19 @@ pub(crate) fn prepare(
+                 &codex_windows_sandbox::sandbox_secrets_dir(&record.codex_home),
+                 &mut pins,
+             )?;
+-            codex_windows_sandbox::logon_existing_sandbox_account(
++            codex_windows_sandbox::logon_existing_sandbox_account_for_installation(
+                 &record.codex_home,
+                 account.account,
++                record,
+             )
+         });
+         if flags & UF_ACCOUNTDISABLE != 0 {
+-            super::validate_account_sid(&account)?;
++            super::validate_account_sid(&account, record)?;
+             let current_flags =
+-                codex_windows_sandbox::local_user_flags(account.account.username())?
++                codex_windows_sandbox::local_user_flags(&account.account.username_for(&record)?)?
+                     .context("cleanup account disappeared before flag restoration")?;
+             codex_windows_sandbox::set_local_user_flags(
+-                account.account.username(),
++                &account.account.username_for(&record)?,
+                 current_flags | UF_ACCOUNTDISABLE,
+             )
+             .context("restore disabled sandbox account after cleanup logon")?;
+@@ -146,9 +149,10 @@ pub(crate) fn prepare(
+             token.as_raw_handle() as _,
+             account.account,
+             Some(&account.user_sid),
++            record,
+         )?;
+         targets.push(serde_json::json!({
+-            "username": account.account.username(),
++            "username": &account.account.username_for(&record)?,
+             "sid": account.user_sid,
+         }));
+         tokens.push(token);
+@@ -160,9 +164,10 @@ pub(crate) fn prepare(
+         None
+     } else {
+         Some(
+-            codex_windows_sandbox::string_from_sid_bytes(&codex_windows_sandbox::resolve_sid(
+-                codex_windows_sandbox::SANDBOX_USERS_GROUP,
+-            )?)
++            codex_windows_sandbox::string_from_sid_bytes(
++                &codex_windows_sandbox::sandbox_group_for_installation(record)?
++                    .context("owned namespace group is missing")?,
++            )
+             .map_err(anyhow::Error::msg)?,
+         )
+     };
+diff --git a/codex-rs/windows-sandbox-service/src/registered_runtime.rs b/codex-rs/windows-sandbox-service/src/registered_runtime.rs
+index abf1468d5156e7cce36a0b0b697bb40409ef8a4a..7b666b7dfd5c0b33bac3f96c38fb35e0f50c2d63 100644
+--- a/codex-rs/windows-sandbox-service/src/registered_runtime.rs
++++ b/codex-rs/windows-sandbox-service/src/registered_runtime.rs
+@@ -13,7 +13,7 @@ use anyhow::Result;
+ use anyhow::ensure;
+ use codex_windows_sandbox::APP_CORE_RUNNER_ALIAS;
+ use codex_windows_sandbox::SandboxRuntimeAccount;
+-use codex_windows_sandbox::logon_existing_sandbox_account;
++use codex_windows_sandbox::logon_existing_sandbox_account_for_installation;
+ use codex_windows_sandbox::resolve_sid as lookup_sid;
+ use codex_windows_sandbox::sandbox_secrets_dir;
+ use codex_windows_sandbox::string_from_sid_bytes;
+@@ -106,7 +106,7 @@ pub(crate) fn provision(
+                 &sandbox_secrets_dir(&identity.codex_home),
+                 &mut pins,
+             )?;
+-            logon_existing_sandbox_account(&identity.codex_home, account)
++            logon_existing_sandbox_account_for_installation(&identity.codex_home, account, record)
+         })
+         .with_context(|| format!("log on managed runtime account {account:?}"))?;
+         let expected = record
+@@ -118,6 +118,7 @@ pub(crate) fn provision(
+             token,
+             account,
+             expected.map(|entry| entry.user_sid.as_str()),
++            record,
+         )
+         .with_context(|| format!("prepare managed runtime profile for {account:?}"))?;
+         let installed = registered_packages(&profile.user_sid, &family)
+@@ -223,8 +224,10 @@ pub(crate) fn provision(
+ pub(crate) fn prepare_cleanup(record: InstallationRecord) -> Result<InstallationRecord> {
+     validate_record(&record)?;
+     for account in &record.runtime()?.accounts {
+-        if codex_windows_sandbox::local_user_flags(account.account.username())?.is_some() {
+-            validate_account_sid(account)?;
++        if codex_windows_sandbox::local_user_flags(&account.account.username_for(&record)?)?
++            .is_some()
++        {
++            validate_account_sid(account, &record)?;
+         }
+     }
+     ensure!(
+@@ -242,8 +245,11 @@ pub(crate) fn prepare_cleanup(record: InstallationRecord) -> Result<Installation
+     Ok(record)
+ }
+ 
+-fn validate_account_sid(account: &RuntimeAccountRegistration) -> Result<()> {
+-    let sid = lookup_sid(account.account.username())?;
++fn validate_account_sid(
++    account: &RuntimeAccountRegistration,
++    record: &InstallationRecord,
++) -> Result<()> {
++    let sid = lookup_sid(&account.account.username_for(record)?)?;
+     ensure!(
+         string_from_sid_bytes(&sid).map_err(anyhow::Error::msg)? == account.user_sid,
+         "managed runtime account was replaced before cleanup"
+@@ -298,9 +304,10 @@ fn load_profile(
+     token: OwnedHandle,
+     account: SandboxRuntimeAccount,
+     expected_sid: Option<&str>,
++    record: &InstallationRecord,
+ ) -> Result<AccountProfile> {
+-    let user_sid = validate_target(token.as_raw_handle() as _, account, expected_sid)?;
+-    let mut username = to_wide(account.username());
++    let user_sid = validate_target(token.as_raw_handle() as _, account, expected_sid, record)?;
++    let mut username = to_wide(account.username_for(record)?);
+     let mut profile: PROFILEINFOW = unsafe { std::mem::zeroed() };
+     profile.dwSize = std::mem::size_of::<PROFILEINFOW>() as u32;
+     profile.dwFlags = 1; // PI_NOUI: service operations never prompt interactively.
+@@ -318,6 +325,7 @@ pub(crate) fn validate_target(
+     token: HANDLE,
+     account: SandboxRuntimeAccount,
+     expected_sid: Option<&str>,
++    record: &InstallationRecord,
+ ) -> Result<String> {
+     let user = unsafe { codex_windows_sandbox::get_user_sid_bytes(token) }?;
+     let user_sid = string_from_sid_bytes(&user).map_err(anyhow::Error::msg)?;
+@@ -326,7 +334,7 @@ pub(crate) fn validate_target(
+         "managed runtime account SID changed"
+     );
+     ensure!(
+-        lookup_sid(account.username())? == user,
++        lookup_sid(&account.username_for(record)?)? == user,
+         "managed runtime account was replaced"
+     );
+     let groups = unsafe {
+@@ -334,7 +342,8 @@ pub(crate) fn validate_target(
+     }
+     .context("read runtime account groups")?;
+     ensure!(groups.len() <= 256, "invalid runtime account groups");
+-    let sandbox_group = lookup_sid(codex_windows_sandbox::SANDBOX_USERS_GROUP)?;
++    let sandbox_group = codex_windows_sandbox::sandbox_group_for_installation(record)?
++        .context("owned namespace group is missing")?;
+     let mut sandbox_member = false;
+     for group in groups {
+         ensure!(
+diff --git a/codex-rs/windows-sandbox-service/src/service.rs b/codex-rs/windows-sandbox-service/src/service.rs
+index c5abe375408bf2cb6237c60f80abca20e45d6c2e..f53df659b8d4b7d682e010fc35e74f01d3bfe049 100644
+--- a/codex-rs/windows-sandbox-service/src/service.rs
++++ b/codex-rs/windows-sandbox-service/src/service.rs
+@@ -275,7 +275,7 @@ pub(crate) fn log_error(event_id: u32, message: &str) {
+ fn log_event(event_type: u16, event_id: u32, message: &str) {
+     let source = SERVICE_STATE
+         .get()
+-        .map_or("CodexSandboxService", |state| state.service_name.as_str())
++        .map_or("CADSGSandboxService", |state| state.service_name.as_str())
+         .encode_utf16()
+         .chain(std::iter::once(0))
+         .collect::<Vec<_>>();

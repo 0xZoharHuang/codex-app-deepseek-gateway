@@ -1,0 +1,12 @@
+diff --git a/codex-rs/core/src/session/request_capacity.rs b/codex-rs/core/src/session/request_capacity.rs
+--- a/codex-rs/core/src/session/request_capacity.rs
++++ b/codex-rs/core/src/session/request_capacity.rs
+@@ -1971,7 +1971,7 @@
+         let mut compacted: codex_history::CompactedItem =
+             serde_json::from_value(serde_json::json!({"message":"native summary"}))?;
+         compacted.replacement_history = Some(items.to_vec());
+-        let wire = serde_json::to_vec(&codex_history::RolloutItem::Compacted(compacted))?;
++        let wire = serde_json::to_vec(&codex_history::RolloutItem::Compacted(Box::new(compacted)))?;
+         match serde_json::from_slice::<codex_history::RolloutItem>(&wire)? {
+             codex_history::RolloutItem::Compacted(compacted) => compacted
+                 .replacement_history

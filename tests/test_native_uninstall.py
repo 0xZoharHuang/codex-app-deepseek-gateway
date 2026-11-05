@@ -413,3 +413,58 @@ def test_partial_cleanup_denial_precedes_real_prepare_mutations(bundle, app_fixt
     assert lc.digest(bundle.install / "active.json") == before
     assert not (bundle.install / "native-uninstall.json").exists()
     assert not (bundle.install / "uninstall-ready.json").exists()
+
+
+def test_core_descriptor_never_enters_legacy_cleanup_or_retires_gateway(bundle, app_fixture, monkeypatch):
+    from codex_app_deepseek import isolated_app as app, runtime_package as packages
+    values = partial_admission_fixture(bundle, app_fixture, monkeypatch)
+    paths, expected, path, manifest, request, backend, binding, owner, pins = values
+    path.write_text(json.dumps({"kind": packages.KIND, "mode": "registered_core"}))
+    request["native_manifest_sha256"] = app.sha(path)
+    saved = json.loads(binding.read_text()); saved["native_manifest_sha256"] = request["native_manifest_sha256"]
+    binding.write_text(json.dumps(saved))
+    from codex_app_deepseek import app_delivery as delivery
+    monkeypatch.setattr(delivery, "read_binding", lambda *a, **k: saved)
+    monkeypatch.setattr(app, "WindowsBackend", lambda: backend)
+    monkeypatch.setattr(backend, "runtime_package_document", lambda *a: pytest.fail("Core must not enter Legacy validation"), raising=False)
+    monkeypatch.setattr(lc, "rollback", lambda *a, **k: pytest.fail("rollback before native package teardown"))
+    monkeypatch.setattr(lc, "_stop_locked", lambda *a, **k: pytest.fail("stop before native package teardown"))
+    before = lc.digest(bundle.install / "active.json")
+    with pytest.raises(lc.LifecycleError, match="native runtime package teardown"):
+        lc.prepare_uninstall(bundle.install, remove_task=False)
+    assert lc.digest(bundle.install / "active.json") == before
+    assert not (bundle.install / "native-uninstall.json").exists()
+    assert not (bundle.install / "uninstall-ready.json").exists()
+
+
+def test_existing_core_home_blocks_legacy_file_cleanup_before_command(tmp_path, monkeypatch):
+    from codex_app_deepseek import runtime_package as packages
+    plan = cleanup(tmp_path, monkeypatch)
+    plan.backend.native_runtime_owner_snapshot = lambda: {
+        "state_absent": False, "runtime_present": True,
+        "owner_sid": plan.backend.current()["sid"], "home": str(plan.home),
+    }
+    with pytest.raises(packages.RuntimePackageError, match="native package teardown"):
+        plan.execute(run=lambda *a, **k: pytest.fail("Core namespace used by Legacy uninstall"))
+    assert not (tmp_path / "native-uninstall.json").exists()
+
+
+def test_packaged_legacy_cleanup_uses_exact_alias_but_pins_physical_cli(tmp_path, monkeypatch):
+    plan = cleanup(tmp_path, monkeypatch)
+    plan.runtime_package = {"mode": "legacy", "alias_path": str(tmp_path / "qualified" / "cadsg-native-legacy.exe"),
+        "descriptor_path": str(tmp_path / "descriptor.json"), "descriptor_sha256": "a" * 64}
+    from codex_app_deepseek import app_delivery as delivery
+    monkeypatch.setattr(delivery, "assets", lambda: (None, None))
+    from codex_app_deepseek import isolated_app as app
+    monkeypatch.setattr(app, "baseline", lambda _: {})
+    checks = []
+    monkeypatch.setattr(nc, "_cleanup_bundle", lambda *a: checks.append(a) or {"runtime_package": plan.runtime_package})
+    calls = []
+    def run(argv, **kwargs):
+        assert kwargs["env"]["CODEX_WINDOWS_REGISTERED_CORE"] == "0"
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout=b"native done", stderr=b"")
+    result = plan.execute(run=run)
+    assert checks and calls == [[plan.runtime_package["alias_path"], "sandbox", "uninstall"]]
+    assert str(plan.executable) in plan.inputs
+    assert result["status"] == "native_cleanup_completed"

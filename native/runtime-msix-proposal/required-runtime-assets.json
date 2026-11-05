@@ -1,0 +1,55 @@
+{
+  "status": "MISSING_PENDING_FINAL_OWN_SOURCE_BUILD",
+  "assets": [
+    {
+      "path": "runtime/codex.exe",
+      "package": "codex-cli",
+      "bin": "codex",
+      "source_requirement": "Same final pinned native0165 source/lock/profile and actual producer receipt; no stock service/helper borrowing.",
+      "present": false
+    },
+    {
+      "path": "runtime/codex-code-mode-host.exe",
+      "package": "codex-code-mode-host",
+      "bin": "codex-code-mode-host",
+      "source_requirement": "Same final pinned native0165 source/lock/profile and actual producer receipt; no stock service/helper borrowing.",
+      "present": false
+    },
+    {
+      "path": "runtime/codex-command-runner.exe",
+      "package": "codex-windows-sandbox",
+      "bin": "codex-command-runner",
+      "source_requirement": "Same final pinned native0165 source/lock/profile and actual producer receipt; no stock service/helper borrowing.",
+      "present": false
+    },
+    {
+      "path": "runtime/codex-windows-sandbox-setup.exe",
+      "package": "codex-windows-sandbox",
+      "bin": "codex-windows-sandbox-setup",
+      "source_requirement": "Same final pinned native0165 source/lock/profile and actual producer receipt; no stock service/helper borrowing.",
+      "present": false
+    },
+    {
+      "path": "runtime/codex-windows-managed-deny-probe.exe",
+      "package": "codex-windows-sandbox",
+      "bin": "codex-windows-managed-deny-probe",
+      "source_requirement": "Same final pinned native0165 source/lock/profile and actual producer receipt; no stock service/helper borrowing.",
+      "present": false
+    },
+    {
+      "path": "runtime/codex-windows-sandbox-service.exe",
+      "package": "codex-windows-sandbox-service",
+      "bin": "codex-windows-sandbox-service",
+      "source_requirement": "Same final pinned native0165 source/lock/profile and actual producer receipt; no stock service/helper borrowing.",
+      "present": false
+    },
+    {
+      "path": "runtime/rg.exe",
+      "source_requirement": "Pinned original open ripgrep artifact with SHA; no closed UI assets.",
+      "present": false
+    }
+  ],
+  "placeholder_executables_created": false,
+  "closed_UI_assets_copied": false,
+  "Appx_package_created": false
+}

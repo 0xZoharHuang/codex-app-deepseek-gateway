@@ -1,10 +1,31 @@
 # 当前资格与交付索引
 
-本页区分源码/软件、编译产物、实际 App 工作流和外部服务证据。它是最终交付索引的一部分；最终 tag、网关 manifest/archive 及资产可用性由 [v0.1.0 发行页](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/releases/tag/v0.1.0) 的外部 `SHA256SUMS.json` 绑定。校验索引在最终构建后产生，不写回参与 wheel metadata 的源码，避免自指 hash。
+本页区分软件、原生产物、实际 App 工作流和外部服务证据。0.2.0 的正式文件以对应发行页的外部 SHA256SUMS.json 核对；[v0.1.0 发行页](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/releases/tag/v0.1.0) 保留 P7 组合的历史资产与索引。外部校验值在归档后生成，不回写 wheel 所用的 README。
 
-**固定组合的本地 runtime 范围已分层关闭，最终交付门仍单列。** R27 的正确 typed 图像输入、provider 媒体接受、App 内嵌 PDF 预览，以及正确目录的宿主输出读取均有新证据。原始失败和私有证据保留；本页不公开会话正文、账户凭据、机器身份或闭源 App 代码。
+**下列公开 0.1.0 / P7 固定组合的本地 runtime 范围已分层关闭，最终交付门仍单列。** R27 的正确 typed 图像输入、provider 媒体接受、App 内嵌 PDF 预览，以及正确目录的宿主输出读取均有新证据。原始失败和私有证据保留；本页不公开会话正文、账户凭据、机器身份或闭源 App 代码。
 
-## 固定来源
+## 0.2.0 的来源与验收范围
+
+0.2.0 的 Windows 原生包使用 `native/build-lock.O165-P19-source.json`，SHA256 为 `163f6e61d605adf7d7698835f33b99d48c5cb25f017b8231f5062bd0ffb0a543`。网关协议依赖固定 CDS 0.6.10，提交 `6d6ccd32c92d06fc52ecd72712140f24496c30a2`。正式资产的实际来源、安装与 App 验收结果，以对应发行页和版本验收记录核对。
+
+沿用固定版本的 37 项合同。R17（server queue）、R35（额外 UAC/secure desktop）、R36（IAB/CUA）是条件项。R25 的原版 Windows `restore_worktree` 保留同版本负向对照。P7 的历史效果按具体组件与配置承接。本轮核验涵盖：
+
+- 真实官方 App 加载六个同源原生程序，使用自建 Code Mode host 和 Legacy 路径。在新只读项目核对 Node/cwd、允许与拒绝，再验证 workspace-write、网络、人工审批和原生子任务。
+- 96 张原 PNG、真实请求字节门槛、压缩摘要对应的输入前缀、后缀保留、取消、副作用及同 UUID 的冷恢复。普通请求和本地压缩均可用官方 trace 与网关回执核对。
+- GUI 用户消息、原生 turn、网关请求、操作结果分别确认。失败响应、半截流、无稳定响应 ID 和未确认的图片租约保留各自状态。
+- Guardian、记忆、自动/手动压缩与原生协作按实际变更范围补验。模型自身能力及云端权益沿用原边界。
+
+## 历史 P9 源码候选记录（非当前验收状态）
+
+当时记录的 `native/build-lock.json` 是 P9 十补丁 source proposal；原七补丁锁保留在 `build-lock.O165-P7-original.json`，P8 源锁另存。**该记录中的 P9 compiled、native/runtime qualified、App GUI qualified 均为 false。** 精确 source map 是从既有完整库存加已核变更推导，不冒称一次新的全量重建或运行。当前锁可供独立 source/build 准备，发布 packager 仍拒绝用 P7 的资格为 P8/P9 放行；详见[候选原生来源](native-build.md)。
+
+CDS P29 的 Linux exact44 是其固定 0.164 测试产物的机制结果；CDS Windows 三个 helper 的 R350 production 构建也只绑定各自产物。两者都不能代替 CADSG 0.165 port 的编译、真实工具、旧 UUID/CP6 和 96 图恢复、service-station 或实际 P9 GUI。已有 P7 profile/媒体/网页证据仍只证明下列原组合，受影响路径须独立补验。
+
+架构仍是模型事件经 CADSG 网关交回原生 runtime，再由原生工具/审批/沙箱执行；没有引入 CDS launcher、Store、监督器或另一套 agent loop。原生 grace 内允许已接受的 compaction 在取消请求之后完成，不能以请求发送时间作为“零安装”分界；新增检查点的 token/提交顺序保护属于安全细化，不是上游本来保证的恢复。
+
+该 P9 历史记录未进行发布、版本修改或 App 切换；它不限制后续 P19 工作，也不替后续运行关闭门槛。完整候选门槛与实际入口/加载身份确认后，再更新稳定方案；原始 evidence 不进入公开安装包。
+
+## 0.1.0 / P7 已测固定来源
 
 | 组件 | 固定身份 |
 | --- | --- |
@@ -23,7 +44,7 @@
 
 公开 tar 的资格对象是原始四产品与公开许可证/provenance 库存，**不包含官方闭源 App sidecar**。prepare 生成的本机绝对路径 manifest 与 Code Mode host 不重新打包上传。最终网关包哈希不内嵌本页或 README；以外部资产索引核对，不能拿自己现算的值证明下载来源可信。
 
-## 已关闭的当前组合范围
+## 0.1.0 / P7 已关闭的组合范围
 
 | 层级 | 实际证据 | 结论边界 |
 | --- | --- | --- |

@@ -23,6 +23,24 @@ REPO = Path(__file__).resolve().parents[1]
 BINARIES = frozenset({"codex.exe", "codex-command-runner.exe",
                      "codex-windows-sandbox-setup.exe", "codex-windows-managed-deny-probe.exe"})
 TARGET = "x86_64-pc-windows-msvc"
+SOURCE_BUNDLE_KIND = "cadsg-native-source-bundle"
+SOURCE_BINARIES = BINARIES | {"codex-windows-sandbox-service.exe", "codex-code-mode-host.exe"}
+P16_LOCK_SHA256 = "c294196f4b56f63578fb81a4d09b3830b0b7e14600fa2b0c4688893fb3db002b"
+P17_LOCK_SHA256 = "3a57c36fab0ea6c25b8f836702350b20eab93b1369e02e20dcf9e3a32dc7681f"
+P18_LOCK_SHA256 = "16033bf6d16dedf440b3d9355445a87f8098f340958c2cd7685028330a5281cb"
+P19_LOCK_SHA256 = "163f6e61d605adf7d7698835f33b99d48c5cb25f017b8231f5062bd0ffb0a543"
+REVIEWED_SOURCE_LOCKS = (("build-lock.O165-P16-source.json", P16_LOCK_SHA256),
+                         ("build-lock.O165-P17-source.json", P17_LOCK_SHA256),
+                         ("build-lock.O165-P18-source.json", P18_LOCK_SHA256),
+                         ("build-lock.O165-P19-source.json", P19_LOCK_SHA256))
+
+
+def binary_names(manifest):
+    if manifest.get("kind") == SOURCE_BUNDLE_KIND:
+        require(manifest.get("runtime_mode") == "legacy", "Source bundle must explicitly use native Legacy mode")
+        return SOURCE_BINARIES
+    require("kind" not in manifest, "Unknown raw native bundle kind")
+    return BINARIES
 
 
 def require(ok, message):
@@ -82,15 +100,16 @@ def copy_bytes(source, destination, expected=None):
     return {"sha256": digest, "size": destination.stat().st_size}
 
 
-def raw_outputs(manifest):
+def raw_outputs(manifest, *, expected=None):
     require(manifest.get("schema_version") == 1 and
             manifest.get("status") in {"passed", "built-not-app-qualified"},
             "Only an unprepared raw native manifest is distributable")
     outputs = manifest.get("outputs", manifest.get("binaries"))
     require(isinstance(outputs, list), "Raw binary list is missing")
     names = [row.get("name", row.get("file")) for row in outputs]
-    require(len(names) == len(BINARIES) and set(names) == BINARIES,
-            "Raw distribution must contain exactly the four self-built native binaries")
+    expected = binary_names(manifest) if expected is None else expected
+    require(len(names) == len(expected) and set(names) == expected,
+            "Raw distribution must contain exactly the declared self-built native binaries")
     for row, name in zip(outputs, names):
         require("path" not in row and "source" not in row, "Raw output cannot import a prepared/App path")
         require(type(row.get("size")) is int and row["size"] > 0
@@ -122,28 +141,40 @@ def single_graph(lock, native_dir):
             and lock["upstream_commit"] == "720fec862a608ae1e5878d1eecb04fb93192e93c"
             and lock["native_version"] == "0.165.0-alpha.1.2"
             and lock["target"] == TARGET, "Unsupported single-producer baseline")
-    require(len(lock["binaries"]) == len(BINARIES) and set(lock["binaries"]) == BINARIES,
-            "Single producer must build all four native targets")
+    names = set(lock["binaries"])
+    require(len(lock["binaries"]) == len(names) and names in (BINARIES, SOURCE_BINARIES),
+            "Single producer must build the exact four or six native targets")
+    source_bundle = names == SOURCE_BINARIES
+    if source_bundle:
+        reviewed = []
+        for name, digest in REVIEWED_SOURCE_LOCKS:
+            candidate = native_dir / name
+            if candidate.exists():
+                pinned = plain(candidate)
+                if sha(pinned) == digest and load(pinned) == lock:
+                    reviewed.append(name)
+        require(len(reviewed) == 1,
+                "Six-target source bundle must match an explicitly reviewed P16 lock or reviewed P17 lock or reviewed P18 lock or reviewed P19 lock")
     base_patches = [
         "windows-home-namespace-0165.patch", "mcp-keyring-isolation-0165.patch",
         "guardian-thread-context-0165.patch", "windows-cwd-ancestor-metadata-0165.patch"]
     tectonic_patches = base_patches + ["packaged-tectonic-materialization-0165.patch"]
     guardian_transport_patches = tectonic_patches + ["guardian-provider-transport-0165.patch"]
     migration_eol_patches = guardian_transport_patches + ["migration-checksum-eol-0165.patch"]
-    require([row["file"] for row in lock["patches"]] in (
+    require(source_bundle or [row["file"] for row in lock["patches"]] in (
         base_patches, tectonic_patches, guardian_transport_patches, migration_eol_patches),
         "Single-producer patch topology differs")
     for row in lock["patches"]:
         require(sha(plain(native_dir / row["file"])) == row["sha256"],
                 "Single-producer native patch checksum differs")
-    return {"method":"One exact source fingerprint, Cargo.lock, compiler/profile and locked four-target invocation.",
+    return {"method":"One exact source fingerprint, Cargo.lock, compiler/profile and locked native target invocation.",
             "Cargo_lock_sha256":lock["cargo_lock_sha256"],
             "producer_sources_remain_separate":False, "producer_id":"O165"}
 
 
 def single_sources(raw, lock, lock_digest, raw_digest, build):
     """Validate the builder receipt and project only public, relative identities."""
-    outputs = raw_outputs(raw)
+    outputs = raw_outputs(raw, expected=frozenset(lock["binaries"]))
     require(raw["candidate_revision"] == lock["candidate_revision"]
             and raw["build_lock_sha256"] == lock_digest
             and raw["upstream_commit"] == lock["upstream_commit"]
@@ -162,7 +193,8 @@ def single_sources(raw, lock, lock_digest, raw_digest, build):
         require(all(key in raw and type(raw[key]) is type(value) and raw[key] == value
                     for key, value in resource_policy.items()),
                 "Single-producer build jobs metadata differs")
-    expected, = build.build_commands(Path("pinned-rust"), lock["binaries"], jobs=override)
+    expected, = build.build_commands(Path("pinned-rust"), lock["binaries"], jobs=override,
+                                              runtime_package=set(lock["binaries"]) == SOURCE_BINARIES)
     cache = Path(raw.get("cache_dir", raw["work_dir"]))
     require(len(raw["commands"]) == 1 and raw["commands"][0][1:] == expected[1:]
             and raw["cargo_home"] == str(cache / "cargo"),
@@ -192,6 +224,9 @@ def single_sources(raw, lock, lock_digest, raw_digest, build):
               "native_version":lock["native_version"], "upstream_commit":lock["upstream_commit"],
               "source_sha256":lock["prepared_source_sha256"], "build_lock_sha256":lock_digest,
               "candidate_revision":"O165", "outputs":rows}
+    if set(lock["binaries"]) == SOURCE_BINARIES:
+        public.update(kind=SOURCE_BUNDLE_KIND, runtime_mode="legacy")
+        refs["runtime_layout"] = "unpackaged native Legacy; no OS package identity asserted"
     if resource_policy is not None:
         refs["build_resources"] = dict(resource_policy)
         public["build_resources"] = dict(resource_policy)
@@ -558,6 +593,7 @@ def collect_licenses(metadata, output, allowed_roots, *, repo=REPO, git="git"):
 def validate_tree(root, *, build_lock=None):
     root = Path(root); inventory = {}
     manifest = load(root / "manifest.json")
+    names = binary_names(manifest)
     single = manifest.get("candidate_revision") == "O165"
     if build_lock is not None:
         # Honor the exact explicitly selected producer lock through staging and
@@ -586,18 +622,18 @@ def validate_tree(root, *, build_lock=None):
             "N-original-build-lock.json", "J17-original-build-lock.json", "M-original-baseline-lock.json"})
         provenance = name.startswith("provenance/") and name[len("provenance/"):] in metadata_names
         patch = name.startswith("provenance/patches/") and name[len("provenance/patches/"):] in admitted_patches
-        require(name == "manifest.json" or name in BINARIES or name in {"LICENSE", "NOTICE"}
+        require(name == "manifest.json" or name in names or name in {"LICENSE", "NOTICE"}
                 or name.startswith("licenses/") or provenance or patch, "Unexpected public native file")
         if patch:
             require(sha(p) == admitted_patches[name[len("provenance/patches/"):]],
                     "Staged native patch checksum differs from the selected build lock")
-        if name not in BINARIES:
+        if name not in names:
             with p.open("rb") as f:
                 magic = f.read(4)
             require(magic[:2] != b"MZ" and magic not in (b"\x7fELF", b"PK\x03\x04"),
                     "Extra executable/container in native release metadata")
         inventory[name] = {"sha256": sha(p), "size": p.stat().st_size}
-    require(set(BINARIES) <= inventory.keys(), "A native output is missing")
+    require(set(names) <= inventory.keys(), "A native output is missing")
     for name, row in raw_outputs(manifest).items():
         require(inventory[name] == {k:row[k] for k in ("sha256", "size")}, "Staged native identity differs from manifest")
     require({"LICENSE", "NOTICE", "licenses/codex-LICENSE", "licenses/codex-NOTICE",
@@ -617,11 +653,12 @@ def make_archive(root, archive, epoch, *, build_lock=None):
     root, archive = Path(root), Path(archive)
     require(not archive.exists() and not archive.is_relative_to(root), "Archive must be new and outside staging")
     inventory = validate_tree(root, build_lock=build_lock)
+    names = binary_names(load(root / "manifest.json"))
     with archive.open("xb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", filename="", mtime=epoch) as compressed:
         with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as stream:
             for name, record in sorted(inventory.items()):
                 info = tarfile.TarInfo(name); info.size = record["size"]; info.mtime = epoch
-                info.mode = 0o755 if name in BINARIES else 0o644
+                info.mode = 0o755 if name in names else 0o644
                 with (root / name).open("rb") as f:
                     stream.addfile(info, f)
     with tarfile.open(archive) as stream:
@@ -661,7 +698,7 @@ def main():
     require(args.cargo.is_absolute() and args.cargo_home.is_absolute(), "Explicit Cargo/cache paths required")
     raw_path = plain(args.native_manifest)
     require(sha(raw_path) == args.native_manifest_sha256, "Raw input manifest checksum differs")
-    raw = load(raw_path); outputs = raw_outputs(raw); native = REPO / "native"
+    raw = load(raw_path); native = REPO / "native"
     lock_path = plain(args.build_lock)
     n_lock = load(lock_path)
     single = n_lock.get("candidate_revision") == "O165"
@@ -672,8 +709,10 @@ def main():
         require(args.producer_references_sha256 is None,
                 "Single-source provenance derives from the exact builder manifest, not mixed references")
         graph = single_graph(n_lock, native)
+        outputs = raw_outputs(raw, expected=frozenset(n_lock["binaries"]))
         producers, index, public_raw = single_sources(raw, n_lock, lock_digest, args.native_manifest_sha256, build)
     else:
+        outputs = raw_outputs(raw)
         require(n_lock.get("candidate_revision") == "N" and
                 lock_digest == sha(native / "build-lock.N.json"),
                 "Historical mixed assembly requires the exact preserved N lock")
@@ -769,11 +808,11 @@ def main():
         "historical_J_source_sha256":None if single else j_lock["prepared_source_sha256"],
         "original_raw_manifest_sha256":args.native_manifest_sha256,
         "packager_sha256":sha(__file__), "no_native_compile_or_execution":True,
-        "sidecar_policy":"Obtain required Code Mode Host locally through public app-prepare-runtime; not redistributed here."})
+        "sidecar_policy":("All six native executables, including Code Mode Host, share the pinned source producer; no closed App executable is redistributed." if set(outputs) == SOURCE_BINARIES else "Obtain required Code Mode Host locally through public app-prepare-runtime; not redistributed here.")})
     manifest = copy.deepcopy(public_raw if single else raw)
     if not single:
         manifest["source_index"] = {"file":"provenance/native-source-index.json", "sha256":sha(output / "provenance/native-source-index.json")}
-    manifest["distribution"] = {"schema_version":1, "kind":"raw_four_binary_distribution",
+    manifest["distribution"] = {"schema_version":1, "kind":("raw_six_binary_distribution" if set(outputs) == SOURCE_BINARIES else "raw_four_binary_distribution"),
         "license_index":{"file":"licenses/rust/index.json", "sha256":sha(output / "licenses/rust/index.json")},
         "producer_references":{"file":"provenance/producer-references.json", "sha256":sha(output / "provenance/producer-references.json")},
         "native_build_executed":False, "App_acceptance_asserted":False}

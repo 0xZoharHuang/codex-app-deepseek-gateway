@@ -33,11 +33,23 @@
     {
       "file": "migration-checksum-eol-0165.patch",
       "sha256": "707b87fceec61b5028a1566490dc5d2c6dca420b704be4e8193a1b33e9e479ec"
+    },
+    {
+      "file": "cadsg-request-capacity-port-0165.patch",
+      "sha256": "0804fb004cbb8bcba5fcf1e29e542ee29c002c49ce3f05818eb7dbde76d3e564"
+    },
+    {
+      "file": "cadsg-request-capacity-cancel-0165.patch",
+      "sha256": "63beeb01233e21431513fcdb063e7565423790e731febfce12b249bb2e3ee225"
+    },
+    {
+      "file": "windows-host-boundaries-0165.patch",
+      "sha256": "c92180906b471db6c39ecbd057cb928b1071153c1fe57c02bb69cf6ffb0656df"
     }
   ],
-  "prepared_source_sha256": "1125f5c87733fb267177522de600918b06a0a41489543b57c721a3bcce6d7c56",
-  "prepared_source_files": 9516,
-  "cargo_lock_sha256": "7537da7c5e154334b15ef9b59091f5fed3a8e480b77c037e3a8b7f07d1614709",
+  "prepared_source_sha256": "495125857fc45dc71a780d16832f2b2132ad129aea72f0353ebd12adeafc0c9b",
+  "prepared_source_files": 9518,
+  "cargo_lock_sha256": "24ec41c0cad0145b14a2cda3a5b343540dfcb7043c24bef32a65ae46edc7f980",
   "release_environment": {
     "CARGO_BUILD_JOBS": "2",
     "CARGO_INCREMENTAL": "0",

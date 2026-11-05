@@ -162,7 +162,7 @@ def load_service_config(home: Path) -> ServiceConfig:
         except (TypeError, ValueError):
             raise ServiceConfigError("image_transport has missing or invalid policy fields") from None
     origin = config.get("policy_origin")
-    if origin is not None and origin not in (DEFAULT_POLICY_ORIGIN, LEGACY_POLICY_ORIGIN_068_PUBLISHED, LEGACY_POLICY_ORIGIN_068, LEGACY_POLICY_ORIGIN_067):
+    if origin is not None and origin not in (DEFAULT_POLICY_ORIGIN, LEGACY_POLICY_ORIGIN_069, LEGACY_POLICY_ORIGIN_068_PUBLISHED, LEGACY_POLICY_ORIGIN_068, LEGACY_POLICY_ORIGIN_067):
         raise ServiceConfigError("gateway.json has an unrecognized policy_origin")
     return ServiceConfig(models, providers, proxy, **metadata,
                          image_search_backend=image_search, web_search_backend=web_search,
@@ -173,19 +173,24 @@ def load_service_config(home: Path) -> ServiceConfig:
 
 
 # This is the complete route set reachable in pinned protocol.prepare() at
-# fixed CDS 0.6.9 / a704174: ordinary DeepSeek or explicit Morph,
+# fixed CDS 0.6.10 / 6d6ccd32: ordinary DeepSeek or explicit Morph,
 # strict/peer+hosted Morph, and explicit serial Prime.
 # It is metadata, not a second routing implementation.
 DEFAULT_PROVIDERS = ("deepseek", "morph/fp8", "primeintellect")
 DEFAULT_POLICY_ORIGIN = {
     "policy_id": "codex-app-680c4-full-runtime-v1",
     "native_version": NATIVE_VERSION,
-    "protocol_commit": "a70417460d823a906ebc7274834e2412be1ebe53",
+    "protocol_commit": "6d6ccd32c92d06fc52ecd72712140f24496c30a2",
     "provider_reasons": {
         "deepseek": "official_default",
         "morph/fp8": "strict_json_schema_or_native_peer_history_with_hosted_tools",
         "primeintellect": "explicit_parallel_tool_calls_false",
     },
+}
+
+# Exact previous 0.6.9 policy bytes remain valid; existing configuration is not rewritten.
+LEGACY_POLICY_ORIGIN_069 = {
+    **DEFAULT_POLICY_ORIGIN, "protocol_commit": "a70417460d823a906ebc7274834e2412be1ebe53",
 }
 
 # Exact published 0.6.8 initialization remains valid with its original bytes.

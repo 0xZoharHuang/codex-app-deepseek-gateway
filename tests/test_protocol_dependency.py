@@ -8,11 +8,11 @@ import subprocess
 import sys
 from codex_app_deepseek import gateway_policy
 
-COMMIT="a70417460d823a906ebc7274834e2412be1ebe53"
-ARCHIVE="a6a90199358b90539495b8d1799c1afbfed75da14a121b5a03c5df2188cd07ce"
-PURE_HASHES={'protocol.py': 'f932059d80e6313cb1cea89e2336aa0ba2be16dea581555c71f877cff7a0a43a', 'formats.py': '3f8f027b56731c30ec0ffb518da9a09671059b364785a8e39688fb1052ea8f47', 'structured.py': '8f54e9a5ad190bcfdd9d580adc00b184d5d440cd7376f5c5465a9a6c2e1c9d8a', 'protocol_errors.py': '446636771b39e39d36065a4ace549f4c5608d1f9005ff2723c75a573e1129452', 'search.py': '438a157d92e0c1e717fbfe7c9f7856df1edf38cf3d9a0d63188636e693500030', '__init__.py': 'b3cec721459454b741968fb5ed18635833be54b6c673088cea32611c1c3d5246'}
+COMMIT="6d6ccd32c92d06fc52ecd72712140f24496c30a2"
+ARCHIVE="ae97e8a81363a9b9f54205d46a4912e87438ff63d8c7916f816dadb4c3cb1a4a"
+PURE_HASHES={'__init__.py': '50d011c5b4987c99e5b1f56d1f3372fa06dadc76043a476a5c150922eab40310', 'formats.py': '3f8f027b56731c30ec0ffb518da9a09671059b364785a8e39688fb1052ea8f47', 'protocol.py': 'fd4a552e07c7d054e860926713e843d7f05e75364205a71a17385fcba9118482', 'protocol_errors.py': '446636771b39e39d36065a4ace549f4c5608d1f9005ff2723c75a573e1129452', 'search.py': '438a157d92e0c1e717fbfe7c9f7856df1edf38cf3d9a0d63188636e693500030', 'structured.py': '8f54e9a5ad190bcfdd9d580adc00b184d5d440cd7376f5c5465a9a6c2e1c9d8a', 'request_metadata.py': 'bc693cd985e62b6e8591223aeb6ee069e77a2e4a585612082348cc2c36ae3cec'}
 TRANSPORT_HASHES={"windows_asyncio.py":"d2778f52c6978dd61c70e0d6c384f012d654bad72ff7119c2baf1e7ae67441a5"}
-PSF_MEMBER="codex_deepseek_runtime-0.6.9.dist-info/licenses/licenses/cpython-proactor-PSF.txt"
+PSF_MEMBER="codex_deepseek_runtime-0.6.10.dist-info/licenses/licenses/cpython-proactor-PSF.txt"
 PSF_SHA256="018bb8be8699b84bd2357128c7f1bd7d77af6ce5bbac143cb0cabb9a8ca3031d"
 
 
@@ -34,8 +34,8 @@ def test_source_lock_keeps_pure_protocol_separate_from_single_transport_helper()
     assert row["source"]["source_commit"] == COMMIT and row["source"]["archive_sha256"] == ARCHIVE
     assert row["source"]["archive_url"].endswith("/" + COMMIT)
     assert row["source"]["public_source_verified"] is True
-    assert row["source"]["artifact_sha256"] == row["sha256"] == "4f2c97fde6de3abfd42da16ffad7bc8ecf6a4567383fb8a05304fcaaa180e5d1"
-    assert row["source"]["source_date_epoch"] == 1793561153
+    assert row["source"]["artifact_sha256"] == row["sha256"] == "4e3f9a382050abd7fcec4875e0fdccb17375f308032f50c4110cea7194260f25"
+    assert row["source"]["source_date_epoch"] == 1793794567
 
 
 def test_gateway_wheel_pins_fixed_protocol_archive_and_actual_installed_version():
@@ -48,23 +48,23 @@ def test_gateway_wheel_pins_fixed_protocol_archive_and_actual_installed_version(
     rows = [row for row in lock["dependencies"] if row["distribution"] == "codex-deepseek-runtime"]
     assert len(rows) == 1
     row = rows[0]
-    assert row["version"] == "0.6.9" and row["filename"] == "codex_deepseek_runtime-0.6.9-py3-none-any.whl"
-    assert row["sha256"] == "4f2c97fde6de3abfd42da16ffad7bc8ecf6a4567383fb8a05304fcaaa180e5d1"
+    assert row["version"] == "0.6.10" and row["filename"] == "codex_deepseek_runtime-0.6.10-py3-none-any.whl"
+    assert row["sha256"] == "4e3f9a382050abd7fcec4875e0fdccb17375f308032f50c4110cea7194260f25"
     assert row["source"]["type"] == "fixed_public_source_archive_local_wheel"
     assert row["source"]["public_source_verified"] is True
     assert row["source"]["source_commit"] == COMMIT
     assert row["source"]["archive_url"] == expected_archive and row["source"]["archive_sha256"] == ARCHIVE
     assert "artifact_url" not in row["source"]
     assert row["source"]["artifact_origin"] == "two_reproducible_local_wheels_from_exact_public_source"
-    assert row["source"]["release_tag"] == "v0.6.9"
-    assert row["source"]["source_date_epoch"] == 1793561153
+    assert row["source"]["release_tag"] == "v0.6.10"
+    assert row["source"]["source_date_epoch"] == 1793794567
     assert row["source"]["build_backend"] == "setuptools.build_meta"
     assert row["source"]["build_tools"] == {"setuptools": "84.2.0", "wheel": "0.48.0"}
     assert row["source"]["reproducibility"] == "two_independent_local_wheels_equal"
     assert row["source"]["artifact_sha256"] == row["sha256"]
     assert lock["protocol_boundary"] == {"source_commit": COMMIT, "pure_files": PURE_HASHES}
     assert lock["transport_compatibility"] == {"source_commit":COMMIT,"files":TRANSPORT_HASHES,"license_files":{PSF_MEMBER:PSF_SHA256}}
-    assert metadata.version("codex-deepseek-runtime")=="0.6.9"
+    assert metadata.version("codex-deepseek-runtime")=="0.6.10"
     assert gateway_policy.DEFAULT_POLICY_ORIGIN["protocol_commit"]==COMMIT
     for name,digest in {**PURE_HASHES,**TRANSPORT_HASHES}.items():
         module=importlib.import_module("codex_deepseek"+("."+name[:-3] if name!="__init__.py" else ""))

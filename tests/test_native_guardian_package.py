@@ -28,7 +28,9 @@ P6_SOURCE = "5d10fd97306cd2d11a1bc5d4ae2327468240bb650639cc93c39d19b2b7b58edb"
 
 
 def recipe(patches=6):
-    value = pack.load(ROOT / "native/build-lock.json")
+    # These fake P5/P6/P7 packaging fixtures keep the exact historical recipe.
+    # The active P8 source candidate is intentionally not release-admitted yet.
+    value = pack.load(ROOT / "native/build-lock.O165-P7-original.json")
     assert [x["file"] for x in value["patches"]] in (P5, P6, P6 + ["migration-checksum-eol-0165.patch"])
     current_source = value["prepared_source_sha256"]
     seventh = value["patches"].pop() if len(value["patches"]) == 7 else None

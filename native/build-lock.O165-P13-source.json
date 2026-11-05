@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "upstream_commit": "720fec862a608ae1e5878d1eecb04fb93192e93c",
+  "archive_sha256": "37f7f01a5e404b5015b47decececba7a3f0b9526bc951d0624bd57008a972a14",
+  "native_version": "0.165.0-alpha.1.2",
+  "rust_version": "1.99.1",
+  "target": "x86_64-pc-windows-msvc",
+  "patches": [
+    {
+      "file": "windows-home-namespace-0165.patch",
+      "sha256": "1e436f88e4201e6e33bba7d509e43265071c321006efd360215a260bf643d83b"
+    },
+    {
+      "file": "mcp-keyring-isolation-0165.patch",
+      "sha256": "0cfe1ae48ab50ef8d930298c42cd7ee6d2de4277750cceacca7e5d2c2d0c8efc"
+    },
+    {
+      "file": "guardian-thread-context-0165.patch",
+      "sha256": "6f434a95d3e0dd34c501539c0b8b562ac8bb2efc2973edf42a3d659cf1eaca60"
+    },
+    {
+      "file": "windows-cwd-ancestor-metadata-0165.patch",
+      "sha256": "9544c5b02e0e4e3546ba24fa1931b4e9592c5cf84d9ce0e7009b57868ac3c002"
+    },
+    {
+      "file": "packaged-tectonic-materialization-0165.patch",
+      "sha256": "e9585d91f7aa3db567c067a628040be8b4de2e594533e2af224a369731085fd7"
+    },
+    {
+      "file": "guardian-provider-transport-0165.patch",
+      "sha256": "2d7504fcbfc86918c72eef7629760d590914b78c7bf705042e05f62749bacefe"
+    },
+    {
+      "file": "migration-checksum-eol-0165.patch",
+      "sha256": "707b87fceec61b5028a1566490dc5d2c6dca420b704be4e8193a1b33e9e479ec"
+    },
+    {
+      "file": "cadsg-request-capacity-port-0165.patch",
+      "sha256": "0804fb004cbb8bcba5fcf1e29e542ee29c002c49ce3f05818eb7dbde76d3e564"
+    },
+    {
+      "file": "cadsg-request-capacity-cancel-0165.patch",
+      "sha256": "63beeb01233e21431513fcdb063e7565423790e731febfce12b249bb2e3ee225"
+    },
+    {
+      "file": "windows-host-boundaries-0165.patch",
+      "sha256": "c92180906b471db6c39ecbd057cb928b1071153c1fe57c02bb69cf6ffb0656df"
+    },
+    {
+      "file": "cadsg-capacity-p35-projection-reset-0165.patch",
+      "sha256": "420eaaefb578ea811e1b58d9fe7ecbf8404340e39357b306f4e496393d602cca"
+    },
+    {
+      "file": "windows-interactive-runner-bootstrap-0165.patch",
+      "sha256": "7913a0e4027e0e98296528afa4be1a0588690db11c11d02567532ba50a0259ae"
+    },
+    {
+      "file": "cadsg-native-service-restoration-0165.patch",
+      "sha256": "301fd81afcfd332e07230800c7ea8b0f93069eecfb503db1f68735a8b1b437ed"
+    },
+    {
+      "file": "cadsg-native-service-admission-cleanup-0165.patch",
+      "sha256": "e222e3ef93fbeb2881d76085f8263aca4dc8b036e7c57db725ff45f4dae7f86d"
+    }
+  ],
+  "prepared_source_sha256": "bc80e68da4705fb1e6761fca0e4990078bded9201d42e8551f7e449114e8be31",
+  "prepared_source_files": 9525,
+  "cargo_lock_sha256": "82d24e8abed4e4659b1d9be703a147e4c06959b79f0a369755083a05d2af7682",
+  "release_environment": {
+    "CARGO_BUILD_JOBS": "2",
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_PROFILE_RELEASE_INCREMENTAL": "false",
+    "CARGO_PROFILE_RELEASE_DEBUG": "0",
+    "CARGO_PROFILE_RELEASE_STRIP": "symbols",
+    "CARGO_PROFILE_RELEASE_LTO": "false",
+    "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16"
+  },
+  "binaries": [
+    "codex.exe",
+    "codex-command-runner.exe",
+    "codex-windows-sandbox-setup.exe",
+    "codex-windows-managed-deny-probe.exe",
+    "codex-windows-sandbox-service.exe",
+    "codex-code-mode-host.exe"
+  ],
+  "candidate_revision": "O165",
+  "package_mode": "cadsg-native-msix"
+}

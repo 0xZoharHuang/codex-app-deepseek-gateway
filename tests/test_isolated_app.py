@@ -72,6 +72,10 @@ def fixture(tmp_path, monkeypatch):
             values = {key: self.spawned[-1][2][key] for key in app.CONTROLLED}
             if identity["pid"] == 102 and self.native_home_override is not None: values["CODEX_HOME"] = self.native_home_override
             return values
+        def diagnostic_environment(self, identity):
+            value = self.spawned[-1][2].get(app.TRACE_ROOT_ENV)
+            if identity["pid"] == getattr(self, "trace_missing_pid", None): value = None
+            return {app.TRACE_ROOT_ENV: value}
         def profile_arguments(self, identity): return [arg for arg in self.spawned[-1][1] if arg.startswith("--user-data-dir=")]
         def native_role(self, identity): return "app-server"
         def descendants(self, root): return [root, {**root, "pid": 102, "exe": str(directory / "codex.exe")}]
@@ -998,3 +1002,175 @@ def test_windows_package_verification_preserves_checks_and_reports_bounded_timeo
         assert "private-" not in str(caught.value)
         assert caught.value.__suppress_context__ is True
     assert len(calls) == 1  # No implicit retry, fallback, or cached acceptance.
+
+
+def own_six_bundle(fixture):
+    paths, expected, path, value, request, backend = fixture
+    value = copy.deepcopy(value)
+    value.update(kind="cadsg-native-source-bundle", runtime_mode="legacy",
+                 build_lock_sha256="7"*64, candidate_revision="O165")
+    service = path.parent / "codex-windows-sandbox-service.exe"
+    service.write_bytes(b"own fixture service never executed")
+    value["outputs"].append({"name":service.name, "path":str(service), "size":service.stat().st_size,
+                             "sha256":app.sha(service)})
+    host = path.parent / "codex-code-mode-host.exe"
+    host.write_bytes(b"self-built fixture host differs from official fixture")
+    for row in value["outputs"]:
+        row["producer_id"] = "O165"
+        if row["name"] == host.name: row.update(size=host.stat().st_size, sha256=app.sha(host))
+    path.write_text(json.dumps(value)); request = {**request, "native_manifest_sha256":app.sha(path)}
+    return paths, expected, path, value, request, backend
+
+
+def test_source_bundle_uses_own_host_without_claiming_package_identity(fixture):
+    paths, expected, path, value, request, backend = own_six_bundle(fixture)
+    checked = app.verify_bundle(path, app.sha(path), expected)
+    assert len(checked["files"]) == 6 and "runtime_package" not in checked
+    assert checked["files"]["codex-code-mode-host.exe"]["sha256"] != expected["app_resources"]["app/resources/host.exe"]["sha256"]
+    assert not backend.spawned
+
+
+@pytest.mark.parametrize("problem", ["registered", "missing_service", "mixed_producer", "corrupt_host", "unmarked"])
+def test_source_bundle_rejects_silent_mode_or_binary_substitution(fixture, problem):
+    paths, expected, path, value, request, backend = own_six_bundle(fixture)
+    if problem == "registered": value["runtime_mode"] = "registered_core"
+    elif problem == "missing_service": value["outputs"].pop()
+    elif problem == "mixed_producer": value["outputs"][0]["producer_id"] = "official-app"
+    elif problem == "corrupt_host": (path.parent/"codex-code-mode-host.exe").write_bytes(b"wrong")
+    else: value.pop("kind")
+    path.write_text(json.dumps(value))
+    with pytest.raises(app.LaunchError): app.verify_bundle(path, app.sha(path), expected)
+    assert not backend.spawned
+
+
+def test_prepare_source_bundle_does_not_copy_or_substitute_official_host(fixture):
+    paths, expected, path, value, request, backend = own_six_bundle(fixture)
+    own_host = app.sha(path.parent/"codex-code-mode-host.exe")
+    raw = {key:item for key,item in value.items() if key not in {"app_baseline_sha256","app_package_full_name"}}
+    raw["status"] = "built-not-app-qualified"
+    for row in raw["outputs"]: row.pop("path")
+    raw_path = path.parent/"manifest.json"; raw_path.write_text(json.dumps(raw)); path.unlink()
+    prepared = app.prepare_runtime(raw_path, app.sha(raw_path), Path(request["baseline"]), backend)
+    actual = app.load_json(Path(prepared["manifest"]))
+    assert actual["kind"] == "cadsg-native-source-bundle" and actual["runtime_mode"] == "legacy"
+    assert len(actual["outputs"]) == 6 and app.sha(path.parent/"codex-code-mode-host.exe") == own_host
+    assert "app/resources/host.exe" not in actual["app_resource_sources"] and not backend.spawned
+    app.verify_bundle(Path(prepared["manifest"]), prepared["manifest_sha256"], expected)
+
+
+def test_official_trace_root_is_explicit_private_per_launch_and_bound_to_receipt(fixture, tmp_path, monkeypatch):
+    paths, expected, manifest_path, manifest, request, backend = fixture
+    root = tmp_path / "trace container"
+    request["trace_root"] = str(root)
+    checked = app.validate_request(request, backend)
+    assert checked["trace_root"] == str(root) and not root.exists()
+    parent_environment = dict(app.os.environ)
+    plan = app.prepare_launch(request, backend)
+    frozen = app.load_json(plan["plan"])
+    trace = frozen["validated"]["trace"]
+    directory = Path(trace["directory"])
+    assert directory.parent == root and directory.name == "cadsg-" + Path(plan["run_dir"]).name
+    assert trace["private_raw_diagnostics"] and directory.is_dir()
+    result = app.inside_launch(Path(plan["plan"]), plan["plan_sha256"], backend)
+    assert result["status"] == "started_expected_backend"
+    assert result["trace"] == trace
+    assert backend.spawned[0][2][app.TRACE_ROOT_ENV] == str(directory)
+    assert result["trace_app_environment"] == {app.TRACE_ROOT_ENV: str(directory)}
+    assert result["native_processes"][0]["diagnostic_environment"] == {app.TRACE_ROOT_ENV: str(directory)}
+    assert dict(app.os.environ) == parent_environment and not result["trace"]["App_trace_contents_verified"]
+
+
+def test_default_launch_does_not_create_or_add_trace_configuration(fixture):
+    paths, expected, manifest_path, manifest, request, backend = fixture
+    checked = app.validate_request(request, backend)
+    assert "trace_root" not in checked
+    plan = app.prepare_launch(request, backend)
+    assert "trace" not in app.load_json(plan["plan"])["validated"]
+    result = app.inside_launch(Path(plan["plan"]), plan["plan_sha256"], backend)
+    assert "trace" not in result and "diagnostic_environment" not in result["native_processes"][0]
+
+
+@pytest.mark.parametrize("bad", ["", "relative-path", "\\\\server\\share\\trace", "control\npath"])
+def test_trace_root_invalid_values_reject_before_launch_admission(fixture, bad):
+    paths, expected, manifest_path, manifest, request, backend = fixture
+    request["trace_root"] = bad
+    with pytest.raises(app.LaunchError, match="trace root"):
+        app.prepare_launch(request, backend)
+    assert not backend.spawned and not paths["launches"].exists()
+
+
+@pytest.mark.parametrize("which", ["home", "frontend", "launches"])
+def test_trace_root_cannot_overlap_product_state(fixture, which):
+    paths, expected, manifest_path, manifest, request, backend = fixture
+    request["trace_root"] = str(paths[which])
+    with pytest.raises(app.LaunchError, match="overlap"):
+        app.prepare_launch(request, backend)
+    assert not backend.spawned
+
+
+def test_trace_root_reparse_rejected_before_any_directory_write(fixture, tmp_path, monkeypatch):
+    paths, expected, manifest_path, manifest, request, backend = fixture
+    target = tmp_path / "trace"
+    request["trace_root"] = str(target)
+    original = app._is_link_or_reparse
+    monkeypatch.setattr(app, "_is_link_or_reparse", lambda path: Path(path) == target or original(path))
+    with pytest.raises(app.LaunchError, match="redirected"):
+        app.prepare_launch(request, backend)
+    assert not target.exists() and not paths["launches"].exists()
+
+
+def test_existing_trace_container_acl_is_not_rewritten(fixture, tmp_path, monkeypatch):
+    paths, expected, manifest_path, manifest, request, backend = fixture
+    root = tmp_path / "trace-container"; root.mkdir()
+    (root / "existing-owned-evidence").write_text("unchanged")
+    request["trace_root"] = str(root)
+    writes = []
+    monkeypatch.setattr(app, "_private", lambda path, **kwargs: writes.append(Path(path)))
+    plan = app.prepare_launch(request, backend)
+    trace = app.load_json(plan["plan"])["validated"]["trace"]
+    assert root not in writes and Path(trace["directory"]) in writes
+    assert (root / "existing-owned-evidence").read_text() == "unchanged"
+
+
+def test_trace_directory_replacement_rejected_after_plan_admission(fixture, tmp_path):
+    paths, expected, manifest_path, manifest, request, backend = fixture
+    request["trace_root"] = str(tmp_path / "trace")
+    plan = app.prepare_launch(request, backend)
+    path = Path(app.load_json(plan["plan"])["validated"]["trace"]["directory"])
+    path.rename(path.with_name(path.name + "-retained-original")); path.mkdir()
+    with pytest.raises(app.LaunchError, match="replaced"):
+        app.inside_launch(Path(plan["plan"]), plan["plan_sha256"], backend)
+    assert not backend.spawned
+
+
+@pytest.mark.parametrize("pid", [101, 102])
+def test_missing_actual_app_or_backend_trace_environment_is_not_accepted(fixture, tmp_path, pid):
+    paths, expected, manifest_path, manifest, request, backend = fixture
+    request["trace_root"] = str(tmp_path / "trace")
+    backend.trace_missing_pid = pid
+    plan = app.prepare_launch(request, backend)
+    with pytest.raises(app.LaunchError, match="trace root"):
+        app.inside_launch(Path(plan["plan"]), plan["plan_sha256"], backend)
+    result = app.load_json(Path(plan["run_dir"]) / "receipt.json")
+    assert result["status"] == "failed_or_unverified" and len(backend.spawned) == 1
+
+
+def test_explicit_trace_environment_replaces_only_child_case_insensitive_value():
+    parent = {"codex_rollout_trace_root": "old-private", "PATH": "unchanged"}
+    values = {"CODEX_HOME": "private", "CODEX_CLI_PATH": "exe", "CODEX_ELECTRON_USER_DATA_PATH": "frontend", "CODEX_APP_SERVER_FORCE_CLI": "1"}
+    child, _ = app.child_environment(parent, values, trace_directory="new-private")
+    assert parent == {"codex_rollout_trace_root": "old-private", "PATH": "unchanged"}
+    assert child[app.TRACE_ROOT_ENV] == "new-private"
+    assert [key for key in child if key.upper() == app.TRACE_ROOT_ENV] == [app.TRACE_ROOT_ENV]
+
+
+def test_ambient_official_trace_root_cannot_bypass_explicit_plan(fixture, tmp_path, monkeypatch):
+    paths, expected, manifest_path, manifest, request, backend = fixture
+    foreign = tmp_path / "another-thread-diagnostics"
+    monkeypatch.setenv("CODEX_ROLLOUT_TRACE_ROOT", str(foreign))
+    plan = app.prepare_launch(request, backend)
+    result = app.inside_launch(Path(plan["plan"]), plan["plan_sha256"], backend)
+    assert app.os.environ[app.TRACE_ROOT_ENV] == str(foreign)
+    assert app.TRACE_ROOT_ENV not in backend.spawned[0][2]
+    assert app.TRACE_ROOT_ENV in result["removed_selector_names"]
+    assert "trace" not in result and not foreign.exists()

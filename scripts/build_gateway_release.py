@@ -4,6 +4,7 @@ This does not install, activate, configure, launch, qualify, or publish anything
 """
 from __future__ import annotations
 import argparse
+from email.parser import BytesParser
 import hashlib
 import io
 import json
@@ -173,8 +174,32 @@ def build_one(python, source, output, env, log):
     return wheel, expected
 
 def verify_cds_dependency(path, lock):
-    """Verify only the admitted protocol and transport helper wheel members."""
+    """Verify the pinned wheel identity and only the admitted protocol/helper members."""
+    rows = [row for row in lock["dependencies"]
+            if row["distribution"] == "codex-deepseek-runtime"]
+    require(len(rows) == 1, "Exactly one pinned CDS dependency is required")
+    dependency = rows[0]
+    require(Path(path).name == dependency["filename"], "Pinned CDS wheel filename differs")
+    require(sha(path) == dependency["sha256"], "Pinned CDS wheel SHA256 differs")
+    require(dependency["source"]["source_commit"] == lock["protocol_boundary"]["source_commit"],
+            "CDS wheel source differs from pinned protocol source")
     with zipfile.ZipFile(path) as archive:
+        metadata_names = [name for name in archive.namelist()
+                          if name.endswith(".dist-info/METADATA")]
+        require(len(metadata_names) == 1, "CDS wheel must contain one distribution metadata member")
+        metadata_name = metadata_names[0]
+        part = safe_name(metadata_name)
+        require(len(part.parts) == 2, "Unexpected CDS distribution metadata path")
+        metadata = BytesParser().parsebytes(archive.read(metadata_name), headersonly=True)
+        names, versions = metadata.get_all("Name", []), metadata.get_all("Version", [])
+        require(len(names) == 1 and re.sub(r"[-_.]+", "-", names[0]).lower() == "codex-deepseek-runtime",
+                "CDS wheel metadata distribution differs")
+        require(len(versions) == 1 and versions[0] == dependency["version"],
+                "CDS wheel metadata version differs from lock")
+        dist_info = "codex_deepseek_runtime-" + versions[0] + ".dist-info"
+        require(metadata_name == dist_info + "/METADATA"
+                and dependency["filename"].startswith(dist_info.removesuffix(".dist-info") + "-"),
+                "CDS wheel distribution metadata path differs from lock")
         for name, expected in lock["protocol_boundary"]["pure_files"].items():
             require(hashlib.sha256(archive.read("codex_deepseek/" + name)).hexdigest() == expected,
                     "Pinned pure CDS protocol differs")
@@ -186,12 +211,13 @@ def verify_cds_dependency(path, lock):
         for name, expected in compatibility["files"].items():
             require(hashlib.sha256(archive.read("codex_deepseek/" + name)).hexdigest() == expected,
                     "Pinned CDS transport helper differs")
-        require(set(compatibility["license_files"]) == {
-                    "codex_deepseek_runtime-0.6.9.dist-info/licenses/licenses/cpython-proactor-PSF.txt"},
+        license_path = dist_info + "/licenses/licenses/cpython-proactor-PSF.txt"
+        require(set(compatibility["license_files"]) == {license_path},
                 "Unexpected CDS transport license boundary")
         for name, expected in compatibility["license_files"].items():
             require(hashlib.sha256(archive.read(name)).hexdigest() == expected,
                     "Pinned CDS transport helper license differs")
+
 
 
 def main(argv=None):

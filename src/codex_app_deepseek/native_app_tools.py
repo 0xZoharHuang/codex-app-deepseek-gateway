@@ -254,10 +254,37 @@ def _entry_syntax(config_path, group, key):
 
 class NativeCLI:
     """One-shot original native commands; never starts a model or an App."""
-    def __init__(self, executable, checksum, home, receipt, receipt_path):
+    def __init__(self, executable, checksum, home, receipt, receipt_path, *, runtime_package=None):
         self.executable, self.home = _plain(executable), _plain(home)
         _require(_sha(self.executable) == checksum, "Bound native CLI changed")
         self.checksum, self.receipt, self.receipt_path = checksum, receipt, receipt_path
+        self.runtime_package = copy.deepcopy(runtime_package)
+        if self.runtime_package is not None:
+            self._launch_executable()
+
+    def _launch_executable(self):
+        if self.runtime_package is None:
+            return self.executable
+        from . import isolated_app as app
+        from . import runtime_package as packages
+        context = self.runtime_package
+        _require(isinstance(context, dict) and isinstance(context.get("descriptor_path"), str)
+                 and isinstance(context.get("descriptor_sha256"), str),
+                 "Packaged native CLI requires the exact verified runtime descriptor")
+        expected = app.baseline(Path(__file__).parent / "assets/app-launch-baseline.json")
+        backend = app.WindowsBackend()
+        owner = backend.current()
+        _require(owner["sid"] == self.receipt.get("owner_sid"),
+                 "Packaged native CLI belongs to another Windows owner")
+        admitted = app.verify_launch_bundle(context["descriptor_path"], context["descriptor_sha256"],
+            expected, backend, owner, self.home)
+        _require(admitted.get("runtime_package") == context
+                 and _same_path(admitted["files"]["codex.exe"]["path"], self.executable)
+                 and admitted["files"]["codex.exe"]["sha256"] == self.checksum,
+                 "Packaged native CLI descriptor, physical image or activation differs")
+        packages.validate_control_binding(context, str(self.executable),
+                                          {"CODEX_CLI_PATH": context["alias_path"]})
+        return Path(context["alias_path"])
 
     def _persist(self):
         if self.receipt_path is not None:
@@ -273,9 +300,19 @@ class NativeCLI:
         environment = {key: value for key, value in os.environ.items() if key.upper() in allowed}
         environment["CODEX_HOME"] = str(self.home)
         environment["GIT_TERMINAL_PROMPT"] = "0"
-        command = [str(self.executable), "-c", 'cli_auth_credentials_store="file"',
+        executable = self._launch_executable()
+        if self.runtime_package is not None:
+            # The native early mode initializer compares this request with its
+            # actual own kernel AUMID before parsing a mutating CLI command.
+            environment["CODEX_WINDOWS_REGISTERED_CORE"] = (
+                "1" if self.runtime_package["mode"] == "registered_core" else "0")
+        command = [str(executable), "-c", 'cli_auth_credentials_store="file"',
                    "-c", 'mcp_oauth_credentials_store="file"', *args]
         row = {"args": args, "started": time.time(), "completion": "starting"}
+        if self.runtime_package is not None:
+            row["runtime_activation"] = {"mode": self.runtime_package["mode"],
+                "descriptor_sha256": self.runtime_package["descriptor_sha256"],
+                "alias_path": str(executable)}
         self.receipt.setdefault("commands", []).append(row)
         self._persist()
         process = subprocess.Popen(command, cwd=self.home, env=environment, stdin=subprocess.DEVNULL,
@@ -307,6 +344,27 @@ class NativeCLI:
             return _json(stdout)
         except ValueError:
             raise NativeToolsError("Native plugin command returned invalid metadata") from None
+
+def _runner(factory, native, checksum, home, receipt, receipt_path, runtime_package):
+    if runtime_package is None:
+        return factory(native, checksum, home, receipt, receipt_path)
+    return factory(native, checksum, home, receipt, receipt_path, runtime_package=runtime_package)
+
+
+def _receipt_runtime(value, runtime_package):
+    previous = value.get("runtime_package")
+    _require(previous is None or runtime_package is not None,
+             "Packaged native receipt requires explicit verified package admission; retain its native package for teardown")
+    if runtime_package is not None:
+        _require(isinstance(runtime_package, dict), "Invalid packaged runtime context")
+
+
+def _set_runtime(value, runtime_package):
+    if runtime_package is None:
+        value.pop("runtime_package", None)
+    else:
+        value["runtime_package"] = copy.deepcopy(runtime_package)
+
 
 def _without_native_entries(config):
     value = copy.deepcopy(config)
@@ -367,7 +425,8 @@ def _policy_plan(home, catalog_path, catalog_sha256):
 
 def bootstrap(home, native, native_sha256, inventory, receipt_path, *, owner_sid,
               catalog_path, catalog_sha256, backup_dir, source_root,
-              native_manifest=None, native_manifest_sha256=None, runner_factory=NativeCLI):
+              native_manifest=None, native_manifest_sha256=None, runner_factory=NativeCLI,
+              runtime_package=None):
     """Caller owns idle/home locks; provider checkpoint is already registered."""
     home, receipt_path = _plain(home), _plain(receipt_path)
     before = preflight(home)
@@ -393,11 +452,13 @@ def bootstrap(home, native, native_sha256, inventory, receipt_path, *, owner_sid
                  and prior.get("source_package") == inventory["package_full_name"]
                  and prior.get("resource_fingerprint") == inventory["fingerprint"],
                  "Native App tools setup has an unresolved prior receipt")
-        cli = runner_factory(native, native_sha256, home, prior, receipt_path)
+        _receipt_runtime(prior, runtime_package)
+        cli = _runner(runner_factory, native, native_sha256, home, prior, receipt_path, runtime_package)
         _verify_mcp(cli.call(["mcp", "get", SERVER, "--json"]), _cache(home, inventory), inventory)
         prior.update(native=str(native), native_sha256=native_sha256,
                      native_manifest=str(native_manifest) if native_manifest else None,
                      native_manifest_sha256=native_manifest_sha256)
+        _set_runtime(prior, runtime_package)
         _save(receipt_path, prior)
         return prior
     value = {"schema_version": 1, "project": PROJECT, "owner_sid": owner_sid, "home": str(home),
@@ -406,8 +467,9 @@ def bootstrap(home, native, native_sha256, inventory, receipt_path, *, owner_sid
              "native_manifest_sha256": native_manifest_sha256, "source_package": inventory["package_full_name"],
              "resource_fingerprint": inventory["fingerprint"], "state": "installing", "commands": [],
              "created_marketplace": False, "created_plugin": False, "policy_checkpoint": None}
+    _set_runtime(value, runtime_package)
     _save(receipt_path, value)
-    cli = runner_factory(native, native_sha256, home, value, receipt_path)
+    cli = _runner(runner_factory, native, native_sha256, home, value, receipt_path, runtime_package)
     try:
         if MARKETPLACE not in before.get("marketplaces", {}):
             result = cli.call(["plugin", "marketplace", "add", str(target), "--json"])
@@ -446,7 +508,8 @@ def bootstrap(home, native, native_sha256, inventory, receipt_path, *, owner_sid
         _save(receipt_path, value)
         raise
 
-def rollback(home, inventory, receipt_path, *, owner_sid, runner_factory=NativeCLI):
+def rollback(home, inventory, receipt_path, *, owner_sid, runner_factory=NativeCLI,
+             runtime_package=None):
     """Only the caller's native receipt owns the MCP leaf and software objects."""
     receipt_path = _plain(receipt_path)
     if not receipt_path.exists():
@@ -482,7 +545,12 @@ def rollback(home, inventory, receipt_path, *, owner_sid, runner_factory=NativeC
         value["state"] = "retained_user_adopted"
         _save(receipt_path, value)
         return {"status": value["state"], "resources_retained": True}
-    cli = runner_factory(value["native"], value["native_sha256"], home, value, receipt_path)
+    _receipt_runtime(value, runtime_package)
+    if runtime_package is not None:
+        _require(value.get("runtime_package") == runtime_package,
+                 "Native App tools rollback activation differs from its configured receipt")
+    cli = _runner(runner_factory, value["native"], value["native_sha256"], home, value,
+                  receipt_path, runtime_package)
     if value.get("created_plugin") and PLUGIN_ID in current.get("plugins", {}):
         _verify_cache(_cache(home, inventory), inventory)
         cli.call(["plugin", "remove", PLUGIN_ID, "--json"])
@@ -503,7 +571,10 @@ def rollback(home, inventory, receipt_path, *, owner_sid, runner_factory=NativeC
             cli.call(["plugin", "marketplace", "remove", MARKETPLACE, "--json"])
     value["state"] = "removed"
     _save(receipt_path, value)
-    return {"status": "removed", "original_resources_retained": True}
+    result = {"status": "removed", "original_resources_retained": True}
+    if runtime_package is not None:
+        result.update(runtime_package_retained=True, native_package_teardown_performed=False)
+    return result
 
 
 @contextmanager
@@ -524,22 +595,37 @@ def rollback_admission(data, *, backend=None):
     expected = app.baseline(Path(__file__).parent / "assets/app-launch-baseline.json")
     with backend.launch_lock(owner["sid"]), backend.home_guard(paths["home"], owner["sid"]):
         app.require_disjoint_apps(backend, owner, paths)
-        admitted = app.verify_bundle(value["native_manifest"], value["native_manifest_sha256"],
-                                     expected, cleanup_only=True)
+        from . import runtime_package as packages
+        app.require(app.sha(value["native_manifest"]) == value["native_manifest_sha256"],
+                    "native manifest checksum mismatch")
+        if app.load_json(value["native_manifest"]).get("kind") == packages.KIND:
+            admitted = app.verify_launch_bundle(value["native_manifest"], value["native_manifest_sha256"],
+                expected, backend, owner, paths["home"])
+        else:
+            admitted = app.verify_bundle(value["native_manifest"], value["native_manifest_sha256"],
+                                         expected, cleanup_only=True)
         _require(_same_path(value["native"], admitted["files"]["codex.exe"]["path"])
                  and value["native_sha256"] == admitted["files"]["codex.exe"]["sha256"],
                  "Native App tools cleanup does not match its verified CLI")
-        yield lambda: rollback(paths["home"], load_inventory(), receipt_path, owner_sid=owner["sid"])
+        context = admitted.get("runtime_package")
+        yield lambda: rollback(paths["home"], load_inventory(), receipt_path, owner_sid=owner["sid"],
+                               runtime_package=context)
 
 
-def configured(home, native, checksum, inventory, receipt_path, *, owner_sid, runner_factory=NativeCLI):
+def configured(home, native, checksum, inventory, receipt_path, *, owner_sid, runner_factory=NativeCLI,
+               runtime_package=None):
     preflight(home)
     receipt_path = _plain(receipt_path)
     _require(receipt_path.is_file(), "Native App tools are not configured; run app-configure")
     value = _json(receipt_path.read_bytes())
     _require(value.get("state") == "configured" and value.get("owner_sid") == owner_sid
              and _same_path(value["home"], home), "Native App tools configuration receipt is not ready")
-    cli = runner_factory(native, checksum, home, {}, None)
+    _receipt_runtime(value, runtime_package)
+    if runtime_package is not None:
+        _require(value.get("runtime_package") == runtime_package,
+                 "Native App tools configured activation differs from its receipt")
+    cli = _runner(runner_factory, native, checksum, home,
+                  value if runtime_package is not None else {}, None, runtime_package)
     _verify_mcp(cli.call(["mcp", "get", SERVER, "--json"]), _cache(home, inventory), inventory)
     return {"status": "native_plugin_configuration_verified", "plugin_id": PLUGIN_ID,
             "App_tool_call_qualified": False}

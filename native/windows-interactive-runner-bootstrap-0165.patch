@@ -1,0 +1,113 @@
+--- a/codex-rs/windows-sandbox-rs/src/desktop.rs
++++ b/codex-rs/windows-sandbox-rs/src/desktop.rs
+@@ -246,6 +246,35 @@
+     Ok(name)
+ }
+ 
++/// The trusted runner keeps the official NULL startup desktop on the actual
++/// interactive WinSta0. Its later restricted tool still opens the private desktop.
++/// Query one held current object; never rebind it or change its authorization.
++pub(crate) fn current_station_is_interactive_winsta0() -> Result<bool> {
++    let station = unsafe { GetProcessWindowStation() };
++    let name = station_name_for_handle(station)?;
++    let mut flags: windows_sys::Win32::System::StationsAndDesktops::USEROBJECTFLAGS =
++        unsafe { std::mem::zeroed() };
++    let mut returned = 0_u32;
++    anyhow::ensure!(
++        unsafe {
++            GetUserObjectInformationW(
++                station,
++                windows_sys::Win32::System::StationsAndDesktops::UOI_FLAGS,
++                (&mut flags
++                    as *mut windows_sys::Win32::System::StationsAndDesktops::USEROBJECTFLAGS)
++                    .cast(),
++                std::mem::size_of_val(&flags) as u32,
++                &mut returned,
++            )
++        } != 0
++            && returned as usize == std::mem::size_of_val(&flags),
++        "query held startup station flags failed: {}",
++        unsafe { GetLastError() }
++    );
++    Ok(flags.dwFlags & 1 != 0
++        && name.as_slice() == "WinSta0".encode_utf16().collect::<Vec<_>>().as_slice())
++}
++
+ pub struct LaunchDesktop {
+     _private_desktop: PrivateDesktop,
+     startup_name: Vec<u16>,
+--- a/codex-rs/windows-sandbox-rs/src/elevated/runner_client.rs
++++ b/codex-rs/windows-sandbox-rs/src/elevated/runner_client.rs
+@@ -2,6 +2,7 @@
+ use crate::app_package::verify_registered_core_runner;
+ use crate::desktop::DesktopPolicy;
+ use crate::desktop::LaunchDesktop;
++use crate::desktop::current_station_is_interactive_winsta0;
+ use crate::desktop::shared_private_desktop_for_user;
+ use crate::identity::SandboxCreds;
+ use crate::ipc_framed::ErrorPayload;
+@@ -486,8 +487,13 @@
+     let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
+     si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+     si.dwFlags = STARTF_FORCEOFFFEEDBACK;
+-    if let Some(desktop) = bootstrap_desktop.as_ref() {
+-        si.lpDesktop = desktop.startup_info_desktop();
++    // Preserve the official trusted-runner NULL bootstrap on interactive WinSta0.
++    // Service stations retain their proven explicit private bootstrap. In both
++    // cases the actual tool private desktop still travels in SpawnRequest.
++    if !current_station_is_interactive_winsta0()? {
++        if let Some(desktop) = bootstrap_desktop.as_ref() {
++            si.lpDesktop = desktop.startup_info_desktop();
++        }
+     }
+     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+ 
+--- a/codex-rs/windows-sandbox-rs/src/service_station_tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/service_station_tests.rs
+@@ -426,3 +426,46 @@
+     restore.restore()?;
+     Ok(())
+ }
++
++#[test]
++#[ignore = "requires own Limited Admin interactive WinSta0 and existing dedicated native home"]
++fn actual_interactive_native_null_bootstrap_readonly_without_station_grant() -> Result<()> {
++    let home = PathBuf::from(std::env::var_os("CDS_OWN_HOST_HOME").context("own home required")?);
++    let cwd = PathBuf::from(std::env::var_os("CDS_OWN_HOST_WORK").context("own work required")?);
++    let out = PathBuf::from(
++        std::env::var_os("CDS_OWN_NATIVE_STATION_OUT").context("own output required")?,
++    );
++    let target = std::env::var("CDS_OWN_EXPECTED_TARGET_SID")?;
++    let (caller, session, _) = caller_identity()?;
++    ensure!(
++        session > 0
++            && string_from_sid_bytes(&caller).map_err(anyhow::Error::msg)?
++                == std::env::var("CDS_OWN_EXPECTED_USER_SID")?,
++        "wrong own interactive caller/session"
++    );
++    ensure!(
++        crate::desktop::current_station_is_interactive_winsta0()?,
++        "test requires actual visible current WinSta0"
++    );
++    let station = unsafe { GetProcessWindowStation() };
++    let target_bytes = sid_bytes_from_string(&target)?;
++    let (_before, _, acl) = station_security(station)?;
++    ensure!(
++        target_masks(acl, &target_bytes)? == (0, 0),
++        "must begin without target station pregrant or deny"
++    );
++    let captured = native_readonly(&home, &cwd, "interactive-official-null-bootstrap", &target);
++    let (_after, _, actual) = station_security(station)?;
++    ensure!(
++        target_masks(actual, &target_bytes)? == (0, 0),
++        "native source must not add target WinSta0 rights"
++    );
++    let capture = captured?;
++    std::fs::write(
++        out.join("native-interactive-station-result.json"),
++        serde_json::to_vec_pretty(
++            &json!({"status":"ACTUAL_NATIVE_INTERACTIVE_NULL_BOOTSTRAP_READONLY_PASSED","trusted_runner_lpDesktop":"official NULL","restricted_tool_private_desktop_unchanged":true,"target_WinSta0_added_mask":0,"EXITWINDOWS_granted":false,"Default_desktop_granted":false,"external_pregrant":false,"production_function_invoked":true,"capture":capture}),
++        )?,
++    )?;
++    Ok(())
++}

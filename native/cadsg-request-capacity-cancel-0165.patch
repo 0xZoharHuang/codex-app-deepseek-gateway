@@ -1,0 +1,2094 @@
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -19,9 +19,14 @@
+ use crate::hook_runtime::run_pre_compact_hooks;
+ use crate::responses_metadata::CodexResponsesMetadata;
+ use crate::responses_metadata::CompactionTurnMetadata;
++#[cfg(test)]
+ use crate::session::CapacityCheckpointInstallation;
+ use crate::session::CapacityPrefix;
++#[cfg(test)]
+ use crate::session::CompactedHistoryInstallation;
++use crate::session::LocalCapacityCheckpoint;
++use crate::session::LocalCompactionCommit;
++use crate::session::LocalCompactionMetadata;
+ use crate::session::RequestEffortUsage;
+ use crate::session::session::Session;
+ use crate::session::step_context::StepContext;
+@@ -37,6 +42,7 @@
+ use codex_analytics::CompactionStrategy;
+ use codex_analytics::CompactionTrigger;
+ use codex_analytics::now_unix_seconds;
++use codex_async_utils::OrCancelExt;
+ use codex_context_fragments::AnnotatedContent;
+ use codex_context_fragments::set_annotated_content;
+ use codex_context_fragments::truncate_annotated_text;
+@@ -61,6 +67,7 @@
+ use codex_rollout_trace::InferenceTraceContext;
+ use codex_utils_output_truncation::approx_token_count;
+ use futures::prelude::*;
++use tokio_util::sync::CancellationToken;
+ use tracing::error;
+ use tracing::warn;
+ 
+@@ -127,6 +134,7 @@
+     world_state: Arc<WorldState>,
+     reason: CompactionReason,
+     phase: CompactionPhase,
++    cancellation_token: CancellationToken,
+ ) -> CodexResult<()> {
+     let prompt = turn_context
+         .config
+@@ -154,6 +162,7 @@
+         ),
+         None,
+         None,
++        cancellation_token,
+     )
+     .await?;
+     Ok(())
+@@ -168,6 +177,7 @@
+     world_state: Arc<WorldState>,
+     prefix: CapacityPrefix,
+     rejection: UnexpectedResponseError,
++    cancellation_token: CancellationToken,
+ ) -> CodexResult<()> {
+     let input = vec![UserInput::Text {
+         text: turn_context
+@@ -192,6 +202,7 @@
+         ),
+         Some(prefix),
+         Some(rejection),
++        cancellation_token,
+     )
+     .await
+ }
+@@ -201,6 +212,7 @@
+     step_context: Arc<StepContext>,
+     world_state: Arc<WorldState>,
+     input: Vec<UserInput>,
++    cancellation_token: CancellationToken,
+ ) -> CodexResult<()> {
+     run_compact_task_inner(
+         sess.clone(),
+@@ -216,6 +228,7 @@
+         ),
+         None,
+         None,
++        cancellation_token,
+     )
+     .await?;
+     Ok(())
+@@ -230,7 +243,13 @@
+     compaction_metadata: CompactionTurnMetadata,
+     capacity_prefix: Option<CapacityPrefix>,
+     capacity_rejection: Option<UnexpectedResponseError>,
++    cancellation_token: CancellationToken,
+ ) -> CodexResult<()> {
++    // The native OrCancelExt select is unbiased; reject an already-stopped task
++    // before polling any hook, warning or model-request future.
++    if cancellation_token.is_cancelled() {
++        return Err(CodexErr::TurnAborted);
++    }
+     let trigger = compaction_metadata.trigger();
+     let reason = compaction_metadata.reason();
+     let phase = compaction_metadata.phase();
+@@ -243,7 +262,10 @@
+         phase,
+     )
+     .await;
+-    let pre_compact_outcome = run_pre_compact_hooks(&sess, &turn_context, trigger).await;
++    let pre_compact_outcome = run_pre_compact_hooks(&sess, &turn_context, trigger)
++        .or_cancel(&cancellation_token)
++        .await
++        .unwrap_or(PreCompactHookOutcome::Stopped);
+     match pre_compact_outcome {
+         PreCompactHookOutcome::Continue => {}
+         PreCompactHookOutcome::Stopped => {
+@@ -268,12 +290,16 @@
+         compaction_metadata,
+         capacity_prefix,
+         capacity_rejection,
++        &cancellation_token,
+     )
+     .await;
+     let status = compaction_status_from_result(&result);
+     let codex_error = result.as_ref().err();
+     if result.is_ok() {
+-        let post_compact_outcome = run_post_compact_hooks(&sess, &turn_context, trigger).await;
++        let post_compact_outcome = run_post_compact_hooks(&sess, &turn_context, trigger)
++            .or_cancel(&cancellation_token)
++            .await
++            .unwrap_or(PostCompactHookOutcome::Stopped);
+         if let PostCompactHookOutcome::Stopped = post_compact_outcome {
+             attempt
+                 .track(
+@@ -320,7 +346,11 @@
+     compaction_metadata: CompactionTurnMetadata,
+     mut capacity_prefix: Option<CapacityPrefix>,
+     mut capacity_rejection: Option<UnexpectedResponseError>,
++    cancellation_token: &CancellationToken,
+ ) -> CodexResult<String> {
++    if cancellation_token.is_cancelled() {
++        return Err(CodexErr::TurnAborted);
++    }
+     capacity_prefix = capacity_prefix.map(CapacityPrefix::for_fresh_summary);
+     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
+     sess.emit_turn_item_started(&turn_context, &compaction_item)
+@@ -370,7 +400,10 @@
+     } else if let Some(selected) = &manual_selected_history {
+         selected.clone()
+     } else {
+-        sess.clone_history().await
++        // This is a new local model input snapshot. Share ordinary sampling's
++        // native persistence boundary so a previous admitted commit is durable
++        // before this compactor observes its replacement history.
++        sess.capture_capacity_send().await.history
+     };
+     let mut capacity_work = capacity_prefix
+         .as_ref()
+@@ -405,6 +438,9 @@
+     // request tracking) survives retries within this compact turn.
+     let mut client_session = sess.services.model_client.new_session();
+     let compaction_response = loop {
++        if cancellation_token.is_cancelled() {
++            return Err(CodexErr::TurnAborted);
++        }
+         // Clone is required because of the loop
+         let mut turn_input = history
+             .clone()
+@@ -446,6 +482,7 @@
+             &prompt,
+             compaction_metadata.phase(),
+             capacity_prefix.is_some() || full_manual_send.is_some(),
++            cancellation_token,
+         )
+         .await
+         {
+@@ -535,7 +572,9 @@
+                     return Err(e);
+                 };
+                 if let Some(delay) = e.server_retry_delay() {
+-                    tokio::time::sleep(delay).await;
++                    tokio::time::sleep(delay)
++                        .or_cancel(cancellation_token)
++                        .await?;
+                 }
+                 if let CodexErrorDetails::UnexpectedStatus(rejection) = e.details() {
+                     capacity_rejection = Some(rejection.clone());
+@@ -592,7 +631,9 @@
+                     return Err(e);
+                 };
+                 if let Some(delay) = e.server_retry_delay() {
+-                    tokio::time::sleep(delay).await;
++                    tokio::time::sleep(delay)
++                        .or_cancel(cancellation_token)
++                        .await?;
+                 }
+                 if let CodexErrorDetails::UnexpectedStatus(rejection) = e.details() {
+                     capacity_rejection = Some(rejection.clone());
+@@ -647,7 +688,9 @@
+                     warned_capacity = true;
+                 }
+                 if let Some(delay) = e.server_retry_delay() {
+-                    tokio::time::sleep(delay).await;
++                    tokio::time::sleep(delay)
++                        .or_cancel(cancellation_token)
++                        .await?;
+                 }
+                 retries = 0;
+                 continue;
+@@ -687,7 +730,9 @@
+                         e,
+                     )
+                     .await;
+-                    tokio::time::sleep(delay).await;
++                    tokio::time::sleep(delay)
++                        .or_cancel(cancellation_token)
++                        .await?;
+                     continue;
+                 } else {
+                     return Err(e);
+@@ -731,77 +776,56 @@
+         new_history,
+     )
+     .await;
+-    let installed = if let Some(prefix) = &capacity_prefix {
+-        sess.replace_compacted_history_with_capacity(
+-            new_history,
+-            replacement_step_context.to_turn_context_item(),
+-            world_state_baseline,
+-            CompactedHistoryInstallation::Prefix {
+-                prefix: prefix.prefix,
+-                prefix_context: Vec::new(),
+-                initial_context: Vec::new(),
+-                model_info: turn_context.model_info(),
+-                compaction_response_id: Some(compaction_response.response_id.clone()),
+-                reviewer_compaction_hash: None,
+-                turn_context: &turn_context,
+-                started_item: None,
+-            },
+-            Some(CapacityCheckpointInstallation::FreshSummary {
++    let (prefix, capacity) = if let Some(prefix) = capacity_prefix.take() {
++        let compaction_prefix = prefix.prefix;
++        (
++            Some(compaction_prefix),
++            Some(LocalCapacityCheckpoint::FreshSummary {
+                 prefix,
+-                coverage: &capacity_work
+-                    .as_ref()
++                coverage: capacity_work
++                    .take()
+                     .expect("completed capacity transaction")
+                     .coverage,
+-                response_id: &compaction_response.response_id,
+-                turn_context: &turn_context,
++                response_id: compaction_response.response_id.clone(),
+             }),
+         )
+-        .await
+     } else if let Some(prefix) = full_manual_prefix.filter(|_| !input_trimmed) {
+         let genesis = !crate::guardian::is_basic_session_source(&turn_context.session_source);
+-        sess.replace_compacted_history_with_capacity(
+-            new_history,
+-            replacement_step_context.to_turn_context_item(),
+-            world_state_baseline,
+-            CompactedHistoryInstallation::Prefix {
+-                prefix,
+-                prefix_context: Vec::new(),
+-                initial_context: Vec::new(),
+-                model_info: turn_context.model_info(),
+-                compaction_response_id: Some(compaction_response.response_id.clone()),
+-                reviewer_compaction_hash: None,
+-                turn_context: &turn_context,
+-                started_item: None,
+-            },
+-            genesis.then_some(CapacityCheckpointInstallation::ManualGenesis {
+-                turn_context: &turn_context,
+-                response_id: &compaction_response.response_id,
+-                partitioned: full_manual_prefix
+-                    .as_ref()
+-                    .is_some_and(|prefix| prefix.len < manual_total_items),
++        (
++            Some(prefix),
++            genesis.then_some(LocalCapacityCheckpoint::ManualGenesis {
++                response_id: compaction_response.response_id.clone(),
++                partitioned: prefix.len < manual_total_items,
+             }),
+         )
+-        .await
+     } else {
+-        let (window_number, window_ids) = sess.advance_auto_compact_window().await;
+-        sess.replace_compacted_history_with_capacity(
+-            new_history,
+-            replacement_step_context.to_turn_context_item(),
+-            world_state_baseline,
+-            CompactedHistoryMetadata {
+-                input_goal_ids,
+-                message: summary_text,
+-                window_number,
+-                window_ids,
+-                compaction_response_id: Some(compaction_response.response_id.clone()),
+-                compaction_model_hash: turn_context.model_info().comp_hash.clone(),
+-                reviewer_compaction_hash: None,
++        (None, None)
++    };
++    let installed = sess
++        .install_local_compaction(
++            LocalCompactionCommit {
++                items: new_history,
++                reference_context_item: replacement_step_context.to_turn_context_item(),
++                world_state_baseline,
++                prefix,
++                model_info: turn_context.model_info().as_ref().clone(),
++                metadata: LocalCompactionMetadata {
++                    input_goal_ids,
++                    message: summary_text,
++                    compaction_response_id: Some(compaction_response.response_id.clone()),
++                    compaction_model_hash: turn_context.model_info().comp_hash.clone(),
++                    reviewer_compaction_hash: None,
++                },
++                capacity,
+             },
+-            None,
++            Arc::clone(&turn_context),
++            cancellation_token.clone(),
+         )
+-        .await
+-    };
++        .await;
+     if !installed {
++        if cancellation_token.is_cancelled() {
++            return Err(CodexErr::TurnAborted);
++        }
+         return Err(capacity_rejection
+             .map(CodexErr::UnexpectedStatus)
+             .unwrap_or(CodexErr::TurnAborted));
+@@ -1591,31 +1615,51 @@
+     prompt: &Prompt,
+     phase: CompactionPhase,
+     keep_output_local: bool,
++    cancellation_token: &CancellationToken,
+ ) -> Result<CompactionResponse, CompactionAttemptError> {
++    if cancellation_token.is_cancelled() {
++        return Err(CodexErr::TurnAborted.into());
++    }
+     sess.set_server_reasoning_included(turn_context.model_info().use_responses_lite)
+         .await;
+-    let mut stream = client_session
+-        .stream(
+-            prompt,
+-            turn_context.model_info(),
+-            &turn_context.session_telemetry,
+-            sess.reasoning_effort_for_request(
+-                &turn_context.initial_settings,
+-                RequestEffortUsage::Compaction,
+-            )
+-            .await,
+-            turn_context.reasoning_summary(),
+-            turn_context.config.service_tier.clone(),
+-            responses_metadata,
+-            // Rollout tracing currently models remote compaction only; local compaction streams
+-            // are left untraced until the reducer has a first-class local compaction lifecycle.
+-            &InferenceTraceContext::disabled(),
++    if cancellation_token.is_cancelled() {
++        return Err(CodexErr::TurnAborted.into());
++    }
++    let effort = sess
++        .reasoning_effort_for_request(
++            &turn_context.initial_settings,
++            RequestEffortUsage::Compaction,
+         )
++        .or_cancel(cancellation_token)
+         .await
+-        .map_err(CompactionAttemptError::BeforeResponseStream)?;
++        .map_err(|_| CompactionAttemptError::from(CodexErr::TurnAborted))?;
++    if cancellation_token.is_cancelled() {
++        return Err(CodexErr::TurnAborted.into());
++    }
++    let inference_trace = InferenceTraceContext::disabled();
++    let request = client_session.stream(
++        prompt,
++        turn_context.model_info(),
++        &turn_context.session_telemetry,
++        effort,
++        turn_context.reasoning_summary(),
++        turn_context.config.service_tier.clone(),
++        responses_metadata,
++        &inference_trace,
++    );
++    tokio::pin!(request);
++    let mut stream = tokio::select! {
++        biased;
++        _ = cancellation_token.cancelled() => return Err(CodexErr::TurnAborted.into()),
++        result = &mut request => result.map_err(CompactionAttemptError::BeforeResponseStream)?,
++    };
+     let mut output = Vec::new();
+     loop {
+-        let maybe_event = stream.next().await;
++        let maybe_event = tokio::select! {
++            biased;
++            _ = cancellation_token.cancelled() => return Err(CodexErr::TurnAborted.into()),
++            event = stream.next() => event,
++        };
+         let Some(event) = maybe_event else {
+             return Err(CodexErr::Stream("stream closed before response.completed".into()).into());
+         };
+--- a/codex-rs/core/src/compact_token_budget.rs
++++ b/codex-rs/core/src/compact_token_budget.rs
+@@ -9,6 +9,7 @@
+ use crate::session::session::Session;
+ use crate::session::step_context::StepContext;
+ use codex_analytics::CompactionTrigger;
++use codex_async_utils::OrCancelExt;
+ use codex_protocol::error::CodexErr;
+ use codex_protocol::error::Result as CodexResult;
+ use codex_protocol::error::UnexpectedResponseError;
+@@ -16,6 +17,7 @@
+ use codex_protocol::items::TurnItem;
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::WarningEvent;
++use tokio_util::sync::CancellationToken;
+ 
+ /// Runs token-budget manual compaction as a normal compaction lifecycle.
+ ///
+@@ -32,6 +34,7 @@
+         &step_context,
+         world_state,
+         CompactionTrigger::Manual,
++        None,
+         None,
+     )
+     .await
+@@ -53,6 +56,7 @@
+         world_state,
+         CompactionTrigger::Auto,
+         None,
++        None,
+     )
+     .await
+ }
+@@ -65,13 +69,18 @@
+     world_state: Arc<WorldState>,
+     prefix: CapacityPrefix,
+     rejection: UnexpectedResponseError,
++    cancellation_token: CancellationToken,
+ ) -> CodexResult<()> {
++    if cancellation_token.is_cancelled() {
++        return Err(CodexErr::TurnAborted);
++    }
+     run_compact_task_inner(
+         &sess,
+         &step_context,
+         world_state,
+         CompactionTrigger::Auto,
+         Some((prefix, rejection)),
++        Some(&cancellation_token),
+     )
+     .await
+ }
+@@ -82,9 +91,17 @@
+     world_state: Arc<WorldState>,
+     trigger: CompactionTrigger,
+     capacity: Option<(CapacityPrefix, UnexpectedResponseError)>,
++    cancellation_token: Option<&CancellationToken>,
+ ) -> CodexResult<()> {
+     let turn_context = &step_context.turn;
+-    let pre_compact_outcome = run_pre_compact_hooks(sess, turn_context, trigger).await;
++    let pre_compact_outcome = if let Some(token) = cancellation_token {
++        run_pre_compact_hooks(sess, turn_context, trigger)
++            .or_cancel(token)
++            .await
++            .unwrap_or(PreCompactHookOutcome::Stopped)
++    } else {
++        run_pre_compact_hooks(sess, turn_context, trigger).await
++    };
+     match pre_compact_outcome {
+         PreCompactHookOutcome::Continue => {}
+         PreCompactHookOutcome::Stopped => return Err(CodexErr::TurnAborted),
+@@ -98,9 +115,17 @@
+             message: "Request-byte capacity was exceeded (HTTP 413). Native token-budget reset will replace only previously confirmed input; the unconsumed suffix is preserved unchanged. No summarizer model request is made.".to_owned(),
+         })).await;
+         if !sess
+-            .start_new_context_window_for_capacity(step_context, world_state, &prefix)
++            .start_new_context_window_for_capacity(
++                step_context,
++                world_state,
++                prefix,
++                cancellation_token.expect("capacity reset propagates its task token"),
++            )
+             .await
+         {
++            if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
++                return Err(CodexErr::TurnAborted);
++            }
+             return Err(CodexErr::UnexpectedStatus(rejection));
+         }
+     } else {
+@@ -110,7 +135,14 @@
+     sess.emit_turn_item_completed(turn_context, compaction_item)
+         .await;
+ 
+-    let post_compact_outcome = run_post_compact_hooks(sess, turn_context, trigger).await;
++    let post_compact_outcome = if let Some(token) = cancellation_token {
++        run_post_compact_hooks(sess, turn_context, trigger)
++            .or_cancel(token)
++            .await
++            .unwrap_or(PostCompactHookOutcome::Stopped)
++    } else {
++        run_post_compact_hooks(sess, turn_context, trigger).await
++    };
+     if let PostCompactHookOutcome::Stopped = post_compact_outcome {
+         return Err(CodexErr::TurnAborted);
+     }
+--- a/codex-rs/core/src/compact_tests.rs
++++ b/codex-rs/core/src/compact_tests.rs
+@@ -204,6 +204,7 @@
+         world_state,
+         CompactionReason::ContextLimit,
+         CompactionPhase::PreTurn,
++        tokio_util::sync::CancellationToken::new(),
+     )
+     .await?;
+ 
+@@ -1015,7 +1016,8 @@
+         world,
+         prefix,
+         capacity_rejection_for_test(),
+-    )
++        tokio_util::sync::CancellationToken::new(),
++)
+     .await
+     .expect_err("an indivisible original pair rejected in every request cannot be silently excluded from summary coverage");
+     let requests = calls.lock().unwrap().clone();
+@@ -1135,6 +1137,7 @@
+         world,
+         prefix,
+         capacity_rejection_for_test(),
++        tokio_util::sync::CancellationToken::new(),
+     )
+     .await;
+     assert!(
+@@ -1208,6 +1211,7 @@
+                 text: "Summarize.".to_owned(),
+                 text_elements: Vec::new(),
+             }],
++            tokio_util::sync::CancellationToken::new(),
+         )
+         .await
+     } else {
+@@ -1218,6 +1222,7 @@
+             world,
+             CompactionReason::ContextLimit,
+             CompactionPhase::MidTurn,
++            tokio_util::sync::CancellationToken::new(),
+         )
+         .await
+     };
+@@ -1337,6 +1342,7 @@
+             text: "Summarize fully without pruning.".to_owned(),
+             text_elements: Vec::new(),
+         }],
++        tokio_util::sync::CancellationToken::new(),
+     );
+     let (result, expected_suffix) =
+         tokio::time::timeout(std::time::Duration::from_secs(10), async {
+@@ -1423,6 +1429,7 @@
+             text: "Full manual genesis only.".to_owned(),
+             text_elements: Vec::new(),
+         }],
++        tokio_util::sync::CancellationToken::new(),
+     )
+     .await
+     .expect_err("an irreducible prefix cannot discard the remaining unknown history");
+@@ -1559,6 +1566,7 @@
+         world,
+         prefix,
+         capacity_rejection_for_test(),
++        tokio_util::sync::CancellationToken::new(),
+     )
+     .await?;
+     let after = session.clone_history().await;
+@@ -1687,6 +1695,7 @@
+         world,
+         prefix,
+         capacity_rejection_for_test(),
++        tokio_util::sync::CancellationToken::new(),
+     )
+     .await
+     .expect_err("a stale reset cannot replace a different native history lifetime");
+@@ -2156,6 +2165,7 @@
+             text: "Summarize selected input completely.".to_owned(),
+             text_elements: Vec::new(),
+         }],
++        tokio_util::sync::CancellationToken::new(),
+     );
+     let (result, late_item) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+         tokio::join!(compact, late)
+@@ -2261,6 +2271,7 @@
+             text: "Continue explicit manual prefix compaction.".to_owned(),
+             text_elements: Vec::new(),
+         }],
++        tokio_util::sync::CancellationToken::new(),
+     )
+     .await?;
+     let next = session.clone_history().await;
+@@ -2319,6 +2330,7 @@
+             text: "Summarize.".to_owned(),
+             text_elements: Vec::new(),
+         }],
++        tokio_util::sync::CancellationToken::new(),
+     )
+     .await
+     .expect_err("a single unknown input cannot be silently discarded");
+@@ -2378,7 +2390,8 @@
+             vec![UserInput::Text {
+                 text: "Summarize.".to_owned(),
+                 text_elements: Vec::new()
+-            }]
++            }],
++            tokio_util::sync::CancellationToken::new(),
+         )
+         .await
+         .is_err()
+@@ -2454,7 +2467,8 @@
+             vec![UserInput::Text {
+                 text: "Summarize.".to_owned(),
+                 text_elements: Vec::new()
+-            }]
++            }],
++            tokio_util::sync::CancellationToken::new(),
+         )
+         .await
+         .is_err()
+@@ -2561,8 +2575,8 @@
+ /// Native ordinary Responses transport probe, with genuine Completed admission.
+ /// The public CLI fixture separately covers the complete agent-turn lifecycle.
+ async fn capacity_test_ordinary_request(
+-    session: &Session,
+-    turn: &TurnContext,
++    session: &Arc<Session>,
++    turn: &Arc<TurnContext>,
+     step: &StepContext,
+ ) -> CodexResult<String> {
+     let snapshot = session.capture_capacity_send().await;
+@@ -2832,10 +2846,9 @@
+             &tokio_util::sync::CancellationToken::new(),
+         )
+         .await?;
+-    let first_error =
+-        capacity_test_ordinary_request(session.as_ref(), turn.as_ref(), step.as_ref())
+-            .await
+-            .expect_err("original ordinary request must truly fail the same fixed budget first");
++    let first_error = capacity_test_ordinary_request(&session, &turn, step.as_ref())
++        .await
++        .expect_err("original ordinary request must truly fail the same fixed budget first");
+     assert!(
+         matches!(first_error.details(),CodexErrorDetails::UnexpectedStatus(error) if error.status==http::StatusCode::PAYLOAD_TOO_LARGE)
+     );
+@@ -2876,6 +2889,7 @@
+         world,
+         prefix,
+         capacity_rejection_for_test(),
++        tokio_util::sync::CancellationToken::new(),
+     );
+     let late = async {
+         tokio::time::timeout(std::time::Duration::from_secs(20), notify.notified())
+@@ -2985,7 +2999,7 @@
+         // succeed under exactly the same real capacity predicate, not merely
+         // because one small compactor request completed.
+         assert_eq!(
+-            capacity_test_ordinary_request(session.as_ref(), turn.as_ref(), step.as_ref()).await?,
++            capacity_test_ordinary_request(&session, &turn, step.as_ref()).await?,
+             "actual-ordinary-after-capacity"
+         );
+         let state = oracle.lock().unwrap();
+@@ -3045,3 +3059,310 @@
+     }
+     Ok(())
+ }
++
++// Real native-token cancellation regressions. These keep the recovery future
++// alive, cancel its inherited token, and then allow the response/lock to finish;
++// dropping the future is deliberately not used as the cancellation mechanism.
++#[test_case("already_cancelled"; "stopped helper emits no request")]
++#[test_case("final_summary_grace"; "cancel and release final summary inside native grace")]
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn capacity_token_cancel_prevents_summary_install_without_dropping_future(
++    scenario: &str,
++) -> anyhow::Result<()> {
++    skip_if_no_network!(Ok(()));
++    use wiremock::Mock;
++    use wiremock::ResponseTemplate;
++    use wiremock::matchers::{method, path};
++    let (_home, session, turn, server, events) = manual_partition_test_session().await?;
++    let mark_old = |mut item: ResponseItem| {
++        item.set_turn_id_if_missing("historical-before-token-cancel");
++        item
++    };
++    session
++        .record_conversation_items(
++            &turn,
++            turn.model_info(),
++            &[mark_old(user_message("CONFIRMED-BEFORE-CANCEL"))],
++        )
++        .await;
++    session
++        .confirm_capacity_completion(
++            &turn,
++            &turn.model_info().slug,
++            session.capture_capacity_send().await,
++            "ordinary-before-real-token-cancel",
++        )
++        .await;
++    let mut historical = legacy_pair(91, 4096)?
++        .into_iter()
++        .map(mark_old)
++        .collect::<Vec<_>>();
++    historical.push(user_message("CURRENT-INPUT-MUST-SURVIVE-TOKEN-CANCEL"));
++    session
++        .record_conversation_items(&turn, turn.model_info(), &historical)
++        .await;
++    let prefix = session
++        .capacity_prefix(&turn, &turn.model_info().slug)
++        .await
++        .unwrap();
++    assert!(prefix.needs_fresh_summary());
++    let before = session.clone_history().await;
++    let before_window = session.current_window().await;
++    let before_checkpoint =
++        serde_json::to_value(session.capacity_checkpoint_for_test().await.unwrap())?;
++    let token = tokio_util::sync::CancellationToken::new();
++    let received = Arc::new(tokio::sync::Notify::new());
++    let release = Arc::new((
++        std::sync::Mutex::new(scenario == "already_cancelled"),
++        std::sync::Condvar::new(),
++    ));
++    let fixture_received = Arc::clone(&received);
++    let fixture_release = Arc::clone(&release);
++    Mock::given(method("POST"))
++        .and(path("/v1/responses"))
++        .respond_with(move |_request: &wiremock::Request| {
++            fixture_received.notify_one();
++            let (mutex, condition) = &*fixture_release;
++            let released = mutex.lock().unwrap();
++            let (released, timed) = condition
++                .wait_timeout_while(released, std::time::Duration::from_secs(5), |released| {
++                    !*released
++                })
++                .unwrap();
++            assert!(
++                *released && !timed.timed_out(),
++                "fixture final-summary release barrier timed out"
++            );
++            ResponseTemplate::new(200)
++                .insert_header("content-type", "text/event-stream")
++                .set_body_string(responses::sse(vec![
++                    responses::ev_assistant_message(
++                        "final-summary",
++                        "SUMMARY-AFTER-STOP-MUST-NOT-INSTALL",
++                    ),
++                    responses::ev_completed("summary-after-native-token-cancel"),
++                ]))
++        })
++        .mount(&server)
++        .await;
++    let step = session
++        .capture_step_context(
++            Arc::clone(&turn),
++            &tokio_util::sync::CancellationToken::new(),
++        )
++        .await?;
++    let world = Arc::new(session.build_world_state_for_step(&step, true).await?);
++    if scenario == "already_cancelled" {
++        token.cancel();
++    }
++    let attempt = run_inline_capacity_compact_task(
++        Arc::clone(&session),
++        Arc::clone(&turn),
++        step,
++        world,
++        prefix,
++        capacity_rejection_for_test(),
++        token.child_token(),
++    );
++    let cancel_and_release = async {
++        if scenario != "already_cancelled" {
++            tokio::time::timeout(std::time::Duration::from_secs(10), received.notified()).await?;
++            token.cancel();
++            // Release immediately, well inside the native 100 ms grace period.
++            // The actual recovery future remains alive until it returns.
++            let (mutex, condition) = &*release;
++            *mutex.lock().unwrap() = true;
++            condition.notify_all();
++        }
++        Ok::<(), anyhow::Error>(())
++    };
++    let (result, released) = tokio::join!(attempt, cancel_and_release);
++    released?;
++    assert!(matches!(
++        result.unwrap_err().details(),
++        CodexErrorDetails::TurnAborted
++    ));
++    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
++    let after = session.clone_history().await;
++    assert_eq!(
++        after.annotated_items(),
++        before.annotated_items(),
++        "a stopped token must not install or duplicate completed call/output records"
++    );
++    assert_eq!(session.current_window().await, before_window);
++    assert_eq!(
++        serde_json::to_value(session.capacity_checkpoint_for_test().await.unwrap())?,
++        before_checkpoint,
++        "stopping recovery must not advance the epoch, replace the response anchor, or clear its fence"
++    );
++    let requests = server.received_requests().await.unwrap();
++    assert_eq!(
++        requests.len(),
++        usize::from(scenario != "already_cancelled"),
++        "a stopped helper cannot initiate another model request"
++    );
++    while let Ok(event) = events.try_recv() {
++        assert!(!matches!(event.msg, EventMsg::ItemCompleted(event)
++            if matches!(event.item, TurnItem::ContextCompaction(_))));
++    }
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn capacity_installer_rechecks_real_cancel_token_after_waiting_for_native_state_lock()
++-> anyhow::Result<()> {
++    skip_if_no_network!(Ok(()));
++    let (_home, session, turn, server, _events) = token_budget_capacity_test_session().await?;
++    session
++        .record_conversation_items(
++            &turn,
++            turn.model_info(),
++            &[user_message("CONSUMED-RESET-PREFIX")],
++        )
++        .await;
++    session
++        .confirm_capacity_completion(
++            &turn,
++            &turn.model_info().slug,
++            session.capture_capacity_send().await,
++            "ordinary-before-install-lock-cancel",
++        )
++        .await;
++    session
++        .record_conversation_items(
++            &turn,
++            turn.model_info(),
++            &[user_message("UNCONSUMED-RESET-SUFFIX")],
++        )
++        .await;
++    let prefix = session
++        .capacity_prefix(&turn, &turn.model_info().slug)
++        .await
++        .unwrap();
++    let before = session.clone_history().await;
++    let before_window = session.current_window().await;
++    let before_checkpoint =
++        serde_json::to_value(session.capacity_checkpoint_for_test().await.unwrap())?;
++    let token = tokio_util::sync::CancellationToken::new();
++    let step = session
++        .capture_step_context(
++            Arc::clone(&turn),
++            &tokio_util::sync::CancellationToken::new(),
++        )
++        .await?;
++    let world = session.build_world_state_for_step(&step, true).await?;
++    let (items, baseline) =
++        build_compaction_replacement_history(&session, &step, &world, Vec::new()).await;
++    let state_guard = session.capacity_state_lock_for_test().await;
++    let installation = session.replace_compacted_history_with_capacity(
++        items,
++        step.to_turn_context_item(),
++        baseline,
++        CompactedHistoryInstallation::Prefix {
++            prefix: prefix.prefix,
++            prefix_context: Vec::new(),
++            initial_context: Vec::new(),
++            model_info: turn.model_info(),
++            compaction_response_id: None,
++            reviewer_compaction_hash: None,
++            turn_context: &turn,
++            started_item: None,
++        },
++        Some(CapacityCheckpointInstallation::TranslateReset {
++            prefix: &prefix,
++            turn_context: &turn,
++        }),
++        Some(&token),
++    );
++    let cancel_and_unlock = async {
++        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
++        token.cancel();
++        drop(state_guard);
++    };
++    let (installed, ()) = tokio::join!(installation, cancel_and_unlock);
++    assert!(
++        !installed,
++        "token cancellation while waiting must be rechecked under the native state lock"
++    );
++    assert_eq!(
++        session.clone_history().await.annotated_items(),
++        before.annotated_items()
++    );
++    assert_eq!(session.current_window().await, before_window);
++    assert_eq!(
++        serde_json::to_value(session.capacity_checkpoint_for_test().await.unwrap())?,
++        before_checkpoint
++    );
++    assert!(server.received_requests().await.unwrap().is_empty());
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn capacity_token_budget_already_cancelled_helper_preserves_native_state_without_model()
++-> anyhow::Result<()> {
++    skip_if_no_network!(Ok(()));
++    let (_home, session, turn, server, _events) = token_budget_capacity_test_session().await?;
++    session
++        .record_conversation_items(
++            &turn,
++            turn.model_info(),
++            &[user_message("CONSUMED-BEFORE-STOPPED-RESET")],
++        )
++        .await;
++    session
++        .confirm_capacity_completion(
++            &turn,
++            &turn.model_info().slug,
++            session.capture_capacity_send().await,
++            "ordinary-before-stopped-reset",
++        )
++        .await;
++    session
++        .record_conversation_items(
++            &turn,
++            turn.model_info(),
++            &[user_message("CURRENT-BEFORE-STOPPED-RESET")],
++        )
++        .await;
++    let prefix = session
++        .capacity_prefix(&turn, &turn.model_info().slug)
++        .await
++        .unwrap();
++    let before = session.clone_history().await;
++    let before_window = session.current_window().await;
++    let before_checkpoint =
++        serde_json::to_value(session.capacity_checkpoint_for_test().await.unwrap())?;
++    let step = session
++        .capture_step_context(
++            Arc::clone(&turn),
++            &tokio_util::sync::CancellationToken::new(),
++        )
++        .await?;
++    let world = Arc::new(session.build_world_state_for_step(&step, true).await?);
++    let token = tokio_util::sync::CancellationToken::new();
++    token.cancel();
++    let result = crate::compact_token_budget::run_inline_capacity_reset_task(
++        Arc::clone(&session),
++        step,
++        world,
++        prefix,
++        capacity_rejection_for_test(),
++        token,
++    )
++    .await;
++    assert!(matches!(
++        result.unwrap_err().details(),
++        CodexErrorDetails::TurnAborted
++    ));
++    assert_eq!(
++        session.clone_history().await.annotated_items(),
++        before.annotated_items()
++    );
++    assert_eq!(session.current_window().await, before_window);
++    assert_eq!(
++        serde_json::to_value(session.capacity_checkpoint_for_test().await.unwrap())?,
++        before_checkpoint
++    );
++    assert!(server.received_requests().await.unwrap().is_empty());
++    Ok(())
++}
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -534,8 +534,44 @@
+     },
+ }
+ 
++/// Local compaction defers its window advance to the guarded state replacement.
++pub(crate) struct LocalCompactionMetadata {
++    pub(crate) input_goal_ids: HashSet<ResponseItemId>,
++    pub(crate) message: String,
++    pub(crate) compaction_response_id: Option<String>,
++    pub(crate) compaction_model_hash: Option<String>,
++    pub(crate) reviewer_compaction_hash: Option<String>,
++}
++
++/// Owned proofs used only by the existing native persistence task.
++pub(crate) enum LocalCapacityCheckpoint {
++    FreshSummary {
++        prefix: CapacityPrefix,
++        coverage: crate::compact::CapacitySummaryCoverage,
++        response_id: String,
++    },
++    ManualGenesis {
++        response_id: String,
++        partitioned: bool,
++    },
++    TranslateReset {
++        prefix: CapacityPrefix,
++    },
++}
++
++pub(crate) struct LocalCompactionCommit {
++    pub(crate) items: Vec<ResponseItemEnvelope>,
++    pub(crate) reference_context_item: TurnContextItem,
++    pub(crate) world_state_baseline: WorldStateSnapshot,
++    pub(crate) prefix: Option<CompactionPrefix>,
++    pub(crate) model_info: ModelInfo,
++    pub(crate) metadata: LocalCompactionMetadata,
++    pub(crate) capacity: Option<LocalCapacityCheckpoint>,
++}
++
+ pub(crate) enum CompactedHistoryInstallation<'a> {
+     Complete(CompactedHistoryMetadata),
++    CompleteAfterAdvance(LocalCompactionMetadata),
+     Prefix {
+         prefix: CompactionPrefix,
+         prefix_context: Vec<ResponseItem>,
+@@ -3816,6 +3852,12 @@
+         mut items: Vec<ResponseItemEnvelope>,
+         image_preparations: Vec<ImagePreparationMetadata>,
+     ) {
++        let _boundary = self
++            .code_mode_message_tasks
++            .communication_boundary
++            .acquire()
++            .await
++            .unwrap_or_else(|_| unreachable!("communication boundary remains open"));
+         // Save the originating history budget for replay.
+         // Preserve any existing tool-specific override.
+         let policy: codex_utils_output_truncation::TruncationPolicy =
+@@ -4419,6 +4461,89 @@
+         state.replace_history(items, reference_context_item);
+     }
+ 
++    /// Once the state-locked guard succeeds, this admitted native operation owns
++    /// rollout ACK and checkpoint publication even if the running task is aborted.
++    pub(crate) async fn install_local_compaction(
++        self: &Arc<Self>,
++        commit: LocalCompactionCommit,
++        turn_context: Arc<TurnContext>,
++        cancellation_token: CancellationToken,
++    ) -> bool {
++        if cancellation_token.is_cancelled() {
++            return false;
++        }
++        let session = Arc::clone(self);
++        let Some(persistence) = self.spawn_ordered_native_persistence(async move {
++            let LocalCompactionCommit {
++                items,
++                reference_context_item,
++                world_state_baseline,
++                prefix,
++                model_info,
++                metadata,
++                capacity,
++            } = commit;
++            let installation = match prefix {
++                Some(prefix) => CompactedHistoryInstallation::Prefix {
++                    prefix,
++                    prefix_context: Vec::new(),
++                    initial_context: Vec::new(),
++                    model_info: &model_info,
++                    compaction_response_id: metadata.compaction_response_id,
++                    reviewer_compaction_hash: metadata.reviewer_compaction_hash,
++                    turn_context: &turn_context,
++                    started_item: None,
++                },
++                None => CompactedHistoryInstallation::CompleteAfterAdvance(metadata),
++            };
++            let checkpoint = capacity.as_ref().map(|capacity| match capacity {
++                LocalCapacityCheckpoint::FreshSummary {
++                    prefix,
++                    coverage,
++                    response_id,
++                } => CapacityCheckpointInstallation::FreshSummary {
++                    prefix,
++                    coverage,
++                    response_id,
++                    turn_context: &turn_context,
++                },
++                LocalCapacityCheckpoint::ManualGenesis {
++                    response_id,
++                    partitioned,
++                } => CapacityCheckpointInstallation::ManualGenesis {
++                    turn_context: &turn_context,
++                    response_id,
++                    partitioned: *partitioned,
++                },
++                LocalCapacityCheckpoint::TranslateReset { prefix } => {
++                    CapacityCheckpointInstallation::TranslateReset {
++                        prefix,
++                        turn_context: &turn_context,
++                    }
++                }
++            });
++            session
++                .replace_compacted_history_with_capacity(
++                    items,
++                    reference_context_item,
++                    world_state_baseline,
++                    installation,
++                    checkpoint,
++                    Some(&cancellation_token),
++                )
++                .await
++        }) else {
++            return false;
++        };
++        match persistence.await {
++            Ok(installed) => installed,
++            Err(error) => {
++                warn!(%error, "owned native compaction persistence task failed");
++                false
++            }
++        }
++    }
++
+     pub(crate) async fn replace_compacted_history<'a>(
+         &self,
+         items: Vec<ResponseItemEnvelope>,
+@@ -4432,6 +4557,7 @@
+             world_state_baseline,
+             installation,
+             None,
++            None,
+         )
+         .await
+     }
+@@ -4443,7 +4569,11 @@
+         mut world_state_baseline: WorldStateSnapshot,
+         installation: impl Into<CompactedHistoryInstallation<'a>>,
+         capacity: Option<CapacityCheckpointInstallation<'_>>,
++        cancellation_token: Option<&CancellationToken>,
+     ) -> bool {
++        if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
++            return false;
++        }
+         let installation = installation.into();
+         let capacity_reset = matches!(
+             &capacity,
+@@ -4451,6 +4581,9 @@
+         );
+         let compaction_model_hash = match &installation {
+             CompactedHistoryInstallation::Complete(metadata) => {
++                metadata.compaction_model_hash.clone()
++            }
++            CompactedHistoryInstallation::CompleteAfterAdvance(metadata) => {
+                 metadata.compaction_model_hash.clone()
+             }
+             CompactedHistoryInstallation::Prefix { model_info, .. } => {
+@@ -4487,11 +4620,34 @@
+         let _settings_guard = thread_settings::acquire_persistence_lock(self).await;
+         let (compacted_item, started_item, capacity_receipt) = {
+             let mut state = self.state.lock().await;
++            // This is the installation linearization point. No await separates
++            // the cancellation guard from native history/window replacement.
++            if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
++                return false;
++            }
+             let mut confirmed_prefix_len = items.len();
+-            let complete_replacement =
+-                matches!(&installation, CompactedHistoryInstallation::Complete(_));
++            let complete_replacement = matches!(
++                &installation,
++                CompactedHistoryInstallation::Complete(_)
++                    | CompactedHistoryInstallation::CompleteAfterAdvance(_)
++            );
+             let (metadata, started_item) = match installation {
+                 CompactedHistoryInstallation::Complete(metadata) => (metadata, None),
++                CompactedHistoryInstallation::CompleteAfterAdvance(metadata) => {
++                    let (window_number, window_ids) = state.advance_auto_compact_window();
++                    (
++                        CompactedHistoryMetadata {
++                            input_goal_ids: metadata.input_goal_ids,
++                            message: metadata.message,
++                            window_number,
++                            window_ids,
++                            compaction_response_id: metadata.compaction_response_id,
++                            compaction_model_hash: metadata.compaction_model_hash,
++                            reviewer_compaction_hash: metadata.reviewer_compaction_hash,
++                        },
++                        None,
++                    )
++                }
+                 CompactedHistoryInstallation::Prefix {
+                     prefix,
+                     prefix_context,
+@@ -5141,7 +5297,20 @@
+         self.state.lock().await.request_capacity_checkpoint.clone()
+     }
+ 
++    #[cfg(test)]
++    pub(crate) async fn capacity_state_lock_for_test(
++        &self,
++    ) -> tokio::sync::MutexGuard<'_, SessionState> {
++        self.state.lock().await
++    }
++
+     pub(crate) async fn capture_capacity_send(&self) -> CapacitySendSnapshot {
++        let _boundary = self
++            .code_mode_message_tasks
++            .communication_boundary
++            .acquire()
++            .await
++            .unwrap_or_else(|_| unreachable!("communication boundary remains open"));
+         let state = self.state.lock().await;
+         CapacitySendSnapshot {
+             history: state.clone_history(),
+@@ -5169,8 +5338,8 @@
+ 
+     /// Only call at ordinary ResponseCompleted, with the snapshot captured before send.
+     pub(crate) async fn confirm_capacity_completion(
+-        &self,
+-        turn_context: &TurnContext,
++        self: &Arc<Self>,
++        turn_context: &Arc<TurnContext>,
+         model: &str,
+         snapshot: CapacitySendSnapshot,
+         response_id: &str,
+@@ -5178,14 +5347,28 @@
+         if crate::guardian::is_basic_session_source(&turn_context.session_source) {
+             return;
+         }
+-        self.confirm_capacity_checkpoint(
+-            turn_context,
+-            model,
+-            snapshot,
+-            response_id,
+-            request_capacity::Origin::OrdinaryCompleted,
+-        )
+-        .await;
++        let session = Arc::clone(self);
++        let persistence_turn = Arc::clone(turn_context);
++        let model = model.to_owned();
++        let response_id = response_id.to_owned();
++        let Some(persistence) = self.spawn_ordered_native_persistence(async move {
++            session
++                .confirm_capacity_checkpoint(
++                    &persistence_turn,
++                    &model,
++                    snapshot,
++                    &response_id,
++                    request_capacity::Origin::OrdinaryCompleted,
++                )
++                .await;
++        }) else {
++            self.capacity_unavailable(turn_context, "session persistence admission is closed")
++                .await;
++            return;
++        };
++        if let Err(error) = persistence.await {
++            warn!(%error, "owned ordinary capacity checkpoint task failed");
++        }
+     }
+ 
+     async fn confirm_capacity_checkpoint(
+@@ -5207,13 +5390,7 @@
+         let response_id = response_id.to_owned();
+         let durable = self.live_thread().is_some();
+         let old = self.state.lock().await.request_capacity_checkpoint.clone();
+-        let Some(persistence) = self.track_native_persistence() else {
+-            self.capacity_unavailable(turn_context, "session persistence admission is closed")
+-                .await;
+-            return;
+-        };
+         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+-            let _persistence = persistence;
+             let binding = request_capacity::Binding::for_profile(
+                 &home,
+                 &thread,
+@@ -5295,7 +5472,6 @@
+                 return;
+             }
+         };
+-        self.state.lock().await.request_capacity_checkpoint = Some(checkpoint.clone());
+         if durable {
+             // This is a flush ACK, not a power-loss transaction. Cold prefix hashes
+             // still have to match the actual recovered rollout.
+@@ -5304,25 +5480,23 @@
+                 return;
+             }
+             let home = turn_context.config.codex_home.clone();
+-            let Some(persistence) = self.track_native_persistence() else {
+-                self.capacity_unavailable(turn_context, "session persistence admission is closed")
+-                    .await;
+-                return;
+-            };
++            let disk_checkpoint = checkpoint.clone();
+             let result = tokio::task::spawn_blocking(move || {
+-                let _persistence = persistence;
+                 if let Some(expected) = expected {
+-                    request_capacity::save_if_current(&home, &checkpoint, &expected)
++                    request_capacity::save_if_current(&home, &disk_checkpoint, &expected)
+                 } else {
+-                    request_capacity::save(&home, &checkpoint)
++                    request_capacity::save(&home, &disk_checkpoint)
+                 }
+             })
+             .await;
+             if !matches!(result, Ok(Ok(()))) {
+                 self.capacity_unavailable(turn_context, format!("{result:?}"))
+                     .await;
+-            }
+-        }
++                return;
++            }
++        }
++        // Publish memory only after the durable write/CAS acknowledged this exact value.
++        self.state.lock().await.request_capacity_checkpoint = Some(checkpoint);
+     }
+ 
+     /// Validate confirmed input and durably fence this turn/epoch before changing a request.
+@@ -5452,13 +5626,7 @@
+         let old = prefix.checkpoint.clone();
+         let home = prefix.home.clone();
+         // Use the binding's logical model/provider; compactor responses do not rearm it.
+-        let Some(persistence) = self.track_native_persistence() else {
+-            self.capacity_unavailable(turn_context, "session persistence admission is closed")
+-                .await;
+-            return;
+-        };
+         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+-            let _persistence = persistence;
+             let binding = request_capacity::Binding::for_profile(
+                 &home,
+                 &old.binding.thread_id,
+@@ -5486,27 +5654,23 @@
+             .await;
+             return;
+         };
+-        self.state.lock().await.request_capacity_checkpoint = Some(checkpoint.clone());
+         if self.live_thread().is_some() {
+             if let Err(error) = self.flush_rollout().await {
+                 self.capacity_unavailable(turn_context, error).await;
+                 return;
+             }
+-            let Some(persistence) = self.track_native_persistence() else {
+-                self.capacity_unavailable(turn_context, "session persistence admission is closed")
+-                    .await;
+-                return;
+-            };
++            let disk_checkpoint = checkpoint.clone();
+             let result = tokio::task::spawn_blocking(move || {
+-                let _persistence = persistence;
+-                request_capacity::save_if_current(&home, &checkpoint, &old)
++                request_capacity::save_if_current(&home, &disk_checkpoint, &old)
+             })
+             .await;
+             if !matches!(result, Ok(Ok(()))) {
+                 self.capacity_unavailable(turn_context, format!("{result:?}"))
+                     .await;
+-            }
+-        }
++                return;
++            }
++        }
++        self.state.lock().await.request_capacity_checkpoint = Some(checkpoint);
+     }
+ 
+     pub(crate) async fn clone_history(&self) -> ContextManager {
+@@ -5587,40 +5751,50 @@
+ 
+     /// Reset only the confirmed prefix; pending user/tool input is installed verbatim.
+     pub(crate) async fn start_new_context_window_for_capacity(
+-        &self,
++        self: &Arc<Self>,
+         step_context: &StepContext,
+         world_state: Arc<WorldState>,
+-        prefix: &CapacityPrefix,
++        prefix: CapacityPrefix,
++        cancellation_token: &CancellationToken,
+     ) -> bool {
++        if cancellation_token.is_cancelled() {
++            return false;
++        }
+         let retained_client_items = self.retained_client_items_for_context_window(&prefix.history);
+-        let (context_updates, world_state_snapshot) = self
+-            .build_initial_context_with_world_state(step_context, world_state.as_ref())
+-            .await;
+-        let context_items =
+-            crate::context_manager::updates::merge_world_state_updates(context_updates)
+-                .into_iter()
+-                .map(ResponseItemEnvelope::new)
+-                .chain(retained_client_items)
+-                .collect();
++        // Native context updates need not implement Send. Select directly,
++        // retaining cancellation priority without strengthening native types.
++        let (context_updates, world_state_snapshot) = tokio::select! {
++            biased;
++            _ = cancellation_token.cancelled() => return false,
++            context = self.build_initial_context_with_world_state(
++                step_context, world_state.as_ref(),
++            ) => context,
++        };
++        let items = crate::context_manager::updates::merge_world_state_updates(context_updates)
++            .into_iter()
++            .map(ResponseItemEnvelope::new)
++            .chain(retained_client_items)
++            .collect();
++        let compaction_prefix = prefix.prefix;
+         let installed = self
+-            .replace_compacted_history_with_capacity(
+-                context_items,
+-                step_context.to_turn_context_item(),
+-                world_state_snapshot,
+-                CompactedHistoryInstallation::Prefix {
+-                    prefix: prefix.prefix,
+-                    prefix_context: Vec::new(),
+-                    initial_context: Vec::new(),
+-                    model_info: &step_context.settings.model_info,
+-                    compaction_response_id: None,
+-                    reviewer_compaction_hash: None,
+-                    turn_context: &step_context.turn,
+-                    started_item: None,
++            .install_local_compaction(
++                LocalCompactionCommit {
++                    items,
++                    reference_context_item: step_context.to_turn_context_item(),
++                    world_state_baseline: world_state_snapshot,
++                    prefix: Some(compaction_prefix),
++                    model_info: step_context.settings.model_info.as_ref().clone(),
++                    metadata: LocalCompactionMetadata {
++                        input_goal_ids: Default::default(),
++                        message: String::new(),
++                        compaction_response_id: None,
++                        compaction_model_hash: None,
++                        reviewer_compaction_hash: None,
++                    },
++                    capacity: Some(LocalCapacityCheckpoint::TranslateReset { prefix }),
+                 },
+-                Some(CapacityCheckpointInstallation::TranslateReset {
+-                    prefix,
+-                    turn_context: &step_context.turn,
+-                }),
++                Arc::clone(&step_context.turn),
++                cancellation_token.clone(),
+             )
+             .await;
+         if installed {
+--- a/codex-rs/core/src/session/retained_context.rs
++++ b/codex-rs/core/src/session/retained_context.rs
+@@ -170,6 +170,42 @@
+             self.persist_rollout_items(&[RolloutItem::RetainedContext(event)])
+                 .await;
+         }
++    }
++
++    /// Use the existing native persistence tracker and source-order boundary.
++    /// Reservation is polled before spawning so a later steer/model snapshot
++    /// cannot overtake an admitted commit, including while the boundary is busy.
++    /// Dropping the caller's JoinHandle does not cancel this owned operation.
++    pub(crate) fn spawn_ordered_native_persistence<F>(
++        self: &Arc<Self>,
++        operation: F,
++    ) -> Option<JoinHandle<F::Output>>
++    where
++        F: Future + Send + 'static,
++        F::Output: Send + 'static,
++    {
++        let mut reservation = Box::pin(
++            Arc::clone(&self.code_mode_message_tasks.communication_boundary).acquire_owned(),
++        );
++        let mut context = Context::from_waker(futures::task::noop_waker_ref());
++        let reserved = reservation.as_mut().poll(&mut context);
++        let tasks = self
++            .code_mode_message_tasks
++            .tasks
++            .lock()
++            .unwrap_or_else(PoisonError::into_inner);
++        // Admission and spawn share the same lock used by native shutdown.
++        if tasks.is_closed() {
++            return None;
++        }
++        Some(tasks.spawn(async move {
++            let _boundary = match reserved {
++                Poll::Ready(permit) => permit,
++                Poll::Pending => reservation.await,
++            }
++            .unwrap_or_else(|_| unreachable!("communication boundary remains open"));
++            operation.await
++        }))
+     }
+ 
+     pub(crate) fn track_code_mode_message(&self) -> Option<TaskTrackerToken> {
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -370,6 +370,7 @@
+             CompactionReason::ContextLimit,
+             CompactionPhase::PreTurn,
+             /*candidate*/ None,
++            &cancellation_token,
+         )
+         .await?;
+         world_state = sess
+@@ -656,6 +657,7 @@
+                     capacity_world_state,
+                     prefix,
+                     rejection,
++                    cancellation_token.child_token(),
+                 )
+                 .await
+             } else {
+@@ -666,6 +668,7 @@
+                     capacity_world_state,
+                     prefix,
+                     rejection,
++                    cancellation_token.child_token(),
+                 )
+                 .await
+             };
+@@ -790,6 +793,7 @@
+                         CompactionReason::ContextLimit,
+                         CompactionPhase::MidTurn,
+                         candidate,
++                        &cancellation_token,
+                     )
+                     .await;
+                     match compacted {
+@@ -908,6 +912,7 @@
+                                 CompactionReason::ContextLimit,
+                                 CompactionPhase::PostTurn,
+                                 candidate,
++                                &cancellation_token,
+                             )
+                             .await
+                         {
+@@ -960,6 +965,7 @@
+                     CompactionReason::ContextLimit,
+                     CompactionPhase::MidTurn,
+                     /*candidate*/ None,
++                    &cancellation_token,
+                 )
+                 .await?;
+                 can_drain_pending_input = false;
+@@ -1508,6 +1514,7 @@
+             CompactionReason::ContextLimit,
+             CompactionPhase::PreTurn,
+             candidate,
++            cancellation_token,
+         )
+         .await?;
+     }
+@@ -1605,6 +1612,7 @@
+         reason,
+         CompactionPhase::PreTurn,
+         /*candidate*/ None,
++        cancellation_token,
+     )
+     .await?;
+     Ok(())
+@@ -1625,6 +1633,7 @@
+     reason: CompactionReason,
+     phase: CompactionPhase,
+     candidate: Option<Box<BackgroundCompactionCandidate>>,
++    cancellation_token: &CancellationToken,
+ ) -> CodexResult<bool> {
+     let turn_context = &step_context.turn;
+     if matches!(phase, CompactionPhase::PreTurn)
+@@ -1717,6 +1726,7 @@
+                 world_state,
+                 reason,
+                 phase,
++                cancellation_token.child_token(),
+             )
+             .await?;
+             Ok(true)
+--- a/codex-rs/core/src/tasks/compact.rs
++++ b/codex-rs/core/src/tasks/compact.rs
+@@ -90,8 +90,14 @@
+                     // Compaction prompt is synthesized; no UI element ranges to preserve.
+                     text_elements: Vec::new(),
+                 }];
+-                crate::compact::run_compact_task(session.clone(), step_context, world_state, input)
+-                    .await
++                crate::compact::run_compact_task(
++                    session.clone(),
++                    step_context,
++                    world_state,
++                    input,
++                    cancellation_token.child_token(),
++                )
++                .await
+             }
+         };
+         if let Err(err) = result {
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -1,4 +1,6 @@
+ use crate::agent::LocalAgentControl;
++#[path = "capacity_commit_tests.rs"]
++mod capacity_commit_tests;
+ #[path = "notification_tests.rs"]
+ mod notification_tests;
+ 
+--- /dev/null
++++ b/codex-rs/core/src/session/capacity_commit_tests.rs
+@@ -0,0 +1,491 @@
++use super::*;
++use codex_thread_store::*;
++use pretty_assertions::assert_eq;
++use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
++
++// Delegates every actual write to LocalThreadStore. Only the Compacted batch
++// call/ACK is gated; AddItems, flush, replay and checkpoint files remain real.
++struct CapacityCommitBarrierStore {
++    inner: Arc<dyn ThreadStore>,
++    after_append: bool,
++    armed: AtomicBool,
++    entered: tokio::sync::Notify,
++    release: tokio::sync::Notify,
++    delegated_compactions: AtomicUsize,
++}
++
++impl ThreadStore for CapacityCommitBarrierStore {
++    fn as_any(&self) -> &dyn std::any::Any {
++        self.inner.as_any()
++    }
++
++    fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {
++        Box::pin(async move {
++            let compacted = params
++                .items
++                .iter()
++                .any(|item| matches!(item, RolloutItem::Compacted(_)));
++            let gated = compacted && self.armed.swap(false, Ordering::AcqRel);
++            if gated && !self.after_append {
++                self.entered.notify_one();
++                self.release.notified().await;
++            }
++            self.inner.append_items(params).await?;
++            if compacted {
++                self.delegated_compactions.fetch_add(1, Ordering::AcqRel);
++            }
++            if gated && self.after_append {
++                self.entered.notify_one();
++                self.release.notified().await;
++            }
++            Ok(())
++        })
++    }
++    fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture<'_, ()> {
++        self.inner.create_thread(params)
++    }
++
++    fn resume_thread(
++        &self,
++        params: ResumeThreadParams,
++    ) -> ThreadStoreFuture<'_, Arc<Vec<RolloutItem>>> {
++        self.inner.resume_thread(params)
++    }
++
++    fn persist_thread(
++        &self,
++        thread_id: ThreadId,
++        context: PersistContext,
++    ) -> ThreadStoreFuture<'_, ()> {
++        self.inner.persist_thread(thread_id, context)
++    }
++
++    fn flush_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
++        self.inner.flush_thread(thread_id)
++    }
++
++    fn shutdown_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
++        self.inner.shutdown_thread(thread_id)
++    }
++
++    fn discard_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
++        self.inner.discard_thread(thread_id)
++    }
++
++    fn load_history(
++        &self,
++        params: LoadThreadHistoryParams,
++    ) -> ThreadStoreFuture<'_, StoredThreadHistory> {
++        self.inner.load_history(params)
++    }
++
++    fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
++        self.inner.read_thread(params)
++    }
++
++    fn read_thread_by_rollout_path(
++        &self,
++        params: ReadThreadByRolloutPathParams,
++    ) -> ThreadStoreFuture<'_, StoredThread> {
++        self.inner.read_thread_by_rollout_path(params)
++    }
++
++    fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage> {
++        self.inner.list_threads(params)
++    }
++
++    fn update_thread_metadata(
++        &self,
++        params: UpdateThreadMetadataParams,
++    ) -> ThreadStoreFuture<'_, Option<StoredThread>> {
++        self.inner.update_thread_metadata(params)
++    }
++
++    fn archive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
++        self.inner.archive_thread(params)
++    }
++
++    fn unarchive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
++        self.inner.unarchive_thread(params)
++    }
++
++    fn delete_thread(&self, params: DeleteThreadParams) -> ThreadStoreFuture<'_, ()> {
++        self.inner.delete_thread(params)
++    }
++}
++
++struct CapacityResetCommitTask {
++    prefix: std::sync::Mutex<Option<CapacityPrefix>>,
++}
++impl SessionTask for CapacityResetCommitTask {
++    fn kind(&self) -> TaskKind {
++        TaskKind::Compact
++    }
++    fn span_name(&self) -> &'static str {
++        "session_task.capacity_commit_regression"
++    }
++    async fn run(
++        self: Arc<Self>,
++        session: Arc<Session>,
++        ctx: Arc<TurnContext>,
++        _input: Vec<TurnInput>,
++        cancellation_token: CancellationToken,
++    ) -> SessionTaskResult {
++        let prefix = self
++            .prefix
++            .lock()
++            .unwrap()
++            .take()
++            .expect("one admitted reset");
++        let step = session
++            .capture_step_context(Arc::clone(&ctx), &cancellation_token)
++            .await?;
++        let world = Arc::new(session.build_world_state_for_step(&step, true).await?);
++        crate::compact_token_budget::run_inline_capacity_reset_task(
++            session,
++            step,
++            world,
++            prefix,
++            codex_protocol::error::UnexpectedResponseError {
++                status: http::StatusCode::PAYLOAD_TOO_LARGE,
++                body: "owned native writer regression fixture".to_owned(),
++                user_message: None,
++                url: None,
++                cf_ray: None,
++                request_id: None,
++                identity_authorization_error: None,
++                identity_error_code: None,
++            },
++            cancellation_token,
++        )
++        .await?;
++        Ok(None)
++    }
++}
++
++async fn capacity_commit_writer_fixture(
++    after_append: bool,
++    interrupt_marker: bool,
++) -> anyhow::Result<(
++    tempfile::TempDir,
++    Arc<Session>,
++    Arc<TurnContext>,
++    Arc<CapacityCommitBarrierStore>,
++    PathBuf,
++    async_channel::Receiver<Event>,
++)> {
++    let home = tempfile::tempdir()?;
++    let home_path = AbsolutePathBuf::from_absolute_path(home.path())?;
++    let (mut session, mut turn, events) = make_session_and_context_with_auth_and_config_and_rx(
++        CodexAuth::from_api_key("Test API Key"),
++        Vec::new(),
++        move |config| {
++            config.codex_home = home_path;
++            config.agent_interrupt_message_enabled = interrupt_marker;
++            config.analytics_enabled = Some(false);
++        },
++    )
++    .await;
++    Arc::get_mut(&mut turn).expect("unique fixture turn").sub_id = Uuid::new_v4().to_string();
++    let barrier = Arc::new(CapacityCommitBarrierStore {
++        inner: Arc::clone(&session.services.thread_store),
++        after_append,
++        armed: AtomicBool::new(false),
++        entered: tokio::sync::Notify::new(),
++        release: tokio::sync::Notify::new(),
++        delegated_compactions: AtomicUsize::new(0),
++    });
++    let mutable_session = Arc::get_mut(&mut session).expect("unique fixture session");
++    mutable_session.services.thread_store = barrier.clone();
++    let rollout_path = attach_thread_persistence(mutable_session).await;
++    assert!(
++        session.live_thread().is_some(),
++        "must exercise native writer"
++    );
++    Ok((home, session, turn, barrier, rollout_path, events))
++}
++
++fn capacity_checkpoint_file(home: &std::path::Path, thread: ThreadId) -> PathBuf {
++    home.join("cache/request-capacity-v1")
++        .join(format!("{thread}.json"))
++}
++
++#[test_case::test_case(false, true, false; "before Add with native interruption marker")]
++#[test_case::test_case(true, true, false; "after Add ACK withheld with native interruption marker")]
++#[test_case::test_case(false, false, false; "before Add without native interruption marker")]
++#[test_case::test_case(true, false, false; "after Add ACK withheld without native interruption marker")]
++#[test_case::test_case(false, false, true; "shutdown admission closes before Add finishes")]
++#[test_case::test_case(true, false, true; "shutdown admission closes while append ACK withheld")]
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn capacity_owned_commit_survives_native_force_abort_and_orders_real_writer(
++    after_append: bool,
++    interrupt_marker: bool,
++    close_admission: bool,
++) -> anyhow::Result<()> {
++    let (home, session, turn, barrier, rollout_path, events) =
++        capacity_commit_writer_fixture(after_append, interrupt_marker).await?;
++    let tool_pair: Vec<ResponseItem> = serde_json::from_value(serde_json::json!([
++        {"type":"custom_tool_call","call_id":"completed-before-owned-commit","name":"fixture","input":"already completed effect"},
++        {"type":"custom_tool_call_output","call_id":"completed-before-owned-commit","output":"effect receipt retained"}
++    ]))?;
++    let mut consumed = vec![user_message("CONSUMED-BEFORE-OWNED-COMMIT")];
++    consumed.extend(tool_pair);
++    session
++        .record_conversation_items(&turn, turn.model_info(), &consumed)
++        .await;
++    session
++        .confirm_capacity_completion(
++            &turn,
++            &turn.model_info().slug,
++            session.capture_capacity_send().await,
++            "ordinary-before-owned-commit",
++        )
++        .await;
++    session
++        .record_conversation_items(
++            &turn,
++            turn.model_info(),
++            &[user_message("CURRENT-UNCONSUMED-OWNED-COMMIT")],
++        )
++        .await;
++    let prefix = session
++        .capacity_prefix(&turn, &turn.model_info().slug)
++        .await
++        .expect("durable confirmed prefix");
++    assert!(!prefix.needs_fresh_summary());
++    let before_window = session.current_window().await;
++    let fenced = session.capacity_checkpoint_for_test().await.unwrap();
++    let disk_before = std::fs::read(capacity_checkpoint_file(home.path(), session.thread_id))?;
++    assert_eq!(
++        serde_json::from_slice::<serde_json::Value>(&disk_before)?["checkpoint"],
++        serde_json::to_value(&fenced)?
++    );
++    barrier.armed.store(true, Ordering::Release);
++    session
++        .spawn_task(
++            Arc::clone(&turn),
++            Vec::new(),
++            CapacityResetCommitTask {
++                prefix: std::sync::Mutex::new(Some(prefix)),
++            },
++        )
++        .await;
++    tokio::time::timeout(StdDuration::from_secs(10), barrier.entered.notified()).await?;
++    let committed_live = session.clone_history().await;
++    let committed_window = session.current_window().await;
++    assert_eq!(committed_window.1, before_window.1 + 1);
++    assert_eq!(
++        barrier.delegated_compactions.load(Ordering::Acquire),
++        usize::from(after_append)
++    );
++    assert_eq!(
++        std::fs::read(capacity_checkpoint_file(home.path(), session.thread_id))?,
++        disk_before
++    );
++    let (disk_mid, _, errors) = RolloutRecorder::load_rollout_items(&rollout_path).await?;
++    assert_eq!(errors, 0);
++    assert_eq!(
++        disk_mid
++            .iter()
++            .filter(|item| matches!(item, RolloutItem::Compacted(_)))
++            .count(),
++        usize::from(after_append)
++    );
++    let (actual_task_token, actual_task_abort_handle) = {
++        let active = session.active_turn.lock().await;
++        let task = active
++            .as_ref()
++            .and_then(|active| active.task.as_ref())
++            .expect("actual native task remains at the writer barrier");
++        (task.cancellation_token.clone(), task.handle.abort_handle())
++    };
++    let abort_session = Arc::clone(&session);
++    let mut abort = tokio::spawn(async move {
++        abort_session
++            .abort_all_tasks(TurnAbortReason::Interrupted)
++            .await;
++    });
++    tokio::time::timeout(StdDuration::from_secs(10), actual_task_token.cancelled()).await?;
++    let early_abort = tokio::time::timeout(
++        StdDuration::from_millis(crate::tasks::GRACEFULL_INTERRUPTION_TIMEOUT_MS + 50),
++        &mut abort,
++    )
++    .await;
++    if interrupt_marker {
++        assert!(
++            early_abort.is_err(),
++            "interruption marker must wait behind owned commit"
++        );
++    } else {
++        early_abort.expect("marker-free abort can finish before detached persistence")?;
++    }
++    // Observe the handle of the original real SessionTask. Never abort it
++    // ourselves: only abort_all_tasks may terminate that task. The writer remains
++    // blocked until after this proves the original waiter was actually dropped.
++    tokio::time::timeout(StdDuration::from_secs(10), async {
++        while !actual_task_abort_handle.is_finished() {
++            tokio::task::yield_now().await;
++        }
++    })
++    .await?;
++    assert!(
++        actual_task_abort_handle.is_finished(),
++        "owned persistence must survive the actual native parent task finishing"
++    );
++    let mut snapshot = Box::pin(session.capture_capacity_send());
++    assert!(futures::poll!(snapshot.as_mut()).is_pending());
++    let late_items = [user_message("LATE-RECORD-AFTER-OWNED-COMMIT")];
++    let mut late_record =
++        Box::pin(session.record_conversation_items(&turn, turn.model_info(), &late_items));
++    assert!(futures::poll!(late_record.as_mut()).is_pending());
++    assert_eq!(
++        std::fs::read(capacity_checkpoint_file(home.path(), session.thread_id))?,
++        disk_before
++    );
++    let mut shutdown = close_admission.then(|| Box::pin(session.drain_code_mode_messages()));
++    if let Some(shutdown) = shutdown.as_mut() {
++        assert!(
++            futures::poll!(shutdown.as_mut()).is_pending(),
++            "shutdown must join the already-owned commit through rollout and CP publication"
++        );
++        assert!(
++            session.spawn_ordered_native_persistence(async {}).is_none(),
++            "closed tracker cannot admit a later native writer"
++        );
++    }
++    barrier.release.notify_one();
++    if interrupt_marker {
++        tokio::time::timeout(StdDuration::from_secs(10), &mut abort).await??;
++    }
++    let next_snapshot = tokio::time::timeout(StdDuration::from_secs(10), snapshot).await?;
++    tokio::time::timeout(StdDuration::from_secs(10), late_record).await?;
++    let translated = session.capacity_checkpoint_for_test().await.unwrap();
++    let disk_translated: serde_json::Value = serde_json::from_slice(&std::fs::read(
++        capacity_checkpoint_file(home.path(), session.thread_id),
++    )?)?;
++    assert_eq!(
++        disk_translated["checkpoint"],
++        serde_json::to_value(&translated)?
++    );
++    assert_eq!(translated.completed_epoch, fenced.completed_epoch);
++    assert_eq!(translated.response_id, fenced.response_id);
++    assert_eq!(translated.recovery_turn_id, fenced.recovery_turn_id);
++    assert!(translated.matches_prefix(session.clone_history().await.annotated_items())?);
++    let (disk_items, _, errors) = RolloutRecorder::load_rollout_items(&rollout_path).await?;
++    assert_eq!(errors, 0);
++    let compacted = disk_items
++        .iter()
++        .filter_map(|item| match item {
++            RolloutItem::Compacted(item) => Some(item),
++            _ => None,
++        })
++        .collect::<Vec<_>>();
++    assert_eq!(compacted.len(), 1);
++    assert_eq!(
++        request_capacity::prefix_hash(compacted[0].replacement_history.as_ref().unwrap())?,
++        request_capacity::prefix_hash(committed_live.annotated_items())?,
++    );
++    assert_eq!(session.current_window().await, committed_window);
++    if let Some(shutdown) = shutdown {
++        tokio::time::timeout(StdDuration::from_secs(10), shutdown).await?;
++    } else {
++        session
++            .confirm_capacity_completion(
++                &turn,
++                &turn.model_info().slug,
++                next_snapshot,
++                "ordinary-after-owned-commit",
++            )
++            .await;
++        let ordinary = session.capacity_checkpoint_for_test().await.unwrap();
++        assert_eq!(ordinary.completed_epoch, fenced.completed_epoch + 1);
++        assert_eq!(ordinary.response_id, "ordinary-after-owned-commit");
++        assert_eq!(ordinary.recovery_turn_id, None);
++        let disk_ordinary: serde_json::Value = serde_json::from_slice(&std::fs::read(
++            capacity_checkpoint_file(home.path(), session.thread_id),
++        )?)?;
++        assert_eq!(
++            disk_ordinary["checkpoint"],
++            serde_json::to_value(&ordinary)?
++        );
++    }
++    let aborted_turns = std::iter::from_fn(|| events.try_recv().ok())
++        .filter_map(|event| match event.msg {
++            EventMsg::TurnAborted(event) => Some((event.turn_id, event.reason)),
++            _ => None,
++        })
++        .collect::<Vec<_>>();
++    assert_eq!(
++        aborted_turns,
++        vec![(Some(turn.sub_id.clone()), TurnAbortReason::Interrupted)],
++        "the exact actual native task must close through Interrupted TurnAborted",
++    );
++    session.drain_code_mode_messages().await;
++    assert!(session.spawn_ordered_native_persistence(async {}).is_none());
++    session.live_thread().unwrap().shutdown().await?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn capacity_complete_cancel_before_guard_keeps_real_window_history_and_writer_unchanged()
++-> anyhow::Result<()> {
++    let (_home, session, turn, _barrier, rollout_path, _events) =
++        capacity_commit_writer_fixture(false, true).await?;
++    session
++        .record_conversation_items(
++            &turn,
++            turn.model_info(),
++            &[user_message("COMPLETE-PATH-HISTORY-MUST-STAY")],
++        )
++        .await;
++    session.flush_rollout().await?;
++    let before = session.clone_history().await;
++    let before_window = session.current_window().await;
++    let disk_before = std::fs::read(&rollout_path)?;
++    let token = CancellationToken::new();
++    let state_guard = session.state.lock().await;
++    let commit_session = Arc::clone(&session);
++    let commit_turn = Arc::clone(&turn);
++    let commit_token = token.clone();
++    let mut install = tokio::spawn(async move {
++        commit_session
++            .install_local_compaction(
++                LocalCompactionCommit {
++                    items: vec![ResponseItemEnvelope::new(user_message("MUST-NOT-INSTALL"))],
++                    reference_context_item: commit_turn.to_turn_context_item(),
++                    world_state_baseline: WorldStateSnapshot::default(),
++                    prefix: None,
++                    model_info: commit_turn.model_info().as_ref().clone(),
++                    metadata: LocalCompactionMetadata {
++                        input_goal_ids: Default::default(),
++                        message: "unused summary".to_owned(),
++                        compaction_response_id: Some("never-installed-summary".to_owned()),
++                        compaction_model_hash: None,
++                        reviewer_compaction_hash: None,
++                    },
++                    capacity: None,
++                },
++                commit_turn,
++                commit_token,
++            )
++            .await
++    });
++    assert!(
++        tokio::time::timeout(StdDuration::from_millis(10), &mut install)
++            .await
++            .is_err()
++    );
++    token.cancel();
++    drop(state_guard);
++    assert!(!tokio::time::timeout(StdDuration::from_secs(10), install).await??);
++    assert_eq!(
++        session.clone_history().await.annotated_items(),
++        before.annotated_items()
++    );
++    assert_eq!(session.current_window().await, before_window);
++    session.flush_rollout().await?;
++    assert_eq!(std::fs::read(&rollout_path)?, disk_before);
++    session.drain_code_mode_messages().await;
++    session.live_thread().unwrap().shutdown().await?;
++    Ok(())
++}

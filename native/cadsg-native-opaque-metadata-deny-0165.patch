@@ -1,0 +1,407 @@
+diff --git a/codex-rs/windows-sandbox-rs/src/acl.rs b/codex-rs/windows-sandbox-rs/src/acl.rs
+--- a/codex-rs/windows-sandbox-rs/src/acl.rs
++++ b/codex-rs/windows-sandbox-rs/src/acl.rs
+@@ -488,6 +488,28 @@
+             continue;
+         }
+         let hdr = &*(p_ace as *const ACE_HEADER);
++        // Object and callback denials cannot be classified from a SID-only
++        // grant request. Preserve them in the existing Any guard, evaluated
++        // both before and under the object lock.
++        if matches!(scope, DenyAceScope::Any) && matches!(hdr.AceType, 6 | 10 | 12) {
++            if usize::from(hdr.AceSize)
++                < std::mem::size_of::<ACE_HEADER>() + std::mem::size_of::<u32>()
++            {
++                return true;
++            }
++            // Header + Mask is common; the plain ACE's SID offset is not.
++            let raw_mask = std::ptr::read_unaligned(
++                (p_ace as *const u8)
++                    .add(std::mem::size_of::<ACE_HEADER>())
++                    .cast::<u32>(),
++            );
++            let mut mapped_mask = raw_mask;
++            MapGenericMask(&mut mapped_mask, &mapping);
++            if (raw_mask | mapped_mask) & deny_mask != 0 {
++                return true;
++            }
++            continue;
++        }
+         if hdr.AceType != ACCESS_DENIED_ACE_TYPE {
+             continue; // ACCESS_DENIED_ACE_TYPE
+         }
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/cwd_metadata.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning/cwd_metadata.rs
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning/cwd_metadata.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning/cwd_metadata.rs
+@@ -164,6 +164,10 @@
+             .map(|sid| format!("(D;;0x2;;;{sid})"))
+             .unwrap_or_default();
+         let sddl = format!("D:P{deny}(A;OICI;FA;;;{owner})(A;OICI;FA;;;SY)");
++        protect_sddl(path, &sddl);
++    }
++
++    fn protect_sddl(path: &Path, sddl: &str) {
+         unsafe {
+             let mut descriptor = std::ptr::null_mut();
+             assert_ne!(
+@@ -411,4 +415,360 @@
+         }
+         Ok(())
+     }
++
++    // Test-only native conditional-ACE context. SKIP_TOKEN_GROUPS admits an
++    // application SID without SAM lookup, S4U, or process-token changes.
++    struct NativeConditionalContext {
++        resource: windows_sys::Win32::Security::Authorization::AUTHZ_RESOURCE_MANAGER_HANDLE,
++        context: windows_sys::Win32::Security::Authorization::AUTHZ_CLIENT_CONTEXT_HANDLE,
++    }
++    impl Drop for NativeConditionalContext {
++        fn drop(&mut self) {
++            unsafe {
++                if !self.context.is_null() {
++                    windows_sys::Win32::Security::Authorization::AuthzFreeContext(self.context);
++                }
++                if !self.resource.is_null() {
++                    windows_sys::Win32::Security::Authorization::AuthzFreeResourceManager(
++                        self.resource,
++                    );
++                }
++            }
++        }
++    }
++    impl NativeConditionalContext {
++        fn new(sid: *mut c_void) -> Result<Self> {
++            use windows_sys::Win32::Security::Authorization::{
++                AUTHZ_RM_FLAG_NO_AUDIT, AUTHZ_SKIP_TOKEN_GROUPS, AuthzInitializeContextFromSid,
++                AuthzInitializeResourceManager,
++            };
++            let mut value = Self {
++                resource: std::ptr::null_mut(),
++                context: std::ptr::null_mut(),
++            };
++            ensure!(
++                unsafe {
++                    AuthzInitializeResourceManager(
++                        AUTHZ_RM_FLAG_NO_AUDIT,
++                        None,
++                        None,
++                        None,
++                        std::ptr::null(),
++                        &mut value.resource,
++                    )
++                } != 0,
++                "initialize own conditional-ACE context: {}",
++                std::io::Error::last_os_error()
++            );
++            ensure!(
++                unsafe {
++                    AuthzInitializeContextFromSid(
++                        AUTHZ_SKIP_TOKEN_GROUPS,
++                        sid,
++                        value.resource,
++                        std::ptr::null(),
++                        windows_sys::Win32::Foundation::LUID::default(),
++                        std::ptr::null(),
++                        &mut value.context,
++                    )
++                } != 0,
++                "initialize application-SID context: {}",
++                std::io::Error::last_os_error()
++            );
++            Ok(value)
++        }
++        fn check(&self, path: &Path, desired: u32) -> Result<(u32, u32)> {
++            use windows_sys::Win32::Security::Authorization::{
++                AUTHZ_ACCESS_REPLY, AUTHZ_ACCESS_REQUEST, AuthzAccessCheck,
++            };
++            let (descriptor, _) = native_descriptor(path)?;
++            let request = AUTHZ_ACCESS_REQUEST {
++                DesiredAccess: desired,
++                ..Default::default()
++            };
++            let (mut granted, mut audit, mut error) = (0, 0, 0);
++            let mut reply = AUTHZ_ACCESS_REPLY {
++                ResultListLength: 1,
++                GrantedAccessMask: &mut granted,
++                SaclEvaluationResults: &mut audit,
++                Error: &mut error,
++            };
++            ensure!(
++                unsafe {
++                    AuthzAccessCheck(
++                        0,
++                        self.context,
++                        &request,
++                        std::ptr::null_mut(),
++                        descriptor.as_ptr().cast_mut().cast(),
++                        std::ptr::null(),
++                        0,
++                        &mut reply,
++                        std::ptr::null_mut(),
++                    )
++                } != 0,
++                "native conditional access check: {}",
++                std::io::Error::last_os_error()
++            );
++            Ok((granted, error))
++        }
++    }
++    fn native_descriptor(path: &Path) -> Result<(Vec<u32>, u32)> {
++        use windows_sys::Win32::Security::{
++            GROUP_SECURITY_INFORMATION, GetKernelObjectSecurity, OWNER_SECURITY_INFORMATION,
++        };
++        let directory = std::fs::OpenOptions::new()
++            .access_mode(READ_CONTROL)
++            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
++            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
++            .open(path)?;
++        let flags =
++            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
++        let mut needed = 0;
++        unsafe {
++            GetKernelObjectSecurity(
++                directory.as_raw_handle() as _,
++                flags,
++                std::ptr::null_mut(),
++                0,
++                &mut needed,
++            );
++        }
++        ensure!(
++            (20..=1_048_576).contains(&needed),
++            "conditional descriptor size"
++        );
++        let mut data = vec![0_u32; (needed as usize).div_ceil(size_of::<u32>())];
++        ensure!(
++            unsafe {
++                GetKernelObjectSecurity(
++                    directory.as_raw_handle() as _,
++                    flags,
++                    data.as_mut_ptr().cast(),
++                    (data.len() * size_of::<u32>()) as u32,
++                    &mut needed,
++                )
++            } != 0,
++            "read raw conditional descriptor: {}",
++            std::io::Error::last_os_error()
++        );
++        Ok((data, needed))
++    }
++    fn descriptor_bytes(path: &Path) -> Result<Vec<u8>> {
++        let (data, bytes) = native_descriptor(path)?;
++        Ok(
++            unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), bytes as usize) }
++                .to_vec(),
++        )
++    }
++    fn conditional_parent_sddl(owner: &str, subject: &str, denied: u32, complete: bool) -> String {
++        // Missing attributes evaluate UNKNOWN; Windows applies UNKNOWN as a deny.
++        // A later inherited allow proves the denial, not just missing rights.
++        let initial = if complete {
++            METADATA_ACCESS
++        } else {
++            FILE_READ_ATTRIBUTES
++        };
++        format!(
++            "D:P(A;OICI;FA;;;{owner})(A;OICI;FA;;;SY)(A;;0x{initial:x};;;{subject})(XD;ID;0x{denied:x};;;{subject};(@User.CADSGMissing == \"p17\"))(A;ID;0x{denied:x};;;{subject})"
++        )
++    }
++    fn conditional_payload(
++        home: &Path,
++        workspace: &Path,
++        user: &str,
++        namespace: &SandboxNamespace,
++    ) -> Result<Payload> {
++        Ok(serde_json::from_value(serde_json::json!({
++            "version": crate::SETUP_VERSION, "offline_username": namespace.key.offline(),
++            "online_username": namespace.key.online(), "codex_home": home, "command_cwd": workspace,
++            "read_roots": [], "write_roots": [workspace], "proxy_ports": [], "real_user": user,
++        }))?)
++    }
++    #[test]
++    fn opaque_inherited_metadata_deny_is_preserved_by_owned_cwd_materialization() -> Result<()> {
++        let root = tempfile::tempdir()?;
++        let home = root.path().join("home");
++        let worktrees = home.join("worktrees");
++        let parent = worktrees.join("task");
++        let workspace = parent.join("workspace");
++        std::fs::create_dir_all(&workspace)?;
++        let user = crate::runtime_ownership::current_setup_user()?;
++        let namespace = SandboxNamespace::for_user(&home, &user)?;
++        namespace.reserve_owner()?;
++        let subject_string = "S-1-5-21-915763429-1123581321-271828182-4501";
++        let subject = LocalSid::from_string(subject_string)?;
++        let context = NativeConditionalContext::new(subject.as_ptr())?;
++        for path in [&home, &worktrees] {
++            protect_sddl(
++                path,
++                &format!(
++                    "D:P(A;OICI;FA;;;{})(A;OICI;FA;;;SY)(A;;0x100080;;;{subject_string})",
++                    namespace.owner_sid
++                ),
++            );
++        }
++        let sddl =
++            conditional_parent_sddl(&namespace.owner_sid, subject_string, SYNCHRONIZE, false);
++        protect_sddl(&parent, &sddl);
++        let before = descriptor_bytes(&parent)?;
++        assert!(snapshot(&parent).1.iter().any(|ace| ace[0] == 10
++            && ace[1] & 0x10 != 0
++            && u32::from_le_bytes(ace[4..8].try_into().unwrap()) == SYNCHRONIZE
++            && ace.windows(4).any(|bytes| bytes == b"artx")));
++        assert_eq!(context.check(&parent, METADATA_ACCESS)?, (0, 5));
++        // Prove Windows' ACE-order hazard independently, then restore the exact fixture.
++        let expanded = sddl.replacen("D:P", &format!("D:P(A;;0x100080;;;{subject_string})"), 1);
++        protect_sddl(&parent, &expanded);
++        assert_eq!(
++            context.check(&parent, METADATA_ACCESS)?,
++            (METADATA_ACCESS, 0)
++        );
++        protect_sddl(&parent, &sddl);
++        assert_eq!(descriptor_bytes(&parent)?, before);
++        let paths = [&home, &worktrees, &parent, &workspace];
++        let all_before = paths
++            .iter()
++            .map(|path| descriptor_bytes(path))
++            .collect::<Result<Vec<_>>>()?;
++        let payload = conditional_payload(&home, &workspace, &user, &namespace)?;
++        let result = ensure_owned_cwd_parent_metadata(
++            &payload,
++            &namespace,
++            subject.as_ptr(),
++            &mut Vec::new(),
++        );
++        assert!(result.as_ref().err().is_some_and(|error| {
++            error
++                .to_string()
++                .contains("required cwd-parent metadata ACE was not materialized")
++        }));
++        assert_eq!(
++            paths
++                .iter()
++                .map(|path| descriptor_bytes(path))
++                .collect::<Result<Vec<_>>>()?,
++            all_before
++        );
++        assert_eq!(context.check(&parent, METADATA_ACCESS)?, (0, 5));
++        Ok(())
++    }
++    #[test]
++    fn complete_metadata_with_conditional_deny_is_descriptor_noop() -> Result<()> {
++        let root = tempfile::tempdir()?;
++        let home = root.path().join("home");
++        let parent = home.join("worktrees");
++        let workspace = parent.join("workspace");
++        std::fs::create_dir_all(&workspace)?;
++        let user = crate::runtime_ownership::current_setup_user()?;
++        let namespace = SandboxNamespace::for_user(&home, &user)?;
++        namespace.reserve_owner()?;
++        let subject_string = "S-1-5-21-915763429-1123581321-271828182-4501";
++        let subject = LocalSid::from_string(subject_string)?;
++        let context = NativeConditionalContext::new(subject.as_ptr())?;
++        for path in [&home, &parent] {
++            protect_sddl(
++                path,
++                &conditional_parent_sddl(&namespace.owner_sid, subject_string, SYNCHRONIZE, true),
++            );
++        }
++        let paths = [&home, &parent, &workspace];
++        let before = paths
++            .iter()
++            .map(|path| descriptor_bytes(path))
++            .collect::<Result<Vec<_>>>()?;
++        let payload = conditional_payload(&home, &workspace, &user, &namespace)?;
++        assert_eq!(
++            ensure_owned_cwd_parent_metadata(
++                &payload,
++                &namespace,
++                subject.as_ptr(),
++                &mut Vec::new()
++            )?,
++            0
++        );
++        assert_eq!(
++            paths
++                .iter()
++                .map(|path| descriptor_bytes(path))
++                .collect::<Result<Vec<_>>>()?,
++            before
++        );
++        assert_eq!(
++            context.check(&parent, METADATA_ACCESS)?,
++            (METADATA_ACCESS, 0)
++        );
++        Ok(())
++    }
++    #[test]
++    fn conditional_data_only_deny_does_not_block_or_weaken_metadata_grant() -> Result<()> {
++        use windows_sys::Win32::Storage::FileSystem::{FILE_LIST_DIRECTORY, FILE_WRITE_DATA};
++        let root = tempfile::tempdir()?;
++        let home = root.path().join("home");
++        let parent = home.join("worktrees");
++        let workspace = parent.join("workspace");
++        std::fs::create_dir_all(&workspace)?;
++        let canary = workspace.join("private.txt");
++        std::fs::write(&canary, b"conditional-metadata-canary")?;
++        let user = crate::runtime_ownership::current_setup_user()?;
++        let namespace = SandboxNamespace::for_user(&home, &user)?;
++        namespace.reserve_owner()?;
++        let subject_string = "S-1-5-21-915763429-1123581321-271828182-4501";
++        let subject = LocalSid::from_string(subject_string)?;
++        let context = NativeConditionalContext::new(subject.as_ptr())?;
++        protect_sddl(
++            &home,
++            &format!(
++                "D:P(A;OICI;FA;;;{})(A;OICI;FA;;;SY)(A;;0x100080;;;{subject_string})",
++                namespace.owner_sid
++            ),
++        );
++        protect_sddl(
++            &parent,
++            &conditional_parent_sddl(&namespace.owner_sid, subject_string, FILE_WRITE_DATA, false),
++        );
++        let before = snapshot(&parent);
++        let children = [descriptor_bytes(&workspace)?, descriptor_bytes(&canary)?];
++        let deny_before = before
++            .1
++            .iter()
++            .filter(|ace| ace[0] == 10)
++            .cloned()
++            .collect::<Vec<_>>();
++        assert_eq!(deny_before.len(), 1);
++        assert_eq!(context.check(&parent, FILE_WRITE_DATA)?, (0, 5));
++        let payload = conditional_payload(&home, &workspace, &user, &namespace)?;
++        assert_eq!(
++            ensure_owned_cwd_parent_metadata(
++                &payload,
++                &namespace,
++                subject.as_ptr(),
++                &mut Vec::new()
++            )?,
++            1
++        );
++        let after = snapshot(&parent);
++        assert_eq!(after.0, before.0);
++        assert_eq!(
++            after
++                .1
++                .iter()
++                .filter(|ace| ace[0] == 10)
++                .cloned()
++                .collect::<Vec<_>>(),
++            deny_before
++        );
++        assert_eq!(
++            [descriptor_bytes(&workspace)?, descriptor_bytes(&canary)?],
++            children
++        );
++        assert_eq!(
++            context.check(&parent, METADATA_ACCESS)?,
++            (METADATA_ACCESS, 0)
++        );
++        assert_eq!(context.check(&parent, FILE_WRITE_DATA)?, (0, 5));
++        assert_eq!(context.check(&parent, FILE_LIST_DIRECTORY)?, (0, 5));
++        assert_eq!(std::fs::read(&canary)?, b"conditional-metadata-canary");
++        Ok(())
++    }
+ }

@@ -12,6 +12,7 @@ param(
  [string]$BaselinePath,
  [ValidatePattern('^[0-9a-f]{64}$')][string]$ExpectedConfigSha256,
  [string]$RunDirectory,
+ [string]$TraceRoot,
  [switch]$Accessibility,
  [ValidateRange(5,120)][int]$ObservationSeconds=60,
  [ValidateRange(1,120)][int]$WaitSeconds=60
@@ -58,6 +59,7 @@ if($Mode -eq 'PrepareRuntime'){
 $request.app_args=@();if($Accessibility){$request.app_args=@('--force-renderer-accessibility')}
 $request.timeout_seconds=$ObservationSeconds
 if($PSBoundParameters.ContainsKey('ExpectedConfigSha256')){$request.expected_config_sha256=$ExpectedConfigSha256}
+if($PSBoundParameters.ContainsKey('TraceRoot')){$request.trace_root=$TraceRoot}
 if($Mode -eq 'Check'){
  Invoke-Launcher 'check' $request|ConvertTo-Json -Depth 15
  exit 0

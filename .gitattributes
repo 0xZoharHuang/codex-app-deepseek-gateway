@@ -29,3 +29,13 @@ src/codex_app_deepseek/assets/app-launch-baseline.json -text
 src/codex_app_deepseek/assets/launch_isolated_app.ps1 -text
 src/codex_app_deepseek/atomic_io.py -text
 src/codex_app_deepseek/weather_backend.py -text
+
+# Byte-preserved build lock witnesses and historical SDK reader receipts.
+native/build-lock.O165-P17-source.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+native/build-lock.O165-P18-source.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+native/build-lock.O165-P19-source.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+native/runtime-msix-proposal/manifest-reader-validation.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+native/runtime-msix-proposal/manifest-validation-only/initial-manifest-reader-validation.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+# The finalizer diff itself has a checksum-bound trailing context line.
+native/cadsg-native-service-finalizer-0165.patch -text whitespace=-blank-at-eol,-blank-at-eof
+src/codex_app_deepseek/runtime_package.py -text

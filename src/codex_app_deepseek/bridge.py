@@ -9,6 +9,7 @@ import hmac
 from io import BytesIO
 import json
 import math
+import re
 import ssl
 from typing import Callable
 from urllib.parse import urlsplit, unquote
@@ -19,8 +20,10 @@ from aiohttp import web
 from codex_deepseek.protocol import (
     MODEL, PROVIDER, SERIAL_PROVIDER, STRUCTURED_PROVIDER,
     Events, ProtocolError, encode_sse, prepare, validate_response,
+    provider_failure_diagnostic, redact_provider_failure,
 )
 from codex_deepseek.structured import StructuredOutput
+from codex_deepseek.request_metadata import native_request_metadata
 
 from .protocol_state import ProtocolState, incoming_native_history_metadata
 from .image_transport import ImageTransportError, PayloadBudgetExceeded, FileOperationError
@@ -560,12 +563,19 @@ def create_app(
             if body.get("prompt_cache_key") is not None and not isinstance(body["prompt_cache_key"], str):
                 raise ProtocolError("prompt_cache_key must be a string")
             control_adaptations = validate_request_controls(body)
+            try:
+                native_request = native_request_metadata(body, request.headers)
+            except Exception as error:
+                # Observation never changes routing, forwarding or request success.
+                native_request = {
+                    "schema_version": 1, "status": "unavailable", "error_type": type(error).__name__}
             translated = dict(body)
             translated["model"] = MODEL
             evidence = state.evidence_view(translated.get("input"))
             payload, registry = prepare(translated, evidence,
                                         ordinary_default_provider=settings.ordinary_default_provider)
-            adaptations = {**control_adaptations, **adapt_reasoning_context(translated, payload)}
+            adaptations = {**control_adaptations, **adapt_reasoning_context(translated, payload),
+                           "native_request": native_request}
             output_mapping = getattr(registry, "structured_output_mapping", None)
             if output_mapping is not None:
                 adaptations["structured_output_mapping"] = dict(output_mapping)
@@ -597,10 +607,23 @@ def create_app(
         image_refs = False
         image_started = False
         image_terminal = False
+        failure_detail = None
 
-        def observe_response(value):
+        def reject_credential_response_id(value):
+            identifier = value.get("id") if isinstance(value, dict) else None
+            if isinstance(identifier, str) and key and key in identifier:
+                raise ProtocolError("Provider response identity is invalid")
+
+        def remember_response_id(value):
+            reject_credential_response_id(value)
+            events.observe_response_id(value)
+            if events.response_id:
+                state.progress(receipt, events)
+
+        def observe_response(value, *, failed=False):
             if not isinstance(value, dict):
                 return
+            remember_response_id(value)
             incoming = {}
             for name in ("model", "provider"):
                 item = value.get(name)
@@ -613,6 +636,8 @@ def create_app(
                     for name, item in incoming.items()}
             state.observe(receipt, model=safe.get("model"), provider=safe.get("provider"))
             for name, item in incoming.items():
+                if failed:
+                    continue  # A validated failure is not a successful identity attestation.
                 if name == "model" and item not in _OBSERVED_MODELS:
                     raise ProtocolError("Upstream returned an incompatible model: " + item)
                 if name == "provider" and item not in _OBSERVED_PROVIDERS[provider]:
@@ -631,6 +656,11 @@ def create_app(
                 raise ProtocolError('Provider terminal response identity is invalid')
             if events.response_id and response_id != events.response_id:
                 raise ProtocolError('Provider terminal response identity changed')
+            for name in ("model", "provider"):
+                item = value.get(name)
+                if item is not None and (not isinstance(item, str) or not item):
+                    raise ProtocolError("Observed upstream " + name + " must be a nonempty string")
+            remember_response_id(value)
             # Consumption ends at a validated provider terminal. Delivery may
             # still fail later (schema conversion, contradictory SSE, or EOF).
             state.image_transport(receipt, consumption_status='provider_terminal',
@@ -669,6 +699,11 @@ def create_app(
                 headers={"Authorization": "Bearer " + key, "Content-Type": "application/json",
                          "X-Title": "Codex App DeepSeek Gateway"},
             ) as upstream:
+                if image_refs:
+                    candidate = upstream.headers.get('X-Generation-Id')
+                    if isinstance(candidate, str) and re.fullmatch(r'gen-[0-9A-Za-z-]{1,124}', candidate) and key not in candidate:
+                        state.image_transport(receipt, generation_header_candidate={
+                            'id': candidate, 'provenance': 'http_response_header:X-Generation-Id'})
                 upstream_status = upstream.status
                 headers = {**_headers(upstream.headers), "X-Gateway-Request-Id": receipt}
                 if not 200 <= upstream.status < 300:
@@ -685,15 +720,25 @@ def create_app(
                                         content_type=upstream.content_type, headers=headers)
                 if not body.get("stream", False):
                     result = strict_json_loads(await _bounded_read(upstream, settings.max_body_bytes))
-                    observe_response(result)
+                    reject_credential_response_id(result)
                     validate_response(result)
+                    failed = result["status"] == "failed"
+                    original = {"type": "response." + result["status"], "response": result}
+                    if failed:
+                        failure_detail = provider_failure_diagnostic(original)
                     await record_image_terminal(result)
-                    validate_tool_completion({"type": "response." + result["status"], "response": result})
+                    observe_response(result, failed=failed)
+                    if failed:
+                        original = redact_provider_failure(original, key)
+                        result = original["response"]
+                    else:
+                        validate_tool_completion(original)
                     structured.validate(result)
-                    normalized = events.transform({"type": "response." + result["status"], "response": result})
+                    normalized = events.transform(original)
                     result = next(e["response"] for e in reversed(normalized)
                                   if e["type"] == "response." + result["status"])
-                    state.finish(receipt, events.status, upstream.status, events)
+                    state.finish(receipt, events.status, upstream.status, events,
+                                 json.dumps(failure_detail) if failure_detail is not None else None)
                     state.delivery(receipt, "delivered")
                     return web.json_response(result, headers=headers)
                 response = web.StreamResponse(headers={
@@ -704,10 +749,24 @@ def create_app(
                 async for original in sse_events(upstream.content, settings.max_body_bytes):
                     if not isinstance(original, dict):
                         raise ProtocolError("SSE data must contain an event object")
-                    observe_response(original.get("response"))
-                    if original.get('type') in {'response.completed','response.failed','response.incomplete'}:
-                        await record_image_terminal(original.get('response'), original['type'].split('.',1)[1])
-                    validate_tool_completion(original)
+                    reject_credential_response_id(original.get("response"))
+                    kind = original.get("type")
+                    if kind == "response.failed":
+                        failure_detail = provider_failure_diagnostic(original)
+                        validate_response(original.get("response"), "failed")
+                        observe_response(original["response"], failed=True)
+                        await record_image_terminal(original["response"], "failed")
+                        original = redact_provider_failure(original, key)
+                    elif kind == "error":
+                        failure_detail = provider_failure_diagnostic(original)
+                        remember_response_id(original.get("response"))
+                        # This wire translation does not prove remote image consumption ended.
+                        original = redact_provider_failure(original, key)
+                    else:
+                        if kind in {'response.completed','response.incomplete'}:
+                            await record_image_terminal(original.get("response"), kind.split(".", 1)[1])
+                        observe_response(original.get("response"))
+                        validate_tool_completion(original)
                     for event in structured.events(original):
                         normalized = events.transform(event)
                         if events.response_id:
@@ -717,10 +776,13 @@ def create_app(
                         else:
                             for native in normalized:
                                 await response.write(encode_sse(native))
+                    if events.terminal and events.status == "failed":
+                        break  # Failure is final; do not wait for a hung provider EOF.
                 if not events.terminal or terminal_events is None:
                     raise ProtocolError("Upstream disconnected without a terminal Responses event")
                 # Do not publish completion if a later frame contradicts the terminal.
-                state.finish(receipt, events.status, upstream.status, events)
+                state.finish(receipt, events.status, upstream.status, events,
+                             json.dumps(failure_detail) if failure_detail is not None else None)
                 for native in terminal_events:
                     await response.write(encode_sse(native))
                 await response.write_eof()
@@ -747,12 +809,15 @@ def create_app(
             for secret in secrets:
                 if secret:
                     detail = detail.replace(secret, "[REDACTED]")
-            state.finish(receipt, "adapter_error", upstream_status, events, detail)
+            receipt_detail = (json.dumps({"message": detail, "provider_failure": failure_detail})
+                              if failure_detail is not None else detail)
+            state.finish(receipt, "adapter_error", upstream_status, events, receipt_detail)
             state.delivery(receipt, "failed")
             if response is not None and response.prepared:
                 failure = {"type": "response.failed", "sequence_number": events.sequence, "response": {
-                    "id": events.response_id or "resp_gateway_failure", "status": "failed",
-                    "error": {"code": "provider_compatibility", "message": detail}, "output": []}}
+                    "status": "failed", "error": {"code": "provider_compatibility", "message": detail}, "output": []}}
+                if events.response_id is not None:
+                    failure["response"]["id"] = events.response_id
                 try:
                     await response.write(encode_sse(failure))
                     await response.write_eof()

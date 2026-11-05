@@ -21,7 +21,7 @@ from codex_deepseek.protocol import MODEL, encode_sse
 MARKER = "CDAG_FAULT_COUNTER_V1"
 KINDS = {"http_429", "http_503", "http_401", "http_413", "text_cut", "tool_incomplete_cut",
          "tool_done_cut", "after_effect_503", "live_tool_incomplete_cut", "live_tool_done_cut",
-         "synthetic_success", "passthrough"}
+         "synthetic_success", "passthrough", "response_failed_unknown", "flat_error"}
 MAX_BODY = 2 * 1024 * 1024
 _SYNTHETIC_SOURCE = Path(__file__).with_name("synthetic_reasoning.py")
 _SYNTHETIC_SHA = "1f0b8181b6feebdaed0c9d482dc72746b5d94bd76606e03277c1e35ad78c0b6e"
@@ -334,7 +334,7 @@ class FaultHarness:
             fire=p.remaining>0 and (p.kind!="after_effect_503"
                 or self.ledger.count(p.case_id)>0 and bool(result_calls))
             if fire and not p.kind.startswith("live_"):
-                if p.kind in {"tool_incomplete_cut","tool_done_cut"} and len(self.counter_names(payload))!=1:
+                if p.kind in {"tool_incomplete_cut","tool_done_cut","response_failed_unknown"} and len(self.counter_names(payload))!=1:
                     return web.json_response({"error":"Exactly one advertised fixture counter function is required; no other tool synthesized"},status=409)
                 p.remaining-=1;p.fired+=1
                 self.event("synthetic_fault",fault=p.kind,case_sha256=digest(p.case_id))
@@ -366,6 +366,16 @@ class FaultHarness:
         rid="fixture-response-"+uuid.uuid4().hex
         response=web.StreamResponse(headers={"Content-Type":"text/event-stream","X-Fixture-Mode":"synthetic"})
         await response.prepare(request)
+        if p.kind=="flat_error":
+            error={"type":"error","code":"server_error",
+                   "message":"Synthetic flat-error fixture "+digest(self.fixture["nonce"])[:12]+":"+digest(p.case_id)[:12],
+                   "param":None}
+            await response.write(encode_sse(error))
+            self.event("synthetic_failure_terminal",fault=p.kind,wire_type="error",
+                       thread_sha256=digest(p.thread_id),case_sha256=digest(p.case_id),
+                       response_id_sha256=None,completed_tool_events=0,model_contacted=False)
+            await response.write_eof()
+            return response
         await response.write(encode_sse({"type":"response.created","response":{"id":rid,"status":"in_progress","output":[]}}))
         # Prefix only scripted output; real provider streams remain untouched.
         for event in synthetic_reasoning_prefix(rid):
@@ -374,6 +384,22 @@ class FaultHarness:
             message={"id":"fixture-message","type":"message","role":"assistant","status":"completed",
                      "content":[{"type":"output_text","text":"Synthetic fixture recovery only.","annotations":[]}]}
             await response.write(encode_sse({"type":"response.completed","response":{"id":rid,"status":"completed","output":[synthetic_reasoning_item(rid),message]}}))
+        elif p.kind=="response_failed_unknown":
+            # A completed-looking snapshot is not an output_item.done dispatch.
+            # Use only the same uniquely advertised counter admitted above.
+            name=next(iter(self.counter_names(payload)))
+            item={"id":"fixture-failed-item-"+uuid.uuid4().hex,"type":"function_call",
+                  "call_id":"fixture-failed-call-"+uuid.uuid4().hex,"name":name,
+                  "arguments":json.dumps({"case_id":p.case_id}),"status":"completed"}
+            error={"code":"image_file_too_large",
+                   "message":"Synthetic failed-response fixture "+digest(self.fixture["nonce"])[:12]+":"+digest(p.case_id)[:12]}
+            await response.write(encode_sse({"type":"response.failed","response":{
+                "id":rid,"status":"failed","model":"unknown","provider":"unknown",
+                "output":[item],"error":error}}))
+            self.event("synthetic_failure_terminal",fault=p.kind,wire_type="response.failed",
+                       thread_sha256=digest(p.thread_id),case_sha256=digest(p.case_id),
+                       response_id_sha256=digest(rid),snapshot_call_id_sha256=digest(item["call_id"]),
+                       snapshot_name_sha256=digest(name),completed_tool_events=0,model_contacted=False)
         elif p.kind=="text_cut":
             await response.write(encode_sse({"type":"response.output_item.added","output_index":1,
                 "item":{"id":"fixture-message","type":"message","role":"assistant","status":"in_progress","content":[]}}))

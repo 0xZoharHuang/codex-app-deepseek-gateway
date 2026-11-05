@@ -171,14 +171,19 @@ def test_current_0165_recipe_is_a_single_four_target_native_producer():
     six = five + ["guardian-provider-transport-0165.patch"]
     names = [row["file"] for row in lock["patches"]]
     seven = six + ["migration-checksum-eol-0165.patch"]
-    assert names in (five, six, seven)
+    nine = seven + ["cadsg-request-capacity-port-0165.patch",
+                    "cadsg-request-capacity-cancel-0165.patch"]
+    ten = nine + ["windows-host-boundaries-0165.patch"]
+    assert names == ten
     expected_source = {
         5: "3830ef7a9318ff1c6016ecaa6840805250c527c9a2b75b1e77b6b9c334210548",
         6: "5d10fd97306cd2d11a1bc5d4ae2327468240bb650639cc93c39d19b2b7b58edb",
         7: "1125f5c87733fb267177522de600918b06a0a41489543b57c721a3bcce6d7c56",
+        9: "3c17e4f4714cf20b8ba032cd6ea8f94d0a4743312c08cf7f6686198d5740dfb5",
+        10: "495125857fc45dc71a780d16832f2b2132ad129aea72f0353ebd12adeafc0c9b",
     }
     assert lock["prepared_source_sha256"] == expected_source[len(names)]
-    assert lock["prepared_source_files"] == 9516
+    assert lock["prepared_source_files"] == 9518
     for row in lock["patches"]:
         assert build.sha(native / row["file"]) == row["sha256"]
     command, = build.build_commands(Path("pinned-rust"),lock["binaries"])
@@ -469,3 +474,267 @@ def test_jobs_cli_rejects_outside_lock_before_any_tool_or_write(tmp_path, monkey
 def test_job_policy_rejects_json_boolean_as_integer():
     with pytest.raises(ValueError, match="locked maximum"):
         build.build_jobs_policy(True)
+
+
+
+def test_p8_source_candidate_preserves_exact_p7_and_uses_rich_inventory_identity():
+    native = Path(__file__).parents[1] / "native"
+    original = (native / "build-lock.O165-P7-original.json").read_bytes()
+    assert hashlib.sha256(original).hexdigest() == "da4e194baa449c3caa4457021770876d4ddc5d663869995bd0fb1cae6eb497e6"
+    p7 = json.loads(original)
+    p8 = json.loads((native / "build-lock.O165-P8-source.json").read_bytes())
+    assert len(p7["patches"]) == 7 and p8["patches"][:7] == p7["patches"]
+    changed = {"patches", "prepared_source_sha256", "prepared_source_files", "cargo_lock_sha256"}
+    assert {k:v for k,v in p8.items() if k not in changed} == {
+        k:v for k,v in p7.items() if k not in changed}
+    assert p8["patches"][-2:] == [
+        {"file":"cadsg-request-capacity-port-0165.patch",
+         "sha256":"0804fb004cbb8bcba5fcf1e29e542ee29c002c49ce3f05818eb7dbde76d3e564"},
+        {"file":"cadsg-request-capacity-cancel-0165.patch",
+         "sha256":"63beeb01233e21431513fcdb063e7565423790e731febfce12b249bb2e3ee225"},
+    ]
+    assert p8["cargo_lock_sha256"] == "24ec41c0cad0145b14a2cda3a5b343540dfcb7043c24bef32a65ae46edc7f980"
+    candidate = json.loads((native / "capacity-P8-source-candidate.json").read_bytes())
+    assert candidate["candidate_lock_sha256"] == hashlib.sha256((native / "build-lock.O165-P8-source.json").read_bytes()).hexdigest()
+    assert candidate["prepared_source_sha256"] == p8["prepared_source_sha256"]
+    assert candidate["prepared_source_files"] == 9518 and candidate["scope_union_paths"] == 23
+    assert candidate["app_gui_qualified"] is False and candidate["native_runtime_qualified"] is False
+    assert candidate["compiled"] is False and candidate["loaded_P7_changed"] is False
+    # No prepare/build is invoked here; real source/native/App gates stay separate.
+
+
+
+def test_p9_host_source_proposal_preserves_exact_p8_and_remains_unqualified():
+    native = Path(__file__).parents[1] / "native"
+    p8_raw = (native / "build-lock.O165-P8-source.json").read_bytes()
+    assert hashlib.sha256(p8_raw).hexdigest() == "9d918cfc5a694b91463cf724deed26bfaecce1a48bea63c362c2814f1eb7fcb4"
+    p8 = json.loads(p8_raw)
+    p9_raw = (native / "build-lock.json").read_bytes()
+    p9 = json.loads(p9_raw)
+    assert len(p9["patches"]) == 10 and p9["patches"][:9] == p8["patches"]
+    changed = {"patches", "prepared_source_sha256"}
+    assert {k:v for k,v in p9.items() if k not in changed} == {
+        k:v for k,v in p8.items() if k not in changed}
+    assert p9["patches"][-1] == {
+        "file":"windows-host-boundaries-0165.patch",
+        "sha256":"c92180906b471db6c39ecbd057cb928b1071153c1fe57c02bb69cf6ffb0656df"}
+    candidate = json.loads((native / "host-P9-source-candidate.json").read_bytes())
+    assert candidate["candidate_lock_sha256"] == hashlib.sha256(p9_raw).hexdigest()
+    assert candidate["prepared_source_sha256"] == p9["prepared_source_sha256"]
+    assert candidate["prepared_source_files"] == 9518
+    assert candidate["host_0165_patch_sha256"] == p9["patches"][-1]["sha256"]
+    paths = {row["path"] for row in candidate["host_scope"]}
+    assert paths == {"codex-rs/windows-sandbox-rs/src/" + name for name in (
+        "private_acl_lock.rs", "identity.rs", "setup.rs", "desktop.rs",
+        "elevated/runner_client.rs")}
+    assert len(candidate["required_native_mechanism_nodes"]) == 16
+    assert len(set(candidate["required_native_mechanism_nodes"])) == 16
+    assert candidate["native_nodes_source_derived_not_binary_verified"] is True
+    assert candidate["compiled"] is False and candidate["native_unit_executed"] is False
+    assert candidate["service_station_qualified"] is False and candidate["App_GUI_qualified"] is False
+
+
+def test_p10_capacity_source_candidate_preserves_p9_and_release_boundary():
+    native = Path(__file__).parents[1] / "native"
+    p9_raw = (native / "build-lock.O165-P9-source.json").read_bytes()
+    assert hashlib.sha256(p9_raw).hexdigest() == "b50a9d41b30c902a77fa4fa7193b5a4e1a1d62117341c73c5768bf407b7af309"
+    assert (native / "build-lock.json").read_bytes() == p9_raw
+    p9 = json.loads(p9_raw)
+    path = native / "build-lock.O165-P10-source.json"
+    p10_raw = path.read_bytes()
+    p10 = json.loads(p10_raw)
+    report = json.loads((native / "capacity-P10-source-candidate.json").read_bytes())
+    assert len(p10["patches"]) == 11 and p10["patches"][:-1] == p9["patches"]
+    assert p10["patches"][-1] == {
+        "file": "cadsg-capacity-p35-projection-reset-0165.patch",
+        "sha256": "420eaaefb578ea811e1b58d9fe7ecbf8404340e39357b306f4e496393d602cca"}
+    changed = {"patches", "prepared_source_sha256", "prepared_source_files"}
+    assert {k:v for k,v in p10.items() if k not in changed} == {
+        k:v for k,v in p9.items() if k not in changed}
+    assert p10["prepared_source_sha256"] == "4906fe2eb05e93728f5737e4b15c57bd3e03475439951e17dfc79f50de16cd03"
+    assert p10["prepared_source_files"] == 9524
+    assert report["candidate_lock_sha256"] == hashlib.sha256(p10_raw).hexdigest()
+    assert report["prepared_source_sha256"] == p10["prepared_source_sha256"]
+    assert report["prepared_source_files"] == p10["prepared_source_files"]
+    assert report["cargo_lock_sha256"] == p9["cargo_lock_sha256"]
+    for row in p10["patches"]:
+        assert build.sha(native / row["file"]) == row["sha256"]
+    paths = {row["path"] for row in report["scope"]}
+    core = {"compact.rs", "compact_capacity_projection.rs", "compact_capacity_projection_tests.rs",
+            "compact_tests.rs", "compact_token_budget.rs", "session/mod.rs", "session/turn.rs",
+            "session/capacity_reset_continuation.rs", "session/capacity_reset_continuation_tests.rs"}
+    platform = {"desktop.rs", "service_station.rs", "service_station_tests.rs"}
+    assert paths == {"codex-rs/core/src/" + name for name in core} | {
+        "codex-rs/windows-sandbox-rs/src/" + name for name in platform}
+    assert sum(row["before_sha256"] is None for row in report["scope"]) == 6
+    assert len(report["required_native_mechanism_nodes"]) == 67
+    assert len(set(report["required_native_mechanism_nodes"])) == 67
+    assert report["native_nodes_source_derived_not_binary_verified"] is True
+    for field in ("compiled", "native_unit_executed", "native_runtime_qualified",
+                  "App_GUI_qualified", "active_P9_lock_changed", "loaded_P7_changed",
+                  "release_gate_opened", "pure_protocol_dependency_changed",
+                  "cds_runtime_launcher_store_supervisor_copied", "new_runtime_tool_or_agent_loop"):
+        assert report[field] is False
+    spec = importlib.util.spec_from_file_location("p10_release_boundary",
+        Path(__file__).parents[1] / "scripts/package_native_release.py")
+    pack = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pack)
+    with pytest.raises(ValueError, match="patch topology"):
+        pack.single_graph(p10, native)
+
+
+def test_p11_interactive_bootstrap_preserves_capacity_candidate_and_release_boundary():
+    native = Path(__file__).parents[1] / "native"
+    p10_raw = (native/"build-lock.O165-P10-source.json").read_bytes()
+    assert hashlib.sha256(p10_raw).hexdigest() == "d8ba1cf5efaf60ea37050a7af81ababd7f759a01c833f5d054911c3f5ebcad21"
+    p10 = json.loads(p10_raw)
+    p11_raw = (native/"build-lock.O165-P11-source.json").read_bytes()
+    p11 = json.loads(p11_raw)
+    assert len(p11["patches"]) == 12 and p11["patches"][:-1] == p10["patches"]
+    assert p11["patches"][-1] == {
+        "file":"windows-interactive-runner-bootstrap-0165.patch",
+        "sha256":"7913a0e4027e0e98296528afa4be1a0588690db11c11d02567532ba50a0259ae"}
+    changed = {"patches","prepared_source_sha256"}
+    assert {k:v for k,v in p11.items() if k not in changed} == {
+        k:v for k,v in p10.items() if k not in changed}
+    assert p11["prepared_source_files"] == 9524
+    assert p11["prepared_source_sha256"] == "c9d94abbe9d64e808a427e59332f7b4af156afc01054ee0330c286e36b2f168a"
+    for row in p11["patches"]:
+        assert build.sha(native/row["file"]) == row["sha256"]
+    report = json.loads((native/"interactive-P11-source-candidate.json").read_bytes())
+    capacity = json.loads((native/"capacity-P10-source-candidate.json").read_bytes())
+    assert report["candidate_lock_sha256"] == hashlib.sha256(p11_raw).hexdigest()
+    assert report["prepared_source_sha256"] == p11["prepared_source_sha256"]
+    assert report["required_capacity_nodes"] == capacity["required_native_mechanism_nodes"]
+    assert report["required_bootstrap_node"] == "desktop::service_station::tests::actual_interactive_native_null_bootstrap_readonly_without_station_grant"
+    assert {row["path"] for row in report["scope"]} == {
+        "codex-rs/windows-sandbox-rs/src/"+name for name in (
+            "desktop.rs","elevated/runner_client.rs","service_station_tests.rs")}
+    assert report["same_before_bytes_as_qualified0164_sdk"] is True
+    assert report["qualified_0164_sdk_is_not_native0165_or_App_qualification"] is True
+    assert report["no_20022_visible_station_grant"] is True
+    for name in ("compiled","native_unit_executed","native_runtime_qualified",
+                 "App_GUI_qualified","active_P9_lock_changed","loaded_P7_changed",
+                 "release_gate_opened","pure_protocol_dependency_changed"):
+        assert report[name] is False
+    assert hashlib.sha256((native/"build-lock.json").read_bytes()).hexdigest() == "b50a9d41b30c902a77fa4fa7193b5a4e1a1d62117341c73c5768bf407b7af309"
+    spec = importlib.util.spec_from_file_location("p11_release_boundary",
+        Path(__file__).parents[1]/"scripts/package_native_release.py")
+    pack = importlib.util.module_from_spec(spec);spec.loader.exec_module(pack)
+    with pytest.raises(ValueError,match="patch topology"):
+        pack.single_graph(p11,native)
+
+
+def test_own_runtime_package_targets_are_explicit_and_same_native_graph():
+    expected = {
+        **build.NATIVE_TARGETS,
+        "codex-windows-sandbox-service.exe": ("codex-windows-sandbox-service", "codex-windows-sandbox-service"),
+        "codex-code-mode-host.exe": ("codex-code-mode-host", "codex-code-mode-host"),
+    }
+    assert build.NATIVE_PACKAGE_TARGETS == expected
+    names = list(expected)
+    with pytest.raises(ValueError):
+        build.build_commands(Path("rust"), names)
+    command, = build.build_commands(Path("rust"), names, jobs=1, runtime_package=True)
+    assert command.count("-p") == 4 and command.count("--bin") == 6 and "--bins" not in command
+    assert command[:6] == [str(Path("rust")/"cargo.exe"),"build","--locked","--release","--jobs","1"]
+    for invalid in [names[:-1],names+[names[-1]],["codex-windows-sandbox-service.exe"]]:
+        with pytest.raises(ValueError):
+            build.build_commands(Path("rust"), invalid, runtime_package=True)
+
+
+def test_p12_own_runtime_service_source_keeps_normal_profile_and_release_gate_closed():
+    native = Path(__file__).parents[1] / "native"
+    p11 = json.loads((native / "build-lock.O165-P11-source.json").read_bytes())
+    p12_raw = (native / "build-lock.O165-P12-source.json").read_bytes()
+    p12 = json.loads(p12_raw)
+    assert p12_raw == (json.dumps(p12, indent=2) + "\n").encode()
+    assert p12["release_environment"] == p11["release_environment"] == build.PROFILE
+    assert len(p12["patches"]) == 13 and p12["patches"][:-1] == p11["patches"]
+    assert p12["package_mode"] == "cadsg-native-msix"
+    assert set(p12["binaries"]) == set(build.NATIVE_PACKAGE_TARGETS)
+    assert p12["prepared_source_files"] == 9525
+    assert p12["prepared_source_sha256"] == "503a27225346c4017bcf060909325c7a46d4fccd84c64db34d87340328d35d0e"
+    for row in p12["patches"]:
+        assert build.sha(native / row["file"]) == row["sha256"]
+    command, = build.build_commands(Path("rust"), p12["binaries"], jobs=1, runtime_package=True)
+    assert command.count("--bin") == 6 and "--bins" not in command
+    report = json.loads((native / "runtime-service-P12-source-candidate.json").read_bytes())
+    assert report["candidate_lock_sha256"] == hashlib.sha256(p12_raw).hexdigest()
+    assert len(report["scope"]) == 38
+    assert sum(row["before"] is None for row in report["scope"]) == 1
+    assert report["normal_build_profile_unchanged"] is True
+    assert report["native_package_name"] == "CADSG.NativeRuntime"
+    assert report["registry_key"] == r"SOFTWARE\CADSG\WindowsSandboxService"
+    for flag in ("compiled", "native_unit_executed", "native_runtime_qualified", "App_GUI_qualified",
+                 "release_gate_opened", "active_P9_lock_changed", "loaded_P7_changed", "stock_owner_record_changed",
+                 "stock_App_changed", "deployment_performed", "trust_or_certificate_changed"):
+        assert report[flag] is False
+    assert hashlib.sha256((native / "build-lock.json").read_bytes()).hexdigest() == "b50a9d41b30c902a77fa4fa7193b5a4e1a1d62117341c73c5768bf407b7af309"
+    spec = importlib.util.spec_from_file_location("p12_release_boundary", Path(__file__).parents[1] / "scripts/package_native_release.py")
+    pack = importlib.util.module_from_spec(spec); spec.loader.exec_module(pack)
+    # Historical P12 is rejected at the newer six-program exact-lock admission.
+    with pytest.raises(ValueError, match=r"^Six-target source bundle must match an explicitly reviewed P16 lock or reviewed P17 lock or reviewed P18 lock or reviewed P19 lock$"):
+        pack.single_graph(p12, native)
+    # Reducing the output declaration cannot bypass the independent source gate.
+    with pytest.raises(ValueError, match="patch topology"):
+        pack.single_graph({**p12, "binaries": list(build.NATIVE_TARGETS)}, native)
+
+
+def test_p13_repairs_service_roles_and_cleanup_without_changing_native_plan_or_profile():
+    native = Path(__file__).parents[1] / "native"
+    p12 = json.loads((native / "build-lock.O165-P12-source.json").read_bytes())
+    raw = (native / "build-lock.O165-P13-source.json").read_bytes()
+    p13 = json.loads(raw)
+    assert raw == (json.dumps(p13, indent=2) + "\n").encode()
+    assert {k: v for k, v in p13.items() if k not in {"patches", "prepared_source_sha256"}} == {
+        k: v for k, v in p12.items() if k not in {"patches", "prepared_source_sha256"}}
+    assert len(p13["patches"]) == 14 and p13["patches"][:-1] == p12["patches"]
+    assert p13["prepared_source_sha256"] == "bc80e68da4705fb1e6761fca0e4990078bded9201d42e8551f7e449114e8be31"
+    assert p13["prepared_source_files"] == 9525 and p13["release_environment"] == build.PROFILE
+    for row in p13["patches"]:
+        assert build.sha(native / row["file"]) == row["sha256"]
+    report = json.loads((native / "runtime-service-P13-source-candidate.json").read_bytes())
+    prior = json.loads((native / "runtime-service-P12-source-candidate.json").read_bytes())
+    assert report["candidate_lock_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert report["same_73_planned_native_names"] == prior["required_native_nodes_source_derived"]
+    assert len(report["same_73_planned_native_names"]) == 73
+    assert {row["path"] for row in report["scope"]} == {
+        "codex-rs/windows-sandbox-rs/src/" + x for x in (
+            "namespace_coordination.rs", "uninstall_windows.rs", "runtime_ownership_tests.rs")}
+    assert report["coordination_mutex_enabled_authority_unchanged"] is True
+    assert report["cleanup_home_compares_same_canonical_form"] is True
+    assert report["missing_home_record_only_cleanup_preserved"] is True
+    assert report["original_P12_source_and_evidence_preserved"] is True
+    for name in ("compiled", "native_unit_executed", "App_GUI_qualified", "release_gate_open", "active_P9_changed"):
+        assert report[name] is False
+
+
+def test_p14_finalizer_and_doctor_contract_keeps_prior_source_and_release_boundaries():
+    native = Path(__file__).parents[1] / "native"
+    p13 = json.loads((native / "build-lock.O165-P13-source.json").read_bytes())
+    raw = (native / "build-lock.O165-P14-source.json").read_bytes(); p14 = json.loads(raw)
+    assert raw == (json.dumps(p14, indent=2) + "\n").encode()
+    assert {k:v for k,v in p14.items() if k not in {"patches", "prepared_source_sha256"}} == {
+        k:v for k,v in p13.items() if k not in {"patches", "prepared_source_sha256"}}
+    assert len(p14["patches"]) == 15 and p14["patches"][:-1] == p13["patches"]
+    assert p14["prepared_source_sha256"] == "61974cd36d19f0f8ff5b5172986658d5a415051b2999d68bc0a255b3a7c972fe"
+    assert p14["prepared_source_files"] == 9525 and p14["release_environment"] == build.PROFILE
+    for row in p14["patches"]:
+        assert build.sha(native / row["file"]) == row["sha256"]
+    report = json.loads((native / "runtime-service-P14-source-candidate.json").read_bytes())
+    prior = json.loads((native / "runtime-service-P13-source-candidate.json").read_bytes())
+    assert report["candidate_lock_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert report["same_73_planned_native_names"] == prior["same_73_planned_native_names"]
+    assert len(report["scope"]) == 9
+    assert report["additional_existing_service_nodes"] == [
+        "registered_runtime::removal::tests::finalizer_script_parses_and_native_bindings_compile",
+        "registered_runtime::removal::tests::finalizer_preserves_utf8_plan_and_requires_commit_and_stdin_eof"]
+    for field in ("actual_binary_list_verified", "unknown_namespace_stock_lookup_fallback",
+                  "actual_PS_cleanup_body_or_SAM_invoked", "compiled", "native_unit_executed",
+                  "App_GUI_qualified", "release_gate_open", "active_P9_changed"):
+        assert report[field] is False
+    for field in ("finalizer_all_record_accounts_exact_names_and_SID", "namespace_CAS_for_Core_and_parent",
+                  "Legacy_true_missing_home_watchers_restored", "Registered_original_missing_credentials_limit_preserved",
+                  "doctor_queries_only_owned_native_factory_names", "shared_native_setup_mutex_preserved"):
+        assert report[field] is True

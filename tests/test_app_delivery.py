@@ -713,3 +713,44 @@ def test_legacy_mcp_conflict_precedes_catalog_policy_and_provider_publication(fi
     with pytest.raises(tools.NativeToolsConflict, match="Legacy"):
         delivery.configure(f.installation.root, f.catalog, app.sha(f.catalog), backend=f.backend)
     assert config.read_bytes() == original and not (f.installation.data / "app-catalogs").exists()
+
+
+def test_explicit_trace_root_survives_installed_preflight_and_powershell_argv(fixture, tmp_path, monkeypatch):
+    f = fixture; configure(f)
+    monkeypatch.setattr(delivery, "owned_gateway", lambda unused: healthy_gateway(f))
+    root = tmp_path / "trace container"
+    checked = delivery.check(f.installation.root, backend=f.backend, trace_root=root)
+    assert checked["request"]["trace_root"] == str(root) and not root.exists()
+    calls = []
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(returncode=2, stdout=json.dumps({"status": "observation_timeout"}))
+    delivery.launch(f.installation.root, backend=f.backend, trace_root=root, run=run)
+    assert len(calls) == 1 and calls[0][0][calls[0][0].index("-TraceRoot") + 1] == str(root)
+    assert "env" not in calls[0][1] and not root.exists()
+
+
+def test_cli_explicit_trace_root_is_forwarded_only_to_requested_launch(monkeypatch, tmp_path, capsys):
+    calls = []
+    monkeypatch.setattr(delivery, "launch", lambda *a, **k: calls.append((a, k)) or {"status": "fixture"})
+    root = tmp_path / "trace"
+    assert cli.main(["app-launch", "--install-root", "owned", "--trace-root", str(root)]) == 0
+    assert len(calls) == 1 and calls[0][1]["trace_root"] == root
+    assert not root.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="actual Windows PowerShell request transport")
+@pytest.mark.parametrize("trace", [None, "E:\\Owned private evidence\\trace"])
+def test_powershell_passes_only_explicit_trace_root_without_app_activation(tmp_path, trace):
+    capture = tmp_path / "request.json"; fake = tmp_path / "fake.py"
+    fake.write_text('import sys,base64,json\nfrom pathlib import Path\nr=json.loads(base64.b64decode(sys.argv[sys.argv.index("--request-base64")+1]))\nPath('+repr(str(capture))+').write_text(json.dumps(r))\nprint("{}")\n')
+    shim = tmp_path / "fake-python.cmd"
+    shim.write_bytes(('@echo off\r\n"'+sys.executable+'" -I "'+str(fake)+'" %*\r\n').encode())
+    baseline = tmp_path / "baseline.json"; baseline.write_text('{}')
+    manifest = tmp_path / "manifest.json"; manifest.write_text('{}')
+    args = ['powershell.exe','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',str(delivery.assets()[1]),'-Mode','Check','-PythonPath',str(shim),'-BaselinePath',str(baseline),'-NativeManifest',str(manifest),'-NativeManifestSha256','b'*64]
+    if trace is not None: args += ['-TraceRoot', trace]
+    run = subprocess.run(args, capture_output=True, text=True, errors='replace', timeout=30)
+    assert run.returncode == 0, run.stderr
+    request = json.loads(capture.read_text())
+    assert (request.get('trace_root') == trace) if trace is not None else ('trace_root' not in request)

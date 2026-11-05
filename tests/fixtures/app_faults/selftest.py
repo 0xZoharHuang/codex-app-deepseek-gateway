@@ -40,6 +40,13 @@ async def main():
                 if thread_id is not None:headers["thread-id"]=thread_id
                 async with client.post(ready["gateway_url"]+"/responses",json=payload or body(),headers=headers) as response:
                     return response.status,dict(response.headers),await response.text()
+            def receipt(headers):
+                ref=next((value for name,value in headers.items()
+                          if name.lower()=="x-gateway-request-id"),None)
+                assert isinstance(ref,str) and ref, "No exact gateway request receipt header"
+                row=harness.state.receipt(ref)
+                assert row["id"]==ref
+                return row
             async def control(command):
                 async with client.post(ready["control_url"],json=command,headers=ctrl) as response:
                     result=await response.json();assert response.status==200,result;return result
@@ -54,7 +61,7 @@ async def main():
                 harness.arm("http_"+str(code),TARGET);previous=harness.requests
                 status,headers,text=await request()
                 assert status==code and harness.requests==previous+1
-                assert harness.state.list_receipts()[-1]["status"]=="upstream_error"
+                assert receipt(headers)["status"]=="upstream_error"
                 if code==429:assert headers["Retry-After"]=="1"
             results["synthetic_http_failures"]="passed"
             harness.arm("text_cut",TARGET);status,_,text=await request();events=frames(text)
@@ -82,8 +89,62 @@ async def main():
             status,_,_=await request(unknown)
             assert status==409 and harness.plan.fired==0 and harness.plan.remaining==1
             results["arbitrary_tool_synthesis_refused"]="passed"
+            for kind in ("response_failed_unknown","flat_error"):
+                fault_plan=harness.arm(kind,TARGET)
+                status,_,_=await request(thread_id="another-thread")
+                assert status==409 and harness.plan.remaining==1 and harness.plan.fired==0
+                if kind=="response_failed_unknown":
+                    absent=body()
+                    for tool in absent["tools"]:tool["description"]="not a fixture counter"
+                    status,_,_=await request(absent)
+                    assert status==409 and harness.plan.remaining==1 and harness.plan.fired==0
+                status,headers,text=await request();events=frames(text)
+                assert status==200 and events[-1]["type"]=="response.failed"
+                assert not any(e["type"]=="response.output_item.done"
+                               and e.get("item",{}).get("type")=="function_call" for e in events)
+                assert not any(e["type"]=="response.completed" for e in events)
+                final=events[-1]["response"]
+                row=receipt(headers)
+                assert final["status"]=="failed" and row["status"]=="failed"
+                assert harness.plan.fired==1 and harness.plan.remaining==0
+                assert harness.ledger.count(fault_plan["case_id"])==0
+                proof=next(e for e in reversed(harness.events) if e["event"]=="synthetic_failure_terminal")
+                assert proof["thread_sha256"]==f.digest(TARGET) and proof["case_sha256"]==f.digest(fault_plan["case_id"])
+                assert proof["completed_tool_events"]==0 and proof["model_contacted"] is False
+                detail=json.loads(row["detail"])
+                if kind=="response_failed_unknown":
+                    assert final["model"]==final["provider"]=="unknown"
+                    snapshot=final["output"]
+                    assert len(snapshot)==1 and snapshot[0]["name"]=="record_effect" and snapshot[0]["status"]=="completed"
+                    assert json.loads(snapshot[0]["arguments"])=={"case_id":fault_plan["case_id"]}
+                    assert row["response_id"]==final["id"] and f.digest(final["id"])==proof["response_id_sha256"]
+                    assert detail["event_type"]=="response.failed" and detail["error_code"]=="image_file_too_large"
+                else:
+                    assert len(events)==1 and "id" not in final and row["response_id"] is None
+                    assert final["output"]==[] and proof["response_id_sha256"] is None
+                    assert detail["event_type"]=="error" and detail["error_code"]=="server_error"
+                assert final["error"]["message"] not in row["detail"]
+                assert not credential_calls and harness.state.db.execute(
+                    "SELECT COUNT(*) FROM completed_native_evidence").fetchone()[0]==0
+                results[kind+"_not_completed_or_tool_dispatched"]="passed_protocol_only_not_App_GUI"
+            # Bind the isolated counter child to the parent's actual imported
+            # packages; source tests must not fall back to a stale editable install.
+            app_module=pathlib.Path(sys.modules["codex_app_deepseek.bridge"].__file__).resolve()
+            cds_module=pathlib.Path(sys.modules["codex_deepseek.protocol"].__file__).resolve()
+            child_bootstrap="""import hashlib,pathlib,runpy,sys
+app_root,cds_root,app_sha,cds_sha,*argv=sys.argv[1:]
+sys.path[:0]=[app_root,cds_root]
+import codex_app_deepseek.bridge as app_bridge
+import codex_deepseek.protocol as cds_protocol
+for module,expected in ((app_bridge,app_sha),(cds_protocol,cds_sha)):
+ assert hashlib.sha256(pathlib.Path(module.__file__).read_bytes()).hexdigest()==expected, 'Counter child package source differs'
+sys.argv=argv
+runpy.run_path(argv[0],run_name='__main__')
+"""
             parameters=StdioServerParameters(command=sys.executable,
-                args=["-I","-X","utf8",str(HERE/"fault_server.py"),"counter","--state-dir",str(home)],
+                args=["-I","-B","-X","utf8","-c",child_bootstrap,str(app_module.parents[1]),str(cds_module.parents[1]),
+                      hashlib.sha256(app_module.read_bytes()).hexdigest(),hashlib.sha256(cds_module.read_bytes()).hexdigest(),
+                      str(HERE/"fault_server.py"),"counter","--state-dir",str(home)],
                 env={k:v for k,v in os.environ.items() if not k.upper().startswith(("CODEX_","OPENAI_","OPENROUTER_"))})
             async with stdio_client(parameters) as (read,write):
                 async with ClientSession(read,write) as session:
@@ -96,6 +157,7 @@ async def main():
                     assert one.structured_content["effect_count"]==1 and two.structured_content["effect_count"]==2 and bad.is_error
             assert harness.ledger.count(case)==2
             results["counter_preserves_duplicate_evidence"]="passed_two_calls_count_two"
+            results["counter_child_package_identity"]="passed_parent_import_roots_and_SHA_verified_in_isolated_child"
             try:harness.arm("after_effect_503","another-thread",case_id=case)
             except ValueError:pass
             else:raise AssertionError("Old effects were rebound to another native thread")
@@ -240,6 +302,9 @@ async def main():
                 "real_OpenRouter_requests":0,"WinCred_read":False,"App_or_native_started":False,
                 "App_acceptance":False,"owned_fixture_removed":not home.exists(),"source_unchanged":stable,
                 "source_hashes_before":before_hashes,"source_hashes_after":after_hashes}
+        report["imported_packages"]={name:{"file":str(pathlib.Path(sys.modules[name].__file__).resolve()),
+            "sha256":hashlib.sha256(pathlib.Path(sys.modules[name].__file__).read_bytes()).hexdigest()}
+            for name in ("codex_app_deepseek.bridge","codex_deepseek.protocol")}
         (ROOT/".evidence/app-fault-fixture-selftest.json").write_text(json.dumps(report,indent=2),encoding="utf8")
         assert stable,"Selftest source inputs changed during execution; result invalid"
 

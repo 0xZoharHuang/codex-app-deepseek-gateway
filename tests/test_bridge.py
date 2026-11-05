@@ -346,7 +346,9 @@ async def test_guardian_all_turns_keeps_hostile_reasoning_as_verbatim_assistant_
             "input_is_list": True, "input_item_count": len(inputs),
             "count": 0, "candidate_count": 0, "omitted": 0, "ambiguous": 0, "invalid": 0,
             "unclosed": 0, "thread_header": {"count": 0, "status": "missing", "sha256": None},
-            "records": []}}
+            "records": []}, "native_request": {
+            "schema_version": 1, "status": "unknown", "source": "absent",
+            "header_consistency": "not_checked", "reason": "canonical_metadata_absent"}}
         assert len(requests) == 1
 
 

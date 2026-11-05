@@ -339,3 +339,48 @@ does not qualify App execution. Actual GUI acceptance must use durable native
 ALL_TOOLS/counter binding and inspect completed call/result IDs and ledger effects.
 Post-completed conflicting revisions retain their separate protocol guard tests;
 these two fixture cases do not claim that third App scenario.
+
+## Typed failure and flat-error App regression cases
+
+Two additional **synthetic-only** plans exercise provider-failure propagation
+through the production bridge and the shared Events converter:
+
+- response_failed_unknown sends a real response.failed envelope with a
+  nonempty response ID, status=failed, model/provider=unknown and a
+  completed-looking counter call **only in the failed output snapshot**. It never
+  emits response.output_item.done for that call. The call uses the unique
+  actually advertised CDAG_FAULT_COUNTER_V1 function and this case's exact ID;
+  missing or ambiguous declarations return 409 without consuming the plan.
+  Do not disable native discovery or fabricate a counter name to fire it.
+- flat_error sends only a standard error SSE event with a code/message/param,
+  without response.created, a response ID, or any tool frame. The bridge must
+  deliver the native failure without inventing an upstream response identity.
+
+Both reuse the same authenticated control, nonce ownership, exact native
+thread-id, registered non-idempotent counter, repeat and resource limits.
+Their visible error messages include nonce/case **hash prefixes**, never auth
+tokens or user prompts. Plans remain non-live by default and never call a model.
+
+Example arming, after identifying the actual owned QA App chat:
+
+    python.exe -I -X utf8 fault_server.py control --state-dir <QA-DIR> --command-json '{"action":"arm","fault":"response_failed_unknown","thread_id":"<ACTUAL-NATIVE-UUID>"}'
+    python.exe -I -X utf8 fault_server.py control --state-dir <QA-DIR> --command-json '{"action":"arm","fault":"flat_error","thread_id":"<ACTUAL-NATIVE-UUID>"}'
+
+For actual GUI qualification, use a new project-owned App/native/frontend profile
+with the final installed gateway package and the already qualified signed
+App/P7 combination. Retain the App PID/birth/profile and native UUID/turn, use
+normal GUI submission, and read the actual error/retry UI back with owned-window
+UIA plus a screenshot. Verify canonical failed receipts, no successful input
+attestation, no new native tool dispatch and an unchanged counter count. Preserve
+all native retries and any not-fired 409 independently. A synthetic error is
+neither DeepSeek task success nor proof that the real provider emitted that error.
+
+selftest.py checks these wire/receipt/counter boundaries entirely on loopback;
+it starts no App/native runtime and reads no OpenRouter credentials. Passing it
+does **not** close this new GUI gate.
+
+The selftest records its actual imported App bridge/shared Events paths and SHA.
+Its isolated MCP counter child is bound to those same parent package roots and
+SHA before running the unchanged counter command; it does not fall back to a
+stale editable installation and does not install dependencies. Source-run and
+final-installed-package results remain distinct.

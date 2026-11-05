@@ -373,16 +373,39 @@ def image_plan(payload: dict) -> tuple[list[tuple[tuple, str]], dict[str, _Blob]
 
 
 def count_file_references(value: Any) -> int:
-    # Conservatively reserve every explicit file_id/file_ids value, including
-    # caller-owned references. Do not parse strings containing JSON/tool arguments.
-    if isinstance(value, list):
-        return sum(count_file_references(item) for item in value)
-    if not isinstance(value, dict):
-        return 0
-    count = int(isinstance(value.get('file_id'), str) and bool(value['file_id']))
-    if isinstance(value.get('file_ids'), list):
-        count += sum(isinstance(item, str) and bool(item) for item in value['file_ids'])
-    return count + sum(count_file_references(item) for key, item in value.items() if key not in {'file_id','file_ids'})
+    # Schemas and business metadata describe JSON data, not uploaded resources.
+    # Keep the existing conservative occurrence count everywhere else, including
+    # hosted-tool parameters/environment and unknown future file-bearing fields.
+    def visit(node, context="request"):
+        if isinstance(node, list):
+            child_context = "tool" if context == "tools" else context
+            return sum(visit(item, child_context) for item in node)
+        if not isinstance(node, dict):
+            return 0
+        kind = node.get("type")
+        opaque = {"metadata", "client_metadata"}
+        if context == "tool" and kind == "function":
+            opaque.update({"parameters", "output_schema"})
+        if context == "schema_holder" or (context == "format" and kind == "json_schema"):
+            opaque.add("schema")
+        count = int(isinstance(node.get("file_id"), str) and bool(node["file_id"]))
+        if isinstance(node.get("file_ids"), list):
+            count += sum(isinstance(item, str) and bool(item) for item in node["file_ids"])
+        for key, item in node.items():
+            if key in opaque or key in {"file_id", "file_ids"}:
+                continue
+            child_context = "other"
+            if key == "tools" and (context == "request" or (context == "tool" and kind == "namespace")):
+                child_context = "tools"
+            elif context == "request" and key == "text":
+                child_context = "text"
+            elif (context == "request" and key == "response_format") or (context == "text" and key == "format"):
+                child_context = "format"
+            elif context == "format" and kind == "json_schema" and key == "json_schema":
+                child_context = "schema_holder"
+            count += visit(item, child_context)
+        return count
+    return visit(value)
 
 
 def select_image_references(payload: dict, positions: list, slots: int) -> list:
@@ -575,6 +598,10 @@ class ImageTransport:
                 # upload whose response may have been lost, even if its PID still exists.
                 db.execute("UPDATE assets SET state='upload_unknown',reason='interrupted_upload' WHERE state='upload_pending'")
                 db.execute("UPDATE assets SET state='delete_unknown',reason='interrupted_delete' WHERE state='delete_pending'")
+                # A verified provider terminal/rejection has already ended image
+                # consumption. Recover a failed final local release even while its
+                # owner lives; prepared and upstream_unknown leases remain protected.
+                db.execute("DELETE FROM pins WHERE phase='settled'")
                 for pin in db.execute("SELECT DISTINCT pid,birth FROM pins WHERE phase!='upstream_unknown'").fetchall():
                     if self.owner_alive(pin['pid'], pin['birth']) is False:
                         db.execute("DELETE FROM pins WHERE pid=? AND birth=? AND phase!='upstream_unknown'", (pin['pid'], pin['birth']))

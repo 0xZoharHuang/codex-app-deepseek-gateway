@@ -1,0 +1,4502 @@
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -71,6 +71,11 @@
+ use tracing::error;
+ use tracing::warn;
+ 
++#[path = "compact_capacity_projection.rs"]
++mod capacity_projection;
++use capacity_projection::CapacityProjection;
++use capacity_projection::ProjectionReceipt;
++
+ pub use codex_prompts::SUMMARIZATION_PROMPT;
+ pub use codex_prompts::SUMMARY_PREFIX;
+ const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
+@@ -262,10 +267,17 @@
+         phase,
+     )
+     .await;
+-    let pre_compact_outcome = run_pre_compact_hooks(&sess, &turn_context, trigger)
+-        .or_cancel(&cancellation_token)
+-        .await
+-        .unwrap_or(PreCompactHookOutcome::Stopped);
++    let pre_compact_outcome = if capacity_prefix
++        .as_ref()
++        .is_some_and(CapacityPrefix::pre_compact_hook_already_ran)
++    {
++        PreCompactHookOutcome::Continue
++    } else {
++        run_pre_compact_hooks(&sess, &turn_context, trigger)
++            .or_cancel(&cancellation_token)
++            .await
++            .unwrap_or(PreCompactHookOutcome::Stopped)
++    };
+     match pre_compact_outcome {
+         PreCompactHookOutcome::Continue => {}
+         PreCompactHookOutcome::Stopped => {
+@@ -351,6 +363,12 @@
+     if cancellation_token.is_cancelled() {
+         return Err(CodexErr::TurnAborted);
+     }
++    // Capture ordinary-consumed authority before fresh-summary target extension.
++    // CapacityPrefix was already checked against this exact snapshot's hash and
++    // pair-safe boundary; later historical extension does not expand authority.
++    let confirmed_capacity_len = capacity_prefix
++        .as_ref()
++        .map_or(0, |prefix| prefix.prefix.len);
+     capacity_prefix = capacity_prefix.map(CapacityPrefix::for_fresh_summary);
+     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
+     sess.emit_turn_item_started(&turn_context, &compaction_item)
+@@ -405,9 +423,9 @@
+         // before this compactor observes its replacement history.
+         sess.capture_capacity_send().await.history
+     };
+-    let mut capacity_work = capacity_prefix
+-        .as_ref()
+-        .map(|prefix| CapacitySummaryWork::new(prefix.history.clone()));
++    let mut capacity_work = capacity_prefix.as_ref().map(|prefix| {
++        CapacitySummaryWork::with_confirmed_prefix(prefix.history.clone(), confirmed_capacity_len)
++    });
+     let mut input_goal_ids = UserGoalUpdate::message_ids(history.raw_items());
+     let compact_input: ResponseItem = initial_input_for_turn.into();
+     history.record_items(
+@@ -430,6 +448,7 @@
+     let mut capacity_trims = CompactionCapacityTrimTrace::default();
+     let mut input_trimmed = false;
+     let mut warned_capacity = false;
++    let mut pending_capacity_reduction: Option<(Prompt, CodexErr)> = None;
+     if capacity_prefix.is_some() {
+         warn_capacity_prefix(&sess, &turn_context).await;
+         warned_capacity = true;
+@@ -448,6 +467,13 @@
+         sess.services
+             .executed_tool_calls
+             .attach_to_compaction_prompt(&mut turn_input);
++        if let Some(work) = &mut capacity_work {
++            work.prepare_prompt(
++                &mut turn_input,
++                &compact_input,
++                &turn_context.model_info().input_modalities,
++            )?;
++        }
+         let turn_input_len = turn_input.len();
+         let base_instructions = if turn_input
+             .iter()
+@@ -474,6 +500,34 @@
+         let responses_metadata = sess
+             .compaction_responses_metadata(turn_context.as_ref(), compaction_metadata)
+             .await;
++        if let Some((rejected_prompt, rejection)) = pending_capacity_reduction.take() {
++            // Use the native request builder for both known prompts, with the
++            // same non-input settings. This includes actual image-detail and
++            // provider metadata rules; partial framing must buy a strict byte
++            // reduction before another failed-byte-capacity probe is sent.
++            let request_size = |candidate: &Prompt| {
++                let request = sess
++                    .services
++                    .model_client
++                    .build_responses_request(
++                        candidate,
++                        turn_context.model_info(),
++                        None,
++                        turn_context.reasoning_summary(),
++                        turn_context.config.service_tier.clone(),
++                        &responses_metadata,
++                        false,
++                    )
++                    .ok()?;
++                serde_json::to_vec(&request).ok().map(|bytes| bytes.len())
++            };
++            if !request_size(&prompt)
++                .zip(request_size(&rejected_prompt))
++                .is_some_and(|(next, previous)| next < previous)
++            {
++                return Err(rejection);
++            }
++        }
+         let (attempt_result, failed_before_response_stream) = match drain_to_completed(
+             &sess,
+             turn_context.as_ref(),
+@@ -497,9 +551,16 @@
+                     if !work.complete_selected(&response, carried_response_id)? {
+                         // Only model-local carry changes here. The native session,
+                         // original target, protected suffix and claimed fence do not.
+-                        let selected = work.selected_history();
+-                        let user_messages =
+-                            collect_annotated_user_messages(selected.annotated_items());
++                        let selected = work.selected_history()?;
++                        // Partial user-message views must not become additional
++                        // retained messages with the original ID. Their content is
++                        // carried by this fresh summary; final retention uses target.
++                        let retained_input = if work.projection.is_some() {
++                            &selected.annotated_items()[..work.carry_len]
++                        } else {
++                            selected.annotated_items()
++                        };
++                        let user_messages = collect_annotated_user_messages(retained_input);
+                         let summary_text = work
+                             .coverage
+                             .carry_summary
+@@ -515,7 +576,7 @@
+                         )
+                         .await;
+                         work.advance(carry)?;
+-                        history = work.selected_history();
++                        history = work.selected_history()?;
+                         history.record_items(
+                             &[compact_input.clone()],
+                             turn_context.model_info().truncation_policy.into(),
+@@ -623,13 +684,13 @@
+                     .as_mut()
+                     .expect("capacity summary transaction");
+                 let selected = work.selected_len;
+-                let next_len = work.smaller_prefix(matches!(
+-                    e.details(),
+-                    CodexErrorDetails::ContextWindowExceeded
+-                ));
+-                let Some(next_len) = next_len else {
++                if !work.reduce(
++                    matches!(e.details(), CodexErrorDetails::ContextWindowExceeded),
++                    &turn_context.sub_id,
++                )? {
+                     return Err(e);
+-                };
++                }
++                let next_len = work.selected_len;
+                 if let Some(delay) = e.server_retry_delay() {
+                     tokio::time::sleep(delay)
+                         .or_cancel(cancellation_token)
+@@ -642,20 +703,25 @@
+                     return Err(e);
+                 }
+                 work.selected_len = next_len;
+-                history = work.selected_history();
++                history = work.selected_history()?;
+                 history.record_items(
+                     &[compact_input.clone()],
+                     turn_context.model_info().truncation_policy.into(),
+                 );
+                 retries = 0;
+                 capacity_trims.attempts += 1;
+-                capacity_trims.items += selected - next_len;
++                capacity_trims.items += selected.saturating_sub(next_len);
+                 warn!(
+                     selected_items = next_len,
+                     previous_items = selected,
+                     partition_attempts = capacity_trims.attempts,
+                     "Compaction capacity retry selected a smaller complete confirmed prefix; the entire remainder is retained",
+                 );
++                if work.projection.is_some()
++                    && !matches!(e.details(), CodexErrorDetails::ContextWindowExceeded)
++                {
++                    pending_capacity_reduction = Some((prompt, e));
++                }
+                 continue;
+             }
+             Err(e)
+@@ -675,9 +741,13 @@
+                 if let CodexErrorDetails::UnexpectedStatus(rejection) = e.details() {
+                     capacity_rejection = Some(rejection.clone());
+                 }
++                let confirmed_len = prefix.prefix.len;
+                 let prefix = prefix.for_fresh_summary();
+                 history = prefix.history.clone();
+-                capacity_work = Some(CapacitySummaryWork::new(prefix.history.clone()));
++                capacity_work = Some(CapacitySummaryWork::with_confirmed_prefix(
++                    prefix.history.clone(),
++                    confirmed_len,
++                ));
+                 capacity_prefix = Some(prefix);
+                 history.record_items(
+                     &[compact_input.clone()],
+@@ -1252,6 +1322,7 @@
+     end: usize,
+     response_id: String,
+     carried_response_id: Option<String>,
++    projection: Option<ProjectionReceipt>,
+ }
+ 
+ impl CapacitySummaryCoverage {
+@@ -1288,12 +1359,37 @@
+         }
+         let mut covered = 0;
+         let mut previous = None;
++        let mut partial: Option<&ProjectionReceipt> = None;
+         for segment in &self.segments {
+             if segment.start != covered
+-                || segment.end <= segment.start
+                 || segment.end > self.covered
+                 || segment.response_id.is_empty()
+                 || segment.carried_response_id.as_deref() != previous
++            {
++                return false;
++            }
++            if let Some(receipt) = &segment.projection {
++                if receipt.source_start != covered
++                    || !receipt.matches_target(target)
++                    || match partial {
++                        Some(last) => !receipt.continues(last),
++                        None => !receipt.starts_source(),
++                    }
++                {
++                    return false;
++                }
++                let complete = receipt.completes_source();
++                let end = if complete {
++                    receipt.source_end
++                } else {
++                    covered
++                };
++                if segment.end != end {
++                    return false;
++                }
++                partial = if complete { None } else { Some(receipt) };
++            } else if partial.is_some()
++                || segment.end <= segment.start
+                 || target.pair_safe_prefix_len(segment.end) != segment.end
+             {
+                 return false;
+@@ -1301,7 +1397,7 @@
+             covered = segment.end;
+             previous = Some(segment.response_id.as_str());
+         }
+-        covered == self.covered && previous == Some(final_response_id)
++        partial.is_none() && covered == self.covered && previous == Some(final_response_id)
+     }
+ }
+ 
+@@ -1310,6 +1406,9 @@
+     working_history: crate::context_manager::ContextManager,
+     carry_len: usize,
+     selected_len: usize,
++    confirmed_len: usize,
++    projection: Option<CapacityProjection>,
++    verified_projection: Option<ProjectionReceipt>,
+ }
+ 
+ impl CapacitySummaryWork {
+@@ -1318,6 +1417,9 @@
+             selected_len: target.annotated_items().len(),
+             working_history: target.clone(),
+             carry_len: 0,
++            confirmed_len: 0,
++            projection: None,
++            verified_projection: None,
+             coverage: CapacitySummaryCoverage {
+                 target,
+                 segments: Vec::new(),
+@@ -1325,6 +1427,15 @@
+                 carry_summary: None,
+             },
+         }
++    }
++
++    fn with_confirmed_prefix(
++        target: crate::context_manager::ContextManager,
++        confirmed_len: usize,
++    ) -> Self {
++        let mut work = Self::new(target);
++        work.confirmed_len = confirmed_len;
++        work
+     }
+ 
+     fn smaller_prefix(&self, context_capacity: bool) -> Option<usize> {
+@@ -1362,12 +1473,106 @@
+         candidate(lower)
+     }
+ 
+-    fn selected_history(&self) -> crate::context_manager::ContextManager {
++    fn reduce(&mut self, context_capacity: bool, current_turn: &str) -> CodexResult<bool> {
++        self.verified_projection = None;
++        if let Some(projection) = &mut self.projection {
++            return Ok(projection.shrink(&self.coverage.target));
++        }
++        if let Some(len) = self.smaller_prefix(context_capacity) {
++            self.selected_len = len;
++            return Ok(true);
++        }
++        let Some(added) = self.selected_len.checked_sub(self.carry_len) else {
++            return Ok(false);
++        };
++        let Some(end) = self.coverage.covered.checked_add(added) else {
++            return Ok(false);
++        };
++        let Some(projection) = CapacityProjection::new_with_confirmed_prefix(
++            &self.coverage.target,
++            self.coverage.covered,
++            end,
++            current_turn,
++            self.confirmed_len,
++        ) else {
++            return Ok(false);
++        };
++        self.selected_len = self.carry_len + projection.envelope_len();
++        self.projection = Some(projection);
++        Ok(true)
++    }
++
++    fn selected_history(&self) -> CodexResult<crate::context_manager::ContextManager> {
+         let mut history = self.working_history.clone();
+-        history.replace_annotated(
+-            self.working_history.annotated_items()[..self.selected_len].to_vec(),
+-        );
+-        history
++        let items = if let Some(projection) = &self.projection {
++            let mut items = self.working_history.annotated_items()[..self.carry_len].to_vec();
++            items.extend(projection.items(&self.coverage.target)?);
++            items
++        } else {
++            self.working_history.annotated_items()[..self.selected_len].to_vec()
++        };
++        history.replace_annotated(items);
++        Ok(history)
++    }
++
++    fn prepare_prompt(
++        &mut self,
++        input: &mut [ResponseItem],
++        compact_input: &ResponseItem,
++        input_modalities: &[codex_protocol::openai_models::InputModality],
++    ) -> CodexResult<()> {
++        self.verified_projection = None;
++        let Some(projection) = &self.projection else {
++            return Ok(());
++        };
++        // Validate after native normalization and execution-inventory attachment.
++        // Even a text-only instruction gains positional Unknown metadata during
++        // native unsupported-media normalization. Normalize its known prototype
++        // through that exact path; never accept the actual tail as its own proof
++        // or discard provenance to make the comparison pass.
++        let mut instruction_history = crate::context_manager::ContextManager::new();
++        instruction_history
++            .replace_annotated(vec![ResponseItemEnvelope::new(compact_input.clone())]);
++        let expected_instructions = instruction_history.for_prompt(input_modalities);
++        let [expected_instruction] = expected_instructions.as_slice() else {
++            return Err(CodexErr::InvalidRequest(
++                "Native compaction instruction did not normalize to exactly one item".to_owned(),
++            ));
++        };
++        let receipt = projection.verify_prompt(
++            &self.coverage.target,
++            input,
++            self.carry_len,
++            expected_instruction,
++        )?;
++        let Some(instruction) = input.last_mut() else {
++            return Err(CodexErr::InvalidRequest(
++                "Compaction projection lost its instructions".to_owned(),
++            ));
++        };
++        if !matches!(&*instruction, ResponseItem::Message { role, .. } if role == "user") {
++            return Err(CodexErr::InvalidRequest(
++                "Compaction projection lost its user instructions".to_owned(),
++            ));
++        }
++        let mut parts =
++            codex_context_fragments::to_annotated_content(instruction).ok_or_else(|| {
++                CodexErr::InvalidRequest(
++                    "Compaction projection lost instruction annotations".to_owned(),
++                )
++            })?;
++        parts.push(AnnotatedContent::text(
++            projection.instruction(),
++            ContentItemKind("unknown".to_owned()),
++            codex_protocol::models::ContentItemMetadata::harness(),
++        ));
++        set_annotated_content(instruction, parts).ok_or_else(|| {
++            CodexErr::InvalidRequest(
++                "Compaction projection lost instruction annotations".to_owned(),
++            )
++        })?;
++        self.verified_projection = Some(receipt);
++        Ok(())
+     }
+ 
+     fn complete_selected(
+@@ -1385,43 +1590,71 @@
+                         .to_owned(),
+                 )
+             })?;
+-        let added = self
+-            .selected_len
+-            .checked_sub(self.carry_len)
+-            .filter(|added| *added > 0)
+-            .ok_or_else(|| {
+-                CodexErr::InvalidRequest(
+-                    "Capacity partition made no original-input progress".to_owned(),
+-                )
+-            })?;
+-        let end = self
+-            .coverage
+-            .covered
+-            .checked_add(added)
+-            .filter(|end| *end <= self.coverage.target.annotated_items().len())
+-            .ok_or_else(|| {
+-                CodexErr::InvalidRequest(
+-                    "Capacity partition exceeded its captured original target".to_owned(),
+-                )
+-            })?;
+-        if self.coverage.target.pair_safe_prefix_len(end) != end
+-            || carried_response_id.as_deref()
+-                != self
+-                    .coverage
+-                    .segments
+-                    .last()
+-                    .map(|segment| segment.response_id.as_str())
++        if carried_response_id.as_deref()
++            != self
++                .coverage
++                .segments
++                .last()
++                .map(|segment| segment.response_id.as_str())
+             || response.response_id.is_empty()
+         {
+             return Err(CodexErr::InvalidRequest(
+                 "Capacity partition has invalid pair or carry lineage".to_owned(),
+             ));
+         }
++        let (end, projection) = if let Some(selected) = &self.projection {
++            let receipt = self
++                .verified_projection
++                .take()
++                .filter(|receipt| {
++                    selected
++                        .receipt(&self.coverage.target)
++                        .is_ok_and(|expected| expected == *receipt)
++                })
++                .ok_or_else(|| {
++                    CodexErr::InvalidRequest(
++                        "Capacity part completion lacks its exact sent projection".to_owned(),
++                    )
++                })?;
++            let end = if receipt.completes_source() {
++                receipt.source_end
++            } else {
++                self.coverage.covered
++            };
++            (end, Some(receipt))
++        } else {
++            let added = self
++                .selected_len
++                .checked_sub(self.carry_len)
++                .filter(|added| *added > 0)
++                .ok_or_else(|| {
++                    CodexErr::InvalidRequest(
++                        "Capacity partition made no original-input progress".to_owned(),
++                    )
++                })?;
++            let end = self
++                .coverage
++                .covered
++                .checked_add(added)
++                .filter(|end| *end <= self.coverage.target.annotated_items().len())
++                .ok_or_else(|| {
++                    CodexErr::InvalidRequest(
++                        "Capacity partition exceeded its captured original target".to_owned(),
++                    )
++                })?;
++            if self.coverage.target.pair_safe_prefix_len(end) != end {
++                return Err(CodexErr::InvalidRequest(
++                    "Capacity partition has invalid pair or carry lineage".to_owned(),
++                ));
++            }
++            (end, None)
++        };
+         self.coverage.segments.push(CapacitySummarySegment {
+             start: self.coverage.covered,
+             end,
+             response_id: response.response_id.clone(),
+             carried_response_id,
++            projection,
+         });
+         self.coverage.covered = end;
+         self.coverage.carry_summary = Some(format!("{SUMMARY_PREFIX}\n{summary}"));
+@@ -1433,6 +1666,14 @@
+         let mut next = carry;
+         next.extend_from_slice(&self.coverage.target.annotated_items()[self.coverage.covered..]);
+         self.working_history.replace_annotated(next);
++        self.verified_projection = None;
++        if let Some(projection) = &mut self.projection {
++            if projection.advance_parts() {
++                self.selected_len = self.carry_len + projection.envelope_len();
++                return Ok(());
++            }
++            self.projection = None;
++        }
+         self.selected_len = self.working_history.annotated_items().len();
+         if self.selected_len <= self.carry_len {
+             return Err(CodexErr::InvalidRequest(
+diff --git a/codex-rs/core/src/compact_capacity_projection.rs b/codex-rs/core/src/compact_capacity_projection.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/compact_capacity_projection.rs
+@@ -0,0 +1,632 @@
++//! Prompt-only views of a completed historical typed item.
++//! Original envelopes remain the transaction target. A view is never installed.
++use super::CodexErr;
++use super::CodexResult;
++use super::ResponseItem;
++use super::ResponseItemEnvelope;
++use crate::context_manager::ContextManager;
++use codex_context_fragments::set_annotated_content;
++use codex_context_fragments::to_annotated_content;
++use codex_protocol::models::ContentItem;
++use codex_protocol::models::FunctionCallOutputBody;
++use codex_protocol::models::FunctionCallOutputContentItem;
++use serde::Serialize;
++use sha2::Digest;
++use sha2::Sha256;
++
++/// Byte offsets always refer to one unchanged original text part.
++#[derive(Clone, Debug, PartialEq, Eq)]
++struct ProjectionTextRange {
++    start: usize,
++    end: usize,
++    len: usize,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(super) struct ProjectionReceipt {
++    pub(super) source_start: usize,
++    pub(super) source_end: usize,
++    atom_index: usize,
++    atom_count: usize,
++    part_item: usize,
++    call_item: Option<usize>,
++    whole: bool,
++    pub(super) part_start: usize,
++    pub(super) part_end: usize,
++    pub(super) part_count: usize,
++    text_range: Option<ProjectionTextRange>,
++    source_turn: String,
++    source_hash: [u8; 32],
++    projection_hash: [u8; 32],
++}
++
++#[derive(Clone)]
++struct ProjectionAtom {
++    item: usize,
++    call: Option<usize>,
++    parts: usize,
++    whole: bool,
++}
++
++#[derive(Clone)]
++pub(super) struct CapacityProjection {
++    pub(super) source_start: usize,
++    pub(super) source_end: usize,
++    atoms: Vec<ProjectionAtom>,
++    atom_index: usize,
++    pub(super) part_start: usize,
++    pub(super) part_end: usize,
++    text_range: Option<ProjectionTextRange>,
++    source_turn: String,
++}
++
++fn invalid(message: &str) -> CodexErr {
++    CodexErr::InvalidRequest(message.to_owned())
++}
++
++fn fingerprint<T: Serialize + ?Sized>(value: &T) -> CodexResult<[u8; 32]> {
++    let bytes = serde_json::to_vec(value)
++        .map_err(|_| invalid("Cannot fingerprint historical compaction projection"))?;
++    Ok(Sha256::digest(bytes).into())
++}
++
++fn without_execution_metadata(mut item: ResponseItem) -> ResponseItem {
++    // This metadata is attached by the native call inventory after normalization.
++    // It is not original content and must not turn replay context into new progress.
++    item.clear_executed_tool_calls();
++    item
++}
++
++impl CapacityProjection {
++    #[cfg(test)]
++    pub(super) fn new(
++        target: &ContextManager,
++        source_start: usize,
++        source_end: usize,
++        current_turn: &str,
++    ) -> Option<Self> {
++        Self::new_with_confirmed_prefix(target, source_start, source_end, current_turn, 0)
++    }
++
++    pub(super) fn new_with_confirmed_prefix(
++        target: &ContextManager,
++        source_start: usize,
++        source_end: usize,
++        current_turn: &str,
++        confirmed_len: usize,
++    ) -> Option<Self> {
++        let mut projection = Self::source(target, source_start, source_end)?;
++        // The exception is only the captured, hash-verified ordinary-consumed
++        // prefix. Fresh-summary extension must never grant current-input authority.
++        if current_turn.is_empty()
++            || (projection.source_turn == current_turn && source_end > confirmed_len)
++        {
++            return None;
++        }
++        // A multi-atom block becomes one complete pair/message per request.
++        // For one atom the full body just failed: reduce parts, then UTF-8 text.
++        if projection.atoms.len() == 1 && !projection.shrink(target) {
++            return None;
++        }
++        Some(projection)
++    }
++
++    fn source(target: &ContextManager, source_start: usize, source_end: usize) -> Option<Self> {
++        if source_end <= source_start
++            || target.pair_safe_prefix_len(source_start) != source_start
++            || target.pair_safe_prefix_len(source_end) != source_end
++        {
++            return None;
++        }
++        let source = target.annotated_items().get(source_start..source_end)?;
++        let turn = source.first()?.item.turn_id()?.to_owned();
++        if turn.is_empty()
++            || source
++                .iter()
++                .any(|item| item.item.turn_id() != Some(turn.as_str()))
++        {
++            return None;
++        }
++        let mut atoms = Vec::new();
++        let mut used_calls = std::collections::HashSet::new();
++        for (index, envelope) in source.iter().enumerate() {
++            let call = match &envelope.item {
++                ResponseItem::Message {
++                    encrypted_content: None,
++                    content,
++                    status,
++                    ..
++                } if status.as_deref().is_none_or(|status| status == "completed") => {
++                    atoms.push(ProjectionAtom {
++                        item: index,
++                        call: None,
++                        parts: content.len().max(1),
++                        whole: content.is_empty(),
++                    });
++                    continue;
++                }
++                ResponseItem::CustomToolCall {
++                    encrypted_content: None,
++                    status,
++                    ..
++                }
++                | ResponseItem::FunctionCall {
++                    encrypted_content: None,
++                    encrypted_function_args: None,
++                    status,
++                    ..
++                } if status.as_deref().is_none_or(|status| status == "completed") => continue,
++                ResponseItem::CustomToolCallOutput { call_id, .. } => {
++                    let matches = source.iter().enumerate().filter(|(_, item)| matches!(
++                        &item.item, ResponseItem::CustomToolCall { call_id: id, .. } if id == call_id
++                    )).map(|(index, _)| index).collect::<Vec<_>>();
++                    if matches.len() != 1 {
++                        return None;
++                    }
++                    matches[0]
++                }
++                ResponseItem::FunctionCallOutput {
++                    call_id: Some(call_id),
++                    ..
++                } => {
++                    let matches = source.iter().enumerate().filter(|(_, item)| matches!(
++                        &item.item, ResponseItem::FunctionCall { call_id: id, .. } if id == call_id
++                    )).map(|(index, _)| index).collect::<Vec<_>>();
++                    if matches.len() != 1 {
++                        return None;
++                    }
++                    matches[0]
++                }
++                _ => return None,
++            };
++            if call >= index || !used_calls.insert(call) {
++                return None;
++            }
++            let output = match &envelope.item {
++                ResponseItem::FunctionCallOutput { output, .. }
++                | ResponseItem::CustomToolCallOutput { output, .. } => output,
++                _ => return None,
++            };
++            let (parts, whole) = match output.content_items() {
++                Some(parts) => {
++                    if parts.iter().any(|part| {
++                        matches!(part, FunctionCallOutputContentItem::EncryptedContent { .. })
++                    }) {
++                        return None;
++                    }
++                    (parts.len().max(1), parts.is_empty())
++                }
++                // Keep the native string envelope; byte views only edit its clone.
++                None => (1, true),
++            };
++            atoms.push(ProjectionAtom {
++                item: index,
++                call: Some(call),
++                parts,
++                whole,
++            });
++        }
++        let call_count = source
++            .iter()
++            .filter(|item| {
++                matches!(
++                    item.item,
++                    ResponseItem::CustomToolCall { .. } | ResponseItem::FunctionCall { .. }
++                )
++            })
++            .count();
++        if used_calls.len() != call_count {
++            return None;
++        }
++        let part_end = atoms.first()?.parts;
++        Some(Self {
++            source_start,
++            source_end,
++            atoms,
++            atom_index: 0,
++            part_start: 0,
++            part_end,
++            text_range: None,
++            source_turn: turn,
++        })
++    }
++
++    pub(super) fn envelope_len(&self) -> usize {
++        if self.atoms[self.atom_index].call.is_some() {
++            2
++        } else {
++            1
++        }
++    }
++
++    fn text<'a>(&self, target: &'a ContextManager) -> Option<&'a str> {
++        if self.part_end != self.part_start + 1 {
++            return None;
++        }
++        let atom = self.atoms.get(self.atom_index)?;
++        let item = &target
++            .annotated_items()
++            .get(self.source_start + atom.item)?
++            .item;
++        match item {
++            ResponseItem::Message { content, .. } => match content.get(self.part_start)? {
++                ContentItem::InputText { text } => Some(text),
++                // Sampled output offsets/logprobs are opaque; do not fabricate
++                // attribution for a substring of that native payload.
++                _ => None,
++            },
++            ResponseItem::FunctionCallOutput { output, .. }
++            | ResponseItem::CustomToolCallOutput { output, .. } => match &output.body {
++                FunctionCallOutputBody::Text(text) if self.part_start == 0 => Some(text),
++                FunctionCallOutputBody::ContentItems(parts) => match parts.get(self.part_start)? {
++                    FunctionCallOutputContentItem::InputText { text } => Some(text),
++                    _ => None,
++                },
++                _ => None,
++            },
++            _ => None,
++        }
++    }
++
++    pub(super) fn items(&self, target: &ContextManager) -> CodexResult<Vec<ResponseItemEnvelope>> {
++        let atom = self
++            .atoms
++            .get(self.atom_index)
++            .ok_or_else(|| invalid("Historical compaction atom disappeared"))?;
++        if self.part_start >= self.part_end || self.part_end > atom.parts {
++            return Err(invalid("Invalid historical compaction part range"));
++        }
++        let text_slice = if let Some(range) = &self.text_range {
++            let text = self
++                .text(target)
++                .ok_or_else(|| invalid("Historical text part changed type"))?;
++            if range.len != text.len() || range.start >= range.end {
++                return Err(invalid("Historical text byte coverage changed"));
++            }
++            Some(
++                text.get(range.start..range.end)
++                    .ok_or_else(|| invalid("Historical text range is not UTF-8 aligned"))?
++                    .to_owned(),
++            )
++        } else {
++            None
++        };
++        let source = target
++            .annotated_items()
++            .get(self.source_start..self.source_end)
++            .ok_or_else(|| invalid("Historical compaction source disappeared"))?;
++        let mut items = Vec::with_capacity(self.envelope_len());
++        if let Some(call) = atom.call {
++            items.push(source[call].clone());
++        }
++        items.push(source[atom.item].clone());
++        if atom.whole {
++            if self.part_start != 0 || self.part_end != 1 {
++                return Err(invalid(
++                    "Whole historical payload cannot change part boundaries",
++                ));
++            }
++            if text_slice.is_none() {
++                return Ok(items);
++            }
++        }
++        let item = &mut items
++            .last_mut()
++            .ok_or_else(|| invalid("Historical compaction part source disappeared"))?
++            .item;
++        match item {
++            ResponseItem::Message { .. } => {
++                let parts = to_annotated_content(item)
++                    .ok_or_else(|| invalid("Historical message lost typed content"))?;
++                let mut selected = parts
++                    .get(self.part_start..self.part_end)
++                    .ok_or_else(|| invalid("Historical message part range changed"))?
++                    .to_vec();
++                if let Some(text_slice) = &text_slice {
++                    let Some(ContentItem::InputText { text }) =
++                        selected.first_mut().map(|part| part.content_mut())
++                    else {
++                        return Err(invalid("Historical message text view changed type"));
++                    };
++                    *text = text_slice.clone();
++                }
++                set_annotated_content(item, selected)
++                    .ok_or_else(|| invalid("Historical message lost annotations"))?;
++            }
++            ResponseItem::FunctionCallOutput { output, .. }
++            | ResponseItem::CustomToolCallOutput { output, .. } => {
++                // Slice only a clone. Keep the native body variant, success,
++                // media/detail, metadata and original call/output identity.
++                match &mut output.body {
++                    FunctionCallOutputBody::ContentItems(parts) => {
++                        let mut selected = parts
++                            .get(self.part_start..self.part_end)
++                            .ok_or_else(|| invalid("Historical output part range changed"))?
++                            .to_vec();
++                        if let Some(text_slice) = &text_slice {
++                            let Some(FunctionCallOutputContentItem::InputText { text }) =
++                                selected.first_mut()
++                            else {
++                                return Err(invalid("Historical output text view changed type"));
++                            };
++                            *text = text_slice.clone();
++                        }
++                        *parts = selected;
++                    }
++                    FunctionCallOutputBody::Text(text) => {
++                        if self.part_start != 0 || self.part_end != 1 {
++                            return Err(invalid("Plain historical output changed part boundaries"));
++                        }
++                        if let Some(text_slice) = &text_slice {
++                            *text = text_slice.clone();
++                        }
++                    }
++                }
++            }
++            _ => return Err(invalid("Historical compaction source is not typed content")),
++        }
++        Ok(items)
++    }
++
++    pub(super) fn receipt(&self, target: &ContextManager) -> CodexResult<ProjectionReceipt> {
++        let atom = &self.atoms[self.atom_index];
++        let items = self.items(target)?;
++        let prompt_items = items
++            .into_iter()
++            .map(|item| without_execution_metadata(item.item))
++            .collect::<Vec<_>>();
++        Ok(ProjectionReceipt {
++            source_start: self.source_start,
++            source_end: self.source_end,
++            atom_index: self.atom_index,
++            atom_count: self.atoms.len(),
++            part_item: atom.item,
++            call_item: atom.call,
++            whole: atom.whole,
++            part_start: self.part_start,
++            part_end: self.part_end,
++            part_count: atom.parts,
++            text_range: self.text_range.clone(),
++            source_turn: self.source_turn.clone(),
++            // Native envelopes intentionally do not implement Serialize.
++            // Hash item + harness provenance, and the internal success bit that
++            // the wire payload serializer deliberately omits.
++            source_hash: fingerprint(
++                &target.annotated_items()[self.source_start..self.source_end]
++                    .iter()
++                    .map(|envelope| {
++                        let success = match &envelope.item {
++                            ResponseItem::FunctionCallOutput { output, .. }
++                            | ResponseItem::CustomToolCallOutput { output, .. } => output.success,
++                            _ => None,
++                        };
++                        (&envelope.item, &envelope.metadata, success)
++                    })
++                    .collect::<Vec<_>>(),
++            )?,
++            projection_hash: fingerprint(&prompt_items)?,
++        })
++    }
++
++    pub(super) fn verify_prompt(
++        &self,
++        target: &ContextManager,
++        input: &[ResponseItem],
++        carry_len: usize,
++        compact_input: &ResponseItem,
++    ) -> CodexResult<ProjectionReceipt> {
++        let expected = self
++            .items(target)?
++            .into_iter()
++            .map(|item| without_execution_metadata(item.item))
++            .collect::<Vec<_>>();
++        if input.len() != carry_len + expected.len() + 1
++            || input.last().cloned().map(without_execution_metadata)
++                != Some(without_execution_metadata(compact_input.clone()))
++        {
++            return Err(invalid(
++                "Historical projection has extra input or changed compaction instructions",
++            ));
++        }
++        let actual = input
++            .get(carry_len..carry_len + expected.len())
++            .ok_or_else(|| invalid("Historical projection was removed from the normalized prompt"))?
++            .iter()
++            .cloned()
++            .map(without_execution_metadata)
++            .collect::<Vec<_>>();
++        if actual != expected {
++            return Err(invalid(
++                "Normalized compaction prompt changed original typed parts",
++            ));
++        }
++        // Native pairing uses call_id. Each request has one copy of the selected
++        // completed pair; the other original pairs remain unread, never executed.
++        if let Some(call) = expected.first().filter(|_| expected.len() == 2) {
++            let (calls, outputs) = match call {
++                ResponseItem::CustomToolCall { call_id, .. } => (
++                    input.iter().filter(|item| matches!(item, ResponseItem::CustomToolCall { call_id: id, .. } if id == call_id)).count(),
++                    input.iter().filter(|item| matches!(item, ResponseItem::CustomToolCallOutput { call_id: id, .. } if id == call_id)).count(),
++                ),
++                ResponseItem::FunctionCall { call_id, .. } => (
++                    input.iter().filter(|item| matches!(item, ResponseItem::FunctionCall { call_id: id, .. } if id == call_id)).count(),
++                    input.iter().filter(|item| matches!(item, ResponseItem::FunctionCallOutput { call_id: Some(id), .. } if id == call_id)).count(),
++                ),
++                _ => return Err(invalid("Historical projection lost its original call")),
++            };
++            if calls != 1 || outputs != 1 {
++                return Err(invalid("Historical projection repeated a call/output pair"));
++            }
++        }
++        self.receipt(target)
++    }
++
++    pub(super) fn instruction(&self) -> String {
++        let atom = &self.atoms[self.atom_index];
++        let mut instruction = format!(
++            "Compaction-only partial historical content: original block {}..{}, source content envelope {}, source call envelope {:?}, ordered content unit {} of {}, whole original payload {}, content parts {}..{} of {}. These source positions describe the original history order. This is a view of an already completed historical item, not a new tool invocation or a complete block/output. Other original units and parts still exist and will be read separately. Preserve these parts and the exact previous fresh summary in the next summary; do not execute or repeat historical calls.",
++            self.source_start,
++            self.source_end,
++            self.source_start + atom.item,
++            atom.call.map(|call| self.source_start + call),
++            self.atom_index,
++            self.atoms.len(),
++            atom.whole && self.text_range.is_none(),
++            self.part_start,
++            self.part_end,
++            atom.parts,
++        );
++        if let Some(range) = &self.text_range {
++            instruction.push_str(&format!(
++                " The selected text part contains only UTF-8 bytes {}..{} of its original {} bytes; all other original bytes remain unread until separately summarized.",
++                range.start, range.end, range.len,
++            ));
++        }
++        instruction
++    }
++
++    pub(super) fn shrink(&mut self, target: &ContextManager) -> bool {
++        let count = self.part_end - self.part_start;
++        if count > 1 {
++            self.part_end = self.part_start + count / 2;
++            self.text_range = None;
++            return true;
++        }
++        let Some(text) = self.text(target) else {
++            return false;
++        };
++        let range = self.text_range.clone().unwrap_or(ProjectionTextRange {
++            start: 0,
++            end: text.len(),
++            len: text.len(),
++        });
++        let Some(selected) = text.get(range.start..range.end) else {
++            return false;
++        };
++        // Empty text still belongs to a complete original part. A single scalar
++        // is irreducible and returns the original capacity error unchanged.
++        let Some(first) = selected.chars().next() else {
++            return false;
++        };
++        let mut end = text.floor_char_boundary(range.start + selected.len() / 2);
++        if end == range.start {
++            end += first.len_utf8();
++        }
++        if end >= range.end {
++            return false;
++        }
++        self.text_range = Some(ProjectionTextRange { end, ..range });
++        true
++    }
++
++    pub(super) fn advance_parts(&mut self) -> bool {
++        if let Some(range) = &mut self.text_range {
++            if range.end < range.len {
++                range.start = range.end;
++                range.end = range.len;
++                return true;
++            }
++        }
++        self.text_range = None;
++        if self.part_end < self.atoms[self.atom_index].parts {
++            self.part_start = self.part_end;
++            self.part_end = self.atoms[self.atom_index].parts;
++            return true;
++        }
++        if self.atom_index + 1 == self.atoms.len() {
++            return false;
++        }
++        self.atom_index += 1;
++        self.part_start = 0;
++        self.part_end = self.atoms[self.atom_index].parts;
++        true
++    }
++}
++
++impl ProjectionReceipt {
++    pub(super) fn starts_source(&self) -> bool {
++        self.atom_index == 0
++            && self.part_start == 0
++            && self
++                .text_range
++                .as_ref()
++                .is_none_or(|range| range.start == 0)
++    }
++
++    pub(super) fn completes_source(&self) -> bool {
++        self.atom_index + 1 == self.atom_count
++            && self.part_end == self.part_count
++            && self
++                .text_range
++                .as_ref()
++                .is_none_or(|range| range.end == range.len)
++    }
++
++    pub(super) fn matches_target(&self, target: &ContextManager) -> bool {
++        let Some(mut source) =
++            CapacityProjection::source(target, self.source_start, self.source_end)
++        else {
++            return false;
++        };
++        let Some(atom) = source.atoms.get(self.atom_index) else {
++            return false;
++        };
++        if atom.item != self.part_item
++            || atom.call != self.call_item
++            || atom.parts != self.part_count
++            || atom.whole != self.whole
++            || source.atoms.len() != self.atom_count
++            || source.source_turn != self.source_turn
++        {
++            return false;
++        }
++        source.atom_index = self.atom_index;
++        source.part_start = self.part_start;
++        source.part_end = self.part_end;
++        source.text_range = self.text_range.clone();
++        source.receipt(target).is_ok_and(|receipt| receipt == *self)
++    }
++
++    pub(super) fn continues(&self, previous: &Self) -> bool {
++        self.source_start == previous.source_start
++            && self.source_end == previous.source_end
++            && self.atom_count == previous.atom_count
++            && self.source_turn == previous.source_turn
++            && self.source_hash == previous.source_hash
++            && if self.atom_index == previous.atom_index {
++                self.part_item == previous.part_item
++                    && self.call_item == previous.call_item
++                    && self.whole == previous.whole
++                    && self.part_count == previous.part_count
++                    && if let Some(range) = previous
++                        .text_range
++                        .as_ref()
++                        .filter(|range| range.end < range.len)
++                    {
++                        self.part_start == previous.part_start
++                            && self.part_end == previous.part_end
++                            && self.text_range.as_ref().is_some_and(|next| {
++                                next.start == range.end && next.len == range.len
++                            })
++                    } else {
++                        self.part_start == previous.part_end
++                            && self
++                                .text_range
++                                .as_ref()
++                                .is_none_or(|range| range.start == 0)
++                    }
++            } else {
++                previous.part_end == previous.part_count
++                    && previous
++                        .text_range
++                        .as_ref()
++                        .is_none_or(|range| range.end == range.len)
++                    && self.atom_index == previous.atom_index + 1
++                    && self.part_start == 0
++                    && self
++                        .text_range
++                        .as_ref()
++                        .is_none_or(|range| range.start == 0)
++            }
++    }
++}
+diff --git a/codex-rs/core/src/compact_capacity_projection_tests.rs b/codex-rs/core/src/compact_capacity_projection_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/compact_capacity_projection_tests.rs
+@@ -0,0 +1,1117 @@
++use super::*;
++use crate::rollout::recorder::RolloutRecorder;
++use codex_protocol::models::ContentItemMetadata;
++use codex_protocol::models::FunctionCallOutputBody;
++use codex_protocol::openai_models::InputModality;
++use codex_protocol::protocol::{SessionSource, ThreadMemoryMode};
++use codex_thread_store::*;
++use codex_utils_output_truncation::TruncationPolicy;
++use pretty_assertions::assert_eq;
++use std::collections::HashMap;
++use std::sync::Mutex;
++use std::time::Duration;
++
++const ORIGINAL_PAIR: &str = r########"[{"type":"custom_tool_call","id":"ct_R337_pending","status":"completed","call_id":"call_R337_pending","name":"exec","input":"image((await tools.view_image({path:\"/home/codex/cds-capacity-r336-e69e7ca7/proofs/cp6-P29-r362/work/8.png\",detail:\"original\"})).image_url,\"original\");\nimage((await tools.view_image({path:\"/home/codex/cds-capacity-r336-e69e7ca7/proofs/cp6-P29-r362/work/9.png\",detail:\"original\"})).image_url,\"original\");\nimage((await tools.view_image({path:\"/home/codex/cds-capacity-r336-e69e7ca7/proofs/cp6-P29-r362/work/10.png\",detail:\"original\"})).image_url,\"original\");\nimage((await tools.view_image({path:\"/home/codex/cds-capacity-r336-e69e7ca7/proofs/cp6-P29-r362/work/11.png\",detail:\"original\"})).image_url,\"original\");\nimage((await tools.view_image({path:\"/home/codex/cds-capacity-r336-e69e7ca7/proofs/cp6-P29-r362/work/12.png\",detail:\"original\"})).image_url,\"original\");\nimage((await tools.view_image({path:\"/home/codex/cds-capacity-r336-e69e7ca7/proofs/cp6-P29-r362/work/13.png\",detail:\"original\"})).image_url,\"original\");\nimage((await tools.view_image({path:\"/home/codex/cds-capacity-r336-e69e7ca7/proofs/cp6-P29-r362/work/14.png\",detail:\"original\"})).image_url,\"original\");","internal_chat_message_metadata_passthrough":{"turn_id":"01a1a1fc-c598-7870-a58b-e9d0ee722432"}},{"type":"custom_tool_call_output","id":"ctco_01a1a1fc-c5ea-7092-b570-eb63b7496dc3","call_id":"call_R337_pending","output":[{"type":"input_text","text":"Script completed\nWall time 0.0 seconds\nOutput:\n"},{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPgYPgOAAETAQC5prJ2AAAAAElFTkSuQmCC","detail":"original"},{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPgZPgGAAEVAQDVMkJTAAAAAElFTkSuQmCC","detail":"original"},{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPgYvgKAAEXAQBnG1/BAAAAAElFTkSuQmCC","detail":"original"},{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPgZvgCAAEZAQAFnP5cAAAAAElFTkSuQmCC","detail":"original"},{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPgYfgMAAEbAQA210JbAAAAAElFTkSuQmCC","detail":"original"},{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPgZfgEAAEdAQBaQ7J+AAAAAElFTkSuQmCC","detail":"original"},{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPgY/gIAAEfAQDoaq/sAAAAAElFTkSuQmCC","detail":"original"}],"internal_chat_message_metadata_passthrough":{"turn_id":"01a1a1fc-c598-7870-a58b-e9d0ee722432","create_time":1793719059.9465458}}]"########;
++const OLD_TURN: &str = "01a1a1fc-c598-7870-a58b-e9d0ee722432";
++
++fn exact_pair() -> anyhow::Result<Vec<ResponseItem>> {
++    let mut items: Vec<ResponseItem> = serde_json::from_str(ORIGINAL_PAIR)?;
++    for item in &mut items {
++        item.set_turn_id_if_missing(OLD_TURN);
++    }
++    Ok(items)
++}
++
++fn typed_source(scenario: &str) -> anyhow::Result<Vec<ResponseItem>> {
++    let pair = exact_pair()?;
++    if scenario.starts_with("text_") {
++        let text = if scenario == "text_confirmed" {
++            format!("CONFIRMED-UTF8-TEXT-{}", "甲🙂éZ".repeat(60_000))
++        } else {
++            format!("CAPACITY_OWN_SYNTHETIC_SEED_R43 {}", "x".repeat(512 * 1024))
++        };
++        return Ok(vec![serde_json::from_value(json!({
++            "type":"message", "id":"msg_original-large-text", "role":"user",
++            "status":"completed", "content":[{"type":"input_text","text":text}],
++            "internal_chat_message_metadata_passthrough":{
++                "turn_id":if scenario == "text_confirmed" { serde_json::Value::Null } else { json!(OLD_TURN) },
++                "content_item_kinds":["source-text-part"],
++                "content_item_metadata":[ContentItemMetadata::user()]
++            }
++        }))?]);
++    }
++    if scenario == "function" {
++        let mut call = serde_json::to_value(&pair[0])?;
++        let code = call["input"].as_str().unwrap().to_owned();
++        call["type"] = json!("function_call");
++        call["arguments"] = json!({"code":code}).to_string().into();
++        call.as_object_mut().unwrap().remove("input");
++        call["id"] = json!("fc_original-historical-function");
++        let mut output = serde_json::to_value(&pair[1])?;
++        output["type"] = json!("function_call_output");
++        output["id"] = json!("fco_original-historical-function");
++        return Ok(vec![
++            serde_json::from_value(call)?,
++            serde_json::from_value(output)?,
++        ]);
++    }
++    if scenario == "parallel" {
++        let ResponseItem::CustomToolCallOutput { output, .. } = &pair[1] else {
++            unreachable!()
++        };
++        let parts = output.content_items().unwrap();
++        let mut calls = Vec::new();
++        let mut outputs = Vec::new();
++        // Include an empty completed output and success=false. It must be read
++        // as a whole original unit rather than disappearing from block coverage.
++        for (id, selected) in [
++            ("parallel-A", parts[..4].to_vec()),
++            ("parallel-B", parts[4..].to_vec()),
++            ("parallel-empty", Vec::new()),
++        ] {
++            let mut call = pair[0].clone();
++            let ResponseItem::CustomToolCall {
++                call_id,
++                id: item_id,
++                ..
++            } = &mut call
++            else {
++                unreachable!()
++            };
++            *call_id = id.to_owned();
++            *item_id = Some(ResponseItemId::with_suffix("ctc", id));
++            calls.push(call);
++            let mut result = pair[1].clone();
++            let ResponseItem::CustomToolCallOutput {
++                call_id,
++                id: item_id,
++                output,
++                ..
++            } = &mut result
++            else {
++                unreachable!()
++            };
++            *call_id = id.to_owned();
++            *item_id = Some(ResponseItemId::with_suffix("ctco", id));
++            output.body = FunctionCallOutputBody::ContentItems(selected);
++            output.success = Some(false);
++            outputs.push(result);
++        }
++        calls.extend(outputs);
++        return Ok(calls);
++    }
++    if scenario == "message" {
++        let value: serde_json::Value = serde_json::from_str(ORIGINAL_PAIR)?;
++        let mut item: ResponseItem = serde_json::from_value(json!({
++            "type":"message", "id":"msg_original-seven-part-message", "role":"user",
++            "status":"completed", "content":value[1]["output"],
++            "internal_chat_message_metadata_passthrough":{
++                "turn_id":OLD_TURN,
++                "content_item_kinds":(0..8).map(|index| format!("source-part-{index}")).collect::<Vec<_>>(),
++                "content_item_metadata":(0..8).map(|index| if index % 2 == 0 {
++                    ContentItemMetadata::user()
++                } else { ContentItemMetadata::tool(None) }).collect::<Vec<_>>()
++            }
++        }))?;
++        item.set_turn_id_if_missing(OLD_TURN);
++        return Ok(vec![item]);
++    }
++    Ok(pair)
++}
++
++fn target(items: Vec<ResponseItem>) -> ContextManager {
++    let mut target = ContextManager::new();
++    target.replace_annotated(items.into_iter().map(ResponseItemEnvelope::new).collect());
++    target
++}
++
++fn native_input() -> ResponseItem {
++    user_message("Summarize the original historical content.")
++}
++
++fn recorded_prompt(
++    mut history: ContextManager,
++    input: &ResponseItem,
++    modalities: &[InputModality],
++) -> Vec<ResponseItem> {
++    // Match the real pipeline: the instruction is recorded before for_prompt,
++    // so native normalization processes its content and positional metadata.
++    history.record_items(&[input.clone()], TruncationPolicy::Tokens(10_000));
++    history.for_prompt(modalities)
++}
++
++fn prepare(
++    work: &mut CapacitySummaryWork,
++    input: &ResponseItem,
++) -> anyhow::Result<Vec<ResponseItem>> {
++    let mut prompt = recorded_prompt(work.selected_history()?, input, &[InputModality::Image]);
++    work.prepare_prompt(&mut prompt, input, &[InputModality::Image])?;
++    Ok(prompt)
++}
++
++#[test]
++fn historical_projection_rejects_extra_suffix_or_changed_native_instruction() -> anyhow::Result<()>
++{
++    let original = target(exact_pair()?);
++    let mut work = CapacitySummaryWork::new(original);
++    assert!(work.reduce(false, "current-turn")?);
++    let input = native_input();
++    assert!(matches!(
++        &input,
++        ResponseItem::Message {
++            internal_chat_message_metadata_passthrough: None,
++            ..
++        }
++    ));
++    let mut prompt = recorded_prompt(work.selected_history()?, &input, &[InputModality::Image]);
++    assert!(
++        matches!(prompt.last(), Some(ResponseItem::Message {
++        internal_chat_message_metadata_passthrough: Some(metadata), ..
++    }) if metadata.content_item_kinds.as_ref().is_some_and(|kinds|
++        kinds.len() == 1 && kinds[0].0 == "unknown")),
++        "the known native instruction must actually gain positional metadata"
++    );
++    let original_instruction = prompt.last().unwrap().clone();
++    let mut extra = prompt.clone();
++    extra.push(user_message("CURRENT-SUFFIX-MUST-NOT-ENTER"));
++    assert!(
++        work.prepare_prompt(&mut extra, &input, &[InputModality::Image])
++            .is_err()
++    );
++    let mut extra_image = prompt.clone();
++    extra_image.insert(extra_image.len() - 1, typed_source("message")?.remove(0));
++    assert!(
++        work.prepare_prompt(&mut extra_image, &input, &[InputModality::Image])
++            .is_err()
++    );
++    let mut missing = prompt.clone();
++    missing.pop();
++    assert!(
++        work.prepare_prompt(&mut missing, &input, &[InputModality::Image])
++            .is_err()
++    );
++    let mut changed = prompt.clone();
++    *changed.last_mut().unwrap() = user_message("different arbitrary user tail");
++    assert!(
++        work.prepare_prompt(&mut changed, &input, &[InputModality::Image])
++            .is_err()
++    );
++    let mut duplicate = prompt.clone();
++    duplicate.push(input.clone());
++    assert!(
++        work.prepare_prompt(&mut duplicate, &input, &[InputModality::Image])
++            .is_err()
++    );
++    work.prepare_prompt(&mut prompt, &input, &[InputModality::Image])?;
++    let mut framed = prompt.last().unwrap().clone();
++    let parts = codex_context_fragments::to_annotated_content(&mut framed).unwrap();
++    assert_eq!(parts.len(), 2);
++    let (_, kind, provenance) = parts[1].clone().into_parts();
++    assert_eq!(kind.0, "unknown");
++    assert_eq!(provenance, ContentItemMetadata::harness());
++    codex_context_fragments::set_annotated_content(&mut framed, parts[..1].to_vec()).unwrap();
++    assert_eq!(
++        framed, original_instruction,
++        "appending framing must preserve the original instruction and all positional metadata"
++    );
++    Ok(())
++}
++
++#[test_case::test_case("current")]
++#[test_case::test_case("unknown")]
++#[test_case::test_case("in_progress")]
++#[test_case::test_case("incomplete")]
++#[test_case::test_case("missing_output")]
++#[test_case::test_case("encrypted")]
++fn historical_projection_refuses_unattributed_current_or_incomplete_items(
++    kind: &str,
++) -> anyhow::Result<()> {
++    let mut items = typed_source("message")?;
++    let current = if kind == "current" {
++        OLD_TURN
++    } else {
++        "current-turn"
++    };
++    match kind {
++        "unknown" => {
++            let ResponseItem::Message {
++                internal_chat_message_metadata_passthrough,
++                ..
++            } = &mut items[0]
++            else {
++                unreachable!()
++            };
++            internal_chat_message_metadata_passthrough
++                .as_mut()
++                .unwrap()
++                .turn_id = None;
++        }
++        "in_progress" | "incomplete" => {
++            let ResponseItem::Message { status, .. } = &mut items[0] else {
++                unreachable!()
++            };
++            *status = Some(kind.to_owned());
++        }
++        "missing_output" => items = vec![exact_pair()?.remove(0)],
++        "encrypted" => {
++            let ResponseItem::Message {
++                encrypted_content, ..
++            } = &mut items[0]
++            else {
++                unreachable!()
++            };
++            *encrypted_content = Some("opaque-cannot-project".to_owned());
++        }
++        _ => {}
++    }
++    let source = target(items);
++    assert!(CapacityProjection::new(&source, 0, source.annotated_items().len(), current).is_none());
++    Ok(())
++}
++
++#[test]
++fn historical_projection_message_keeps_positional_metadata_and_media() -> anyhow::Result<()> {
++    let source = target(typed_source("message")?);
++    let projection = CapacityProjection::new(&source, 0, 1, "current-turn").unwrap();
++    let original = source.annotated_items().to_vec();
++    let selected = projection.items(&source)?;
++    let mut full = source.annotated_items()[0].item.clone();
++    let full_parts = codex_context_fragments::to_annotated_content(&mut full).unwrap();
++    assert_eq!(full_parts.len(), 8);
++    for (index, part) in full_parts.iter().cloned().enumerate() {
++        let (_, kind, metadata) = part.into_parts();
++        assert_eq!(kind.0, format!("source-part-{index}"));
++        assert_eq!(
++            metadata,
++            if index % 2 == 0 {
++                ContentItemMetadata::user()
++            } else {
++                ContentItemMetadata::tool(None)
++            },
++            "the fixture must load actual non-default positional provenance"
++        );
++    }
++    let mut view = selected[0].item.clone();
++    let view_parts = codex_context_fragments::to_annotated_content(&mut view).unwrap();
++    assert_eq!(view_parts, full_parts[..4]);
++    assert_eq!(source.annotated_items(), original);
++    let mut normalized = source.clone();
++    normalized.replace_annotated(selected);
++    let input = native_input();
++    let mut work = CapacitySummaryWork::new(source.clone());
++    assert!(work.reduce(false, "current-turn")?);
++    let mut prompt = recorded_prompt(normalized, &input, &[InputModality::Image]);
++    work.prepare_prompt(&mut prompt, &input, &[InputModality::Image])?;
++    // Unsupported modality stripping cannot qualify as original typed coverage.
++    let mut stripped = source.clone();
++    stripped.replace_annotated(projection.items(&source)?);
++    let mut prompt = recorded_prompt(stripped, &input, &[]);
++    assert!(work.prepare_prompt(&mut prompt, &input, &[]).is_err());
++    Ok(())
++}
++
++#[test]
++fn historical_projection_requires_fresh_summary_exact_parts_and_carry_chain() -> anyhow::Result<()>
++{
++    let original = target(exact_pair()?);
++    let mut work = CapacitySummaryWork::new(original.clone());
++    assert!(work.reduce(false, "current-turn")?);
++    let input = native_input();
++    let _ = prepare(&mut work, &input)?;
++    let no_summary = CompactionResponse {
++        response_id: "first".to_owned(),
++        summary: None,
++    };
++    assert!(work.complete_selected(&no_summary, None).is_err());
++    let first = CompactionResponse {
++        response_id: "first".to_owned(),
++        summary: Some("first original parts".to_owned()),
++    };
++    assert!(!work.complete_selected(&first, None)?);
++    assert_eq!(
++        work.coverage.covered, 0,
++        "partial parts are not a consumed pair"
++    );
++    let summary = work.coverage.carry_summary.clone().unwrap();
++    work.advance(build_compacted_history(Vec::new(), &[], &summary))?;
++    let mut prompt = prepare(&mut work, &input)?;
++    assert_eq!(
++        work.coverage.prompt_carry(&prompt)?,
++        Some("first".to_owned())
++    );
++    let final_response = CompactionResponse {
++        response_id: "final".to_owned(),
++        summary: Some("all original parts".to_owned()),
++    };
++    assert!(
++        work.complete_selected(&final_response, None).is_err(),
++        "missing carry proof"
++    );
++    // An invalid completion must not consume the prepared projection.
++    assert!(work.complete_selected(&final_response, Some("first".to_owned()))?);
++    assert!(work.coverage.matches_target(&original, "final"));
++    work.coverage.segments[1]
++        .projection
++        .as_mut()
++        .unwrap()
++        .part_start += 1;
++    assert!(
++        !work.coverage.matches_target(&original, "final"),
++        "missing original part"
++    );
++    work.coverage.segments[1]
++        .projection
++        .as_mut()
++        .unwrap()
++        .part_start -= 1;
++    work.coverage.segments[1]
++        .projection
++        .as_mut()
++        .unwrap()
++        .part_start = 0;
++    assert!(
++        !work.coverage.matches_target(&original, "final"),
++        "duplicated original part"
++    );
++    prompt.retain(|item| !matches!(item, ResponseItem::Message { content, .. }
++        if content.iter().any(|part| matches!(part, ContentItem::InputText { text } if text == &summary))));
++    assert!(work.coverage.prompt_carry(&prompt).is_err());
++    Ok(())
++}
++
++async fn attach_real_writer(session: &mut Session) -> anyhow::Result<std::path::PathBuf> {
++    // Same native API and materialization path as session/tests.rs.
++    let config = session.get_config().await;
++    let live_thread = LiveThread::create(
++        Arc::clone(&session.services.thread_store),
++        CreateThreadParams {
++            creator_user_id: None,
++            creator_account_id: None,
++            session_id: session.session_id(),
++            thread_id: session.thread_id,
++            extra_config: None,
++            forked_from_id: None,
++            attached_thread: false,
++            parent_thread_id: None,
++            source: SessionSource::Exec,
++            thread_source: None,
++            originator: "historical_projection_test".to_owned(),
++            base_instructions: BaseInstructions::default(),
++            dynamic_tools: Vec::new(),
++            selected_capability_roots: Vec::new(),
++            multi_agent_version: None,
++            history_mode: Default::default(),
++            subagent_history_start_ordinal: None,
++            history_base: None,
++            initial_window_id: uuid::Uuid::now_v7().to_string(),
++            runtime_workspace_roots: None,
++            metadata: ThreadPersistenceMetadata {
++                cwd: Some(config.cwd.to_path_buf()),
++                model_provider: config.model_provider_id.clone(),
++                memory_mode: if config.memories.generate_memories {
++                    ThreadMemoryMode::Enabled
++                } else {
++                    ThreadMemoryMode::Disabled
++                },
++            },
++        },
++    )
++    .await?;
++    session.services.live_thread = Some(live_thread);
++    session
++        .ensure_rollout_materialized(PersistContext::Standard)
++        .await;
++    session.flush_rollout().await?;
++    Ok(session
++        .current_rollout_path()
++        .await?
++        .expect("real native rollout"))
++}
++
++#[derive(Default)]
++struct ProjectionWireState {
++    accepted_parts: HashMap<String, usize>,
++    accepted_empty: Vec<String>,
++    accepted_text_bytes: usize,
++    projection_requests: usize,
++    rejections: usize,
++    last_summary: Option<String>,
++}
++
++#[test_case::test_case("single"; "exact completed pair seven images budget six")]
++#[test_case::test_case("function"; "native function output seven images budget six")]
++#[test_case::test_case("parallel"; "interleaved parallel pairs three plus four and empty output")]
++#[test_case::test_case("message"; "one historical message seven images and positional metadata")]
++#[test_case::test_case("cancel"; "real token cancelled after first typed part summary")]
++#[test_case::test_case("upstream_error"; "later typed part upstream failure installs nothing")]
++#[test_case::test_case("no_summary"; "later completed without fresh summary installs nothing")]
++#[test_case::test_case("text_cold"; "single historical text 512k bytes budget 256k")]
++#[test_case::test_case("text_confirmed"; "confirmed current turn unicode text budget 256k")]
++#[test_case::test_case("text_cancel"; "real token cancelled after first text byte range summary")]
++#[test_case::test_case("text_upstream_error"; "later text byte range upstream failure installs nothing")]
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn historical_typed_projection_reads_all_parts_before_one_durable_install(
++    scenario: &str,
++) -> anyhow::Result<()> {
++    skip_if_no_network!(Ok(()));
++    use wiremock::matchers::{method, path};
++    use wiremock::{Mock, ResponseTemplate};
++    let (home, mut session, turn, server, events) = manual_partition_test_session().await?;
++    let rollout =
++        attach_real_writer(Arc::get_mut(&mut session).expect("unique native fixture session"))
++            .await?;
++    assert!(session.live_thread().is_some());
++    let mut consumed = user_message("CONFIRMED-ANCHOR-BEFORE-TYPED-OUTPUT");
++    consumed.set_turn_id_if_missing(OLD_TURN);
++    session
++        .record_conversation_items(&turn, turn.model_info(), &[consumed])
++        .await;
++    session
++        .confirm_capacity_completion(
++            &turn,
++            &turn.model_info().slug,
++            session.capture_capacity_send().await,
++            "ordinary-before-typed-projection",
++        )
++        .await;
++    let mut source = typed_source(scenario)?;
++    if scenario == "text_confirmed" {
++        // A second real ordinary completion grants only this exact captured
++        // prefix authority. The pending/current suffix is appended afterwards.
++        session
++            .record_conversation_items(&turn, turn.model_info(), &source)
++            .await;
++        session
++            .confirm_capacity_completion(
++                &turn,
++                &turn.model_info().slug,
++                session.capture_capacity_send().await,
++                "ordinary-confirmed-current-text",
++            )
++            .await;
++        source.clear();
++    }
++    source.push(user_message("CURRENT-PROTECTED-SUFFIX-AFTER-TYPED-OUTPUT"));
++    session
++        .record_conversation_items(&turn, turn.model_info(), &source)
++        .await;
++    let prefix = session
++        .capacity_prefix(&turn, &turn.model_info().slug)
++        .await
++        .expect("native historical prefix");
++    assert_eq!(prefix.needs_fresh_summary(), scenario != "text_confirmed");
++    let before = session.clone_history().await;
++    if scenario == "text_confirmed" {
++        let (index, item) = before
++            .annotated_items()
++            .iter()
++            .enumerate()
++            .find(|(_, envelope)| matches!(&envelope.item,
++                ResponseItem::Message { id: Some(id), .. } if id.to_string() == "msg_original-large-text"))
++            .expect("the ordinary-confirmed current text remains in the captured source");
++        assert_eq!(item.item.turn_id(), Some(turn.sub_id.as_str()));
++        assert!(
++            index < prefix.prefix.len,
++            "only the actual confirmed prefix grants authority"
++        );
++    }
++    let before_window = session.current_window().await;
++    let checkpoint = session.capacity_checkpoint_for_test().await.unwrap();
++    let cp_path = home
++        .path()
++        .join("cache/request-capacity-v1")
++        .join(format!("{}.json", session.thread_id));
++    let disk_before = std::fs::read(&cp_path)?;
++    assert_eq!(
++        serde_json::from_slice::<serde_json::Value>(&disk_before)?["checkpoint"],
++        serde_json::to_value(&checkpoint)?
++    );
++    let original = before
++        .raw_items()
++        .map(serde_json::to_value)
++        .collect::<serde_json::Result<Vec<_>>>()?;
++    // Keep independent raw history Original. The official request formatter
++    // selects the wire detail from the actual model capability, never from the
++    // observed request; it clones without changing source bytes or history.
++    if !scenario.starts_with("text_") {
++        let raw_parts = original
++            .iter()
++            .filter_map(|item| {
++                if item["type"] == "custom_tool_call_output"
++                    || item["type"] == "function_call_output"
++                {
++                    item["output"].as_array()
++                } else if scenario == "message" && item["id"] == "msg_original-seven-part-message" {
++                    item["content"].as_array()
++                } else {
++                    None
++                }
++            })
++            .flatten()
++            .collect::<Vec<_>>();
++        assert_eq!(
++            raw_parts
++                .iter()
++                .filter(|part| part["type"] == "input_image")
++                .count(),
++            7
++        );
++        assert!(
++            raw_parts
++                .iter()
++                .filter(|part| part["type"] == "input_image")
++                .all(|part| part["detail"] == "original"),
++            "raw native source retains Original detail"
++        );
++    }
++    let expected_wire = Prompt {
++        input: before.raw_items().cloned().collect(),
++        ..Default::default()
++    }
++    .get_formatted_input_for_request(turn.model_info())
++    .iter()
++    .map(serde_json::to_value)
++    .collect::<serde_json::Result<Vec<_>>>()?;
++    assert_eq!(
++        session.clone_history().await.annotated_items(),
++        before.annotated_items(),
++        "native wire formatting cannot mutate live source history"
++    );
++    let mut expected = HashMap::<String, Vec<serde_json::Value>>::new();
++    let mut expected_calls = HashMap::<String, serde_json::Value>::new();
++    let mut expected_order = Vec::new();
++    for item in &original {
++        if item["type"] == "custom_tool_call" || item["type"] == "function_call" {
++            expected_calls.insert(item["call_id"].as_str().unwrap().to_owned(), item.clone());
++        }
++    }
++    for item in &expected_wire {
++        if item["type"] == "custom_tool_call_output" || item["type"] == "function_call_output" {
++            let key = item["call_id"].as_str().unwrap().to_owned();
++            expected_order.push(key.clone());
++            expected.insert(key, item["output"].as_array().unwrap().clone());
++        } else if (scenario == "message" && item["id"] == "msg_original-seven-part-message")
++            || (scenario.starts_with("text_") && item["id"] == "msg_original-large-text")
++        {
++            expected_order.push("message".to_owned());
++            expected.insert(
++                "message".to_owned(),
++                item["content"].as_array().unwrap().clone(),
++            );
++        }
++    }
++    if !scenario.starts_with("text_") {
++        assert_eq!(
++            expected
++                .values()
++                .flat_map(|parts| parts.iter())
++                .filter(|part| part["type"] == "input_image")
++                .count(),
++            7
++        );
++    } else {
++        assert_eq!(expected["message"].len(), 1);
++        assert!(expected["message"][0]["text"].as_str().unwrap().len() > 512 * 1024);
++    }
++    let state = Arc::new(Mutex::new(ProjectionWireState::default()));
++    let inspect = Arc::new(tokio::sync::Notify::new());
++    let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
++    let fixture_state = Arc::clone(&state);
++    let fixture_inspect = Arc::clone(&inspect);
++    let fixture_release = Arc::clone(&release);
++    let scenario_owned = scenario.to_owned();
++    let expected_for_mock = expected.clone();
++    let expected_order_for_mock = expected_order.clone();
++    Mock::given(method("POST"))
++        .and(path("/v1/responses"))
++        .respond_with(move |request: &wiremock::Request| {
++            let decoded = native_mock_decoded_json_body(request);
++            let body: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
++            assert!(
++                body.get("tools")
++                    .is_none_or(|tools| tools.as_array().is_some_and(Vec::is_empty)),
++                "compactor has no tool executor declarations"
++            );
++            let images = capacity_test_image_count(&body);
++            eprintln!(
++                "NATIVE_TYPED_REQUEST scenario={} images={} input_items={} tail_content_parts={}",
++                scenario_owned,
++                images,
++                body["input"].as_array().map_or(0, Vec::len),
++                body["input"]
++                    .as_array()
++                    .and_then(|items| items.last())
++                    .and_then(|item| item["content"].as_array())
++                    .map_or(0, Vec::len),
++            );
++            if images > 6 || (scenario_owned.starts_with("text_") && decoded.len() > 256 * 1024) {
++                fixture_state.lock().unwrap().rejections += 1;
++                return ResponseTemplate::new(413)
++                    .set_body_json(json!({"error":{"message":"fixed six image capacity"}}));
++            }
++            let input = body["input"].as_array().unwrap();
++            let projected = input.iter().any(|item| {
++                item["content"].as_array().is_some_and(|parts| {
++                    parts.iter().any(|part| {
++                        part["text"].as_str().is_some_and(|text| {
++                            text.starts_with("Compaction-only partial historical content:")
++                        })
++                    })
++                })
++            });
++            if projected {
++                let tail = input.last().expect("native compaction instruction tail");
++                let content = tail["content"]
++                    .as_array()
++                    .expect("typed instruction content");
++                let metadata = tail["internal_chat_message_metadata_passthrough"]
++                    .as_object()
++                    .expect(
++                        "framed instruction keeps native positional metadata on the actual wire",
++                    );
++                let kinds = metadata["content_item_kinds"]
++                    .as_array()
++                    .expect("framed instruction kinds");
++                // Native ordinary Responses deliberately clears per-content
++                // attribution (client.rs); only RLite accepts that host field.
++                // Source-side annotated provenance remains checked above.
++                assert!(
++                    !metadata.contains_key("content_item_metadata"),
++                    "ordinary Responses must omit host-only source attribution"
++                );
++                assert_eq!(
++                    kinds.len(),
++                    content.len(),
++                    "every actual wire tail part has a kind"
++                );
++                assert_eq!(kinds.last().unwrap(), "unknown");
++                assert!(
++                    content.last().unwrap()["text"]
++                        .as_str()
++                        .unwrap()
++                        .starts_with("Compaction-only partial historical content:")
++                );
++            }
++            let mut observed = fixture_state.lock().unwrap();
++            let mut block = false;
++            let mut later_failure = false;
++            if projected {
++                observed.projection_requests += 1;
++                if let Some(last) = &observed.last_summary {
++                    assert!(
++                        input
++                            .iter()
++                            .any(|item| item["content"].as_array().is_some_and(|parts| parts
++                                .iter()
++                                .any(|part| part["text"].as_str() == Some(last.as_str())))),
++                        "actual next request carries exact fresh summary"
++                    );
++                }
++                let selected = input
++                    .iter()
++                    .filter(|item| {
++                        item["type"] == "custom_tool_call_output"
++                            || item["type"] == "function_call_output"
++                    })
++                    .collect::<Vec<_>>();
++                let (key, parts) =
++                    if scenario_owned == "message" || scenario_owned.starts_with("text_") {
++                        let message = input
++                            .iter()
++                            .find(|item| {
++                                item["id"]
++                                    == if scenario_owned.starts_with("text_") {
++                                        "msg_original-large-text"
++                                    } else {
++                                        "msg_original-seven-part-message"
++                                    }
++                            })
++                            .expect("original message view");
++                        (
++                            "message".to_owned(),
++                            message["content"].as_array().unwrap().clone(),
++                        )
++                    } else {
++                        assert_eq!(
++                            selected.len(),
++                            1,
++                            "one projected completed pair per request"
++                        );
++                        let output = selected[0];
++                        let key = output["call_id"].as_str().unwrap().to_owned();
++                        let call_type = if output["type"] == "function_call_output" {
++                            "function_call"
++                        } else {
++                            "custom_tool_call"
++                        };
++                        let calls = input
++                            .iter()
++                            .filter(|item| item["type"] == call_type && item["call_id"] == key)
++                            .collect::<Vec<_>>();
++                        assert_eq!(calls.len(), 1);
++                        let original_call = &expected_calls[&key];
++                        for field in [
++                            "type",
++                            "id",
++                            "call_id",
++                            "input",
++                            "arguments",
++                            "name",
++                            "namespace",
++                            "status",
++                        ] {
++                            assert_eq!(calls[0][field], original_call[field]);
++                        }
++                        (key, output["output"].as_array().unwrap().clone())
++                    };
++                later_failure = observed.projection_requests > 1
++                    && matches!(
++                        scenario_owned.as_str(),
++                        "upstream_error"
++                            | "no_summary"
++                            | "cancel"
++                            | "text_upstream_error"
++                            | "text_cancel"
++                    );
++                if later_failure {
++                    block = true;
++                } else {
++                    let source = &expected_for_mock[&key];
++                    let offset = *observed.accepted_parts.get(&key).unwrap_or(&0);
++                    if scenario_owned.starts_with("text_") {
++                        assert_eq!(parts.len(), 1);
++                        let original = source[0]["text"].as_str().unwrap();
++                        let selected = parts[0]["text"].as_str().unwrap();
++                        let start = observed.accepted_text_bytes;
++                        let end = start + selected.len();
++                        assert!(!selected.is_empty(), "byte progress is never empty");
++                        assert!(original.is_char_boundary(start) && original.is_char_boundary(end));
++                        assert_eq!(
++                            selected.as_bytes(),
++                            &original.as_bytes()[start..end],
++                            "each accepted view is the next exact original UTF-8 byte range"
++                        );
++                        observed.accepted_text_bytes = end;
++                        if end == original.len() {
++                            observed.accepted_parts.insert(key.clone(), source.len());
++                        }
++                    } else if source.is_empty() {
++                        assert!(parts.is_empty());
++                        assert!(!observed.accepted_empty.contains(&key));
++                        observed.accepted_empty.push(key.clone());
++                    } else {
++                        assert!(!parts.is_empty());
++                        assert_eq!(parts, source[offset..offset + parts.len()]);
++                        observed
++                            .accepted_parts
++                            .insert(key.clone(), offset + parts.len());
++                    }
++                    let all = expected_order_for_mock.iter().all(|key| {
++                        let source = &expected_for_mock[key];
++                        if source.is_empty() {
++                            observed.accepted_empty.contains(key)
++                        } else {
++                            observed.accepted_parts.get(key) == Some(&source.len())
++                        }
++                    });
++                    block = all;
++                }
++            }
++            let response_id = format!("typed-projection-response-{}", observed.projection_requests);
++            let summary = format!("FRESH-TYPED-SUMMARY-{}", observed.projection_requests);
++            if projected && !later_failure {
++                observed.last_summary = Some(format!("{SUMMARY_PREFIX}\n{summary}"));
++            }
++            drop(observed);
++            if block {
++                fixture_inspect.notify_one();
++                let (lock, condition) = &*fixture_release;
++                let (released, timed) = condition
++                    .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(10), |released| {
++                        !*released
++                    })
++                    .unwrap();
++                assert!(
++                    *released && !timed.timed_out(),
++                    "typed summary release barrier"
++                );
++            }
++            if later_failure
++                && matches!(
++                    scenario_owned.as_str(),
++                    "upstream_error" | "text_upstream_error"
++                )
++            {
++                return ResponseTemplate::new(500).set_body_string("synthetic later part failure");
++            }
++            let mut output = Vec::new();
++            if !(later_failure && scenario_owned == "no_summary") {
++                output.push(responses::ev_assistant_message("typed-summary", &summary));
++            }
++            output.push(responses::ev_completed(&response_id));
++            ResponseTemplate::new(200)
++                .insert_header("content-type", "text/event-stream")
++                .set_body_string(responses::sse(output))
++        })
++        .mount(&server)
++        .await;
++    eprintln!(
++        "NATIVE_TYPED_MODALITIES scenario={} modalities={:?}",
++        scenario,
++        turn.model_info().input_modalities
++    );
++    let token = CancellationToken::new();
++    let step = session
++        .capture_step_context(Arc::clone(&turn), &token)
++        .await?;
++    let world = Arc::new(session.build_world_state_for_step(&step, true).await?);
++    let attempt = run_inline_capacity_compact_task(
++        Arc::clone(&session),
++        Arc::clone(&turn),
++        step,
++        world,
++        prefix,
++        capacity_rejection_for_test(),
++        token.child_token(),
++    );
++    // Discovery spans native partition retries. The existing whole-case/batch
++    // budget bounds that work; the ten-second barrier budget begins only once
++    // the provider actually holds the response. An early native return fails
++    // immediately instead of hanging while waiting for a nonexistent barrier.
++    let check_and_release = async {
++        assert_eq!(
++            session.clone_history().await.annotated_items(),
++            before.annotated_items(),
++            "all original envelopes remain live until final summary"
++        );
++        assert_eq!(session.current_window().await, before_window);
++        assert_eq!(
++            std::fs::read(&cp_path)?,
++            disk_before,
++            "partial summaries cannot publish CP"
++        );
++        session.flush_rollout().await?;
++        let (items, _, errors) = RolloutRecorder::load_rollout_items(&rollout).await?;
++        assert_eq!(errors, 0);
++        assert_eq!(
++            items
++                .iter()
++                .filter(|item| matches!(item, codex_history::RolloutItem::Compacted(_)))
++                .count(),
++            0
++        );
++        if matches!(scenario, "cancel" | "text_cancel") {
++            token.cancel();
++        }
++        let (lock, condition) = &*release;
++        *lock.lock().unwrap() = true;
++        condition.notify_all();
++        Ok::<(), anyhow::Error>(())
++    };
++    tokio::pin!(attempt);
++    let mut early_result = None;
++    let checked = tokio::select! {
++        biased;
++        result = &mut attempt => {
++            early_result = Some(result);
++            Err(anyhow::anyhow!("native recovery returned before the expected provider barrier"))
++        }
++        _ = inspect.notified() => {
++            match tokio::time::timeout(Duration::from_secs(10), check_and_release).await {
++                Ok(result) => result,
++                Err(error) => Err(anyhow::Error::from(error)),
++            }
++        }
++    };
++    // Always release the owned synthetic provider on a failed check as well.
++    // This does not cancel or drop the native attempt; observe its real result.
++    let (lock, condition) = &*release;
++    *lock.lock().unwrap() = true;
++    condition.notify_all();
++    let result = match early_result {
++        Some(result) => result,
++        None => attempt.await,
++    };
++    // Diagnostics for this synthetic native fixture only. Both failures remain
++    // errors; preserve the original timeout and every installation assertion.
++    eprintln!(
++        "NATIVE_TYPED_RESULT scenario={} attempt={:?} barrier={:?}",
++        scenario,
++        result
++            .as_ref()
++            .map(|_| ())
++            .map_err(|error| error.to_string()),
++        checked
++            .as_ref()
++            .map(|_| ())
++            .map_err(|error| error.to_string()),
++    );
++    checked?;
++    session.flush_rollout().await?;
++    let success = matches!(
++        scenario,
++        "single" | "function" | "parallel" | "message" | "text_cold" | "text_confirmed"
++    );
++    let after = session.clone_history().await;
++    if success {
++        result?;
++        let after_window = session.current_window().await;
++        assert_eq!(after_window.1, before_window.1 + 1);
++        assert_ne!(after_window.2, before_window.2);
++        assert_ne!(
++            after.annotated_items(),
++            before.annotated_items(),
++            "live original target must actually be replaced"
++        );
++        let final_summary = state
++            .lock()
++            .unwrap()
++            .last_summary
++            .clone()
++            .expect("last fresh typed summary");
++        assert!(after.raw_items().any(|item| matches!(item, ResponseItem::Message { content, .. }
++            if content.iter().any(|part| matches!(part, ContentItem::InputText { text } if text == &final_summary)))));
++        assert!(
++            after.raw_items().all(|item| match item {
++                ResponseItem::CustomToolCallOutput { .. }
++                | ResponseItem::FunctionCallOutput { .. } => false,
++                ResponseItem::Message { content, .. } => !content
++                    .iter()
++                    .any(|part| matches!(part, ContentItem::InputImage { .. })),
++                _ => true,
++            }),
++            "original typed target cannot remain as an unmodified no-op replacement"
++        );
++        assert!(
++            session
++                .capacity_checkpoint_matches_history_for_test(after.annotated_items())
++                .await?
++        );
++        assert_eq!(
++            after.annotated_items().last(),
++            before.annotated_items().last(),
++            "protected suffix remains exact"
++        );
++        let current = session.capacity_checkpoint_for_test().await.unwrap();
++        let current_value = serde_json::to_value(&current)?;
++        let checkpoint_value = serde_json::to_value(&checkpoint)?;
++        assert_eq!(
++            current_value["completed_epoch"],
++            checkpoint_value["completed_epoch"]
++        );
++        assert_eq!(
++            current_value["recovery_turn_id"],
++            checkpoint_value["recovery_turn_id"]
++        );
++        assert_eq!(
++            current_value["response_id"],
++            checkpoint_value["response_id"]
++        );
++        assert_eq!(current_value["origin"], "translated_prefix");
++        assert_eq!(current_value["binding"]["history_anchor"], after_window.0);
++        assert_eq!(
++            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&cp_path)?)?["checkpoint"],
++            serde_json::to_value(&current)?
++        );
++        let observed = state.lock().unwrap();
++        assert!(observed.rejections > 0);
++        assert!(observed.projection_requests >= 2);
++        for (key, source) in &expected {
++            if source.is_empty() {
++                assert_eq!(
++                    observed
++                        .accepted_empty
++                        .iter()
++                        .filter(|seen| *seen == key)
++                        .count(),
++                    1
++                );
++            } else {
++                assert_eq!(observed.accepted_parts[key], source.len());
++            }
++        }
++    } else {
++        let error = result.expect_err("later failure cannot install a partial result");
++        if matches!(scenario, "cancel" | "text_cancel") {
++            assert!(matches!(error.details(), CodexErrorDetails::TurnAborted));
++        }
++        assert_eq!(after.annotated_items(), before.annotated_items());
++        assert_eq!(session.current_window().await, before_window);
++        assert_eq!(std::fs::read(&cp_path)?, disk_before);
++        assert!(
++            session
++                .capacity_prefix(&turn, &turn.model_info().slug)
++                .await
++                .is_none(),
++            "failed attempt does not rearm fence"
++        );
++    }
++    let (items, _, errors) = RolloutRecorder::load_rollout_items(&rollout).await?;
++    assert_eq!(errors, 0);
++    assert_eq!(
++        items
++            .iter()
++            .filter(|item| matches!(item, codex_history::RolloutItem::Compacted(_)))
++            .count(),
++        usize::from(success),
++        "one final durable installation only"
++    );
++    if success {
++        let compacted = items
++            .iter()
++            .filter_map(|item| match item {
++                codex_history::RolloutItem::Compacted(item) => Some(item),
++                _ => None,
++            })
++            .collect::<Vec<_>>();
++        assert_eq!(compacted.len(), 1);
++        // Native CompactedItem encoding writes default metadata for None slots
++        // when its positional metadata array exists. Roundtrip the independent
++        // live expected value through the official codec, then compare the full
++        // envelopes; do not discard or mask any non-default metadata.
++        let mut expected_compacted: codex_history::CompactedItem =
++            serde_json::from_value(json!({"message":"independent live replacement codec"}))?;
++        expected_compacted.replacement_history = Some(after.annotated_items().to_vec());
++        let replay_expected: codex_history::CompactedItem =
++            serde_json::from_slice(&serde_json::to_vec(&expected_compacted)?)?;
++        assert_eq!(
++            compacted[0].replacement_history, replay_expected.replacement_history,
++            "durable replacement must equal independent live history after native replay"
++        );
++        let after_window = session.current_window().await;
++        assert_eq!(compacted[0].window_number, Some(after_window.1));
++        assert_eq!(
++            compacted[0].window_id.as_deref(),
++            Some(after_window.2.to_string().as_str())
++        );
++        // Native prefix compaction stores the summary in rich replacement
++        // history (already checked exactly above), leaving this legacy field empty.
++        assert!(compacted[0].message.is_empty());
++        let cp = serde_json::to_value(session.capacity_checkpoint_for_test().await.unwrap())?;
++        assert_eq!(
++            cp["binding"]["history_anchor"],
++            format!(
++                "{}:{}",
++                session.thread_id,
++                compacted[0].window_number.unwrap()
++            )
++        );
++        assert!(
++            session
++                .capacity_checkpoint_matches_history_for_test(
++                    compacted[0].replacement_history.as_ref().unwrap()
++                )
++                .await?
++        );
++    }
++    let completed = std::iter::from_fn(|| events.try_recv().ok())
++        .filter(|event| {
++            matches!(&event.msg,
++        EventMsg::ItemCompleted(event) if matches!(event.item,TurnItem::ContextCompaction(_)))
++        })
++        .count();
++    assert_eq!(completed, usize::from(success));
++    session.drain_capacity_native_persistence_for_test().await;
++    session.live_thread().unwrap().shutdown().await?;
++    Ok(())
++}
+diff --git a/codex-rs/core/src/compact_tests.rs b/codex-rs/core/src/compact_tests.rs
+--- a/codex-rs/core/src/compact_tests.rs
++++ b/codex-rs/core/src/compact_tests.rs
+@@ -977,9 +977,21 @@
+         .respond_with(move |request: &wiremock::Request| {
+             let decoded = native_mock_decoded_json_body(request);
+             let body: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
++            // This negative fixture rejects the same original pair in every
++            // prompt view. A valid UTF-8 text view may split the literal marker;
++            // its native call/output identity still makes the source irreducible.
+             let too_large = decoded
+                 .windows(b"BIG-CONSUMED-".len())
+-                .any(|window| window == b"BIG-CONSUMED-");
++                .any(|window| window == b"BIG-CONSUMED-")
++                || body["input"].as_array().is_some_and(|items| {
++                    items.iter().any(|item| {
++                        item["call_id"] == "consumed-pair"
++                            && matches!(
++                                item["type"].as_str(),
++                                Some("custom_tool_call") | Some("custom_tool_call_output")
++                            )
++                    })
++                });
+             observed.lock().unwrap().push(body);
+             if too_large {
+                 ResponseTemplate::new(413)
+@@ -3366,3 +3378,6 @@
+     assert!(server.received_requests().await.unwrap().is_empty());
+     Ok(())
+ }
++
++#[path = "compact_capacity_projection_tests.rs"]
++mod historical_typed_projection_tests;
+diff --git a/codex-rs/core/src/compact_token_budget.rs b/codex-rs/core/src/compact_token_budget.rs
+--- a/codex-rs/core/src/compact_token_budget.rs
++++ b/codex-rs/core/src/compact_token_budget.rs
+@@ -85,6 +85,76 @@
+     .await
+ }
+ 
++pub(crate) enum CapacityResetOutcome {
++    Reset(Option<crate::session::CapacityResetContinuation>),
++    FreshSummary(CapacityPrefix),
++}
++
++/// Same native reset lifecycle, with a one-turn proof for a preserved old gap.
++pub(crate) async fn run_inline_capacity_reset_with_old_gap(
++    sess: Arc<Session>,
++    step_context: Arc<StepContext>,
++    world_state: Arc<WorldState>,
++    mut prefix: CapacityPrefix,
++    rejection: UnexpectedResponseError,
++    cancellation_token: CancellationToken,
++) -> CodexResult<CapacityResetOutcome> {
++    if cancellation_token.is_cancelled() {
++        return Err(CodexErr::TurnAborted);
++    }
++    match run_pre_compact_hooks(&sess, &step_context.turn, CompactionTrigger::Auto)
++        .or_cancel(&cancellation_token)
++        .await
++        .unwrap_or(PreCompactHookOutcome::Stopped)
++    {
++        PreCompactHookOutcome::Continue => prefix.mark_pre_compact_hook_ran(),
++        PreCompactHookOutcome::Stopped => return Err(CodexErr::TurnAborted),
++    }
++    match sess
++        .prepare_capacity_reset_for_recovery(
++            &step_context,
++            Arc::clone(&world_state),
++            prefix,
++            &cancellation_token,
++        )
++        .await
++    {
++        crate::session::CapacityResetPreparation::Ready { prefix, completion } => {
++            run_inline_capacity_reset_task(
++                sess,
++                step_context,
++                world_state,
++                prefix,
++                rejection,
++                cancellation_token.clone(),
++            )
++            .await?;
++            if cancellation_token.is_cancelled() {
++                return Err(CodexErr::TurnAborted);
++            }
++            let continuation = match completion {
++                Some(receiver) => receiver.await.ok(),
++                None => None,
++            };
++            Ok(CapacityResetOutcome::Reset(continuation))
++        }
++        crate::session::CapacityResetPreparation::NoProgress(prefix) => {
++            if prefix.needs_fresh_summary() {
++                Ok(CapacityResetOutcome::FreshSummary(prefix))
++            } else {
++                Err(CodexErr::UnexpectedStatus(rejection))
++            }
++        }
++        crate::session::CapacityResetPreparation::Invalid => {
++            if cancellation_token.is_cancelled() {
++                Err(CodexErr::TurnAborted)
++            } else {
++                Err(CodexErr::UnexpectedStatus(rejection))
++            }
++        }
++    }
++}
++
+ async fn run_compact_task_inner(
+     sess: &Arc<Session>,
+     step_context: &Arc<StepContext>,
+@@ -94,7 +164,12 @@
+     cancellation_token: Option<&CancellationToken>,
+ ) -> CodexResult<()> {
+     let turn_context = &step_context.turn;
+-    let pre_compact_outcome = if let Some(token) = cancellation_token {
++    let pre_compact_outcome = if capacity
++        .as_ref()
++        .is_some_and(|(prefix, _)| prefix.pre_compact_hook_already_ran())
++    {
++        PreCompactHookOutcome::Continue
++    } else if let Some(token) = cancellation_token {
+         run_pre_compact_hooks(sess, turn_context, trigger)
+             .or_cancel(token)
+             .await
+diff --git a/codex-rs/core/src/session/capacity_reset_continuation.rs b/codex-rs/core/src/session/capacity_reset_continuation.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/session/capacity_reset_continuation.rs
+@@ -0,0 +1,355 @@
++//! One-turn continuation of an admitted native capacity reset.
++//! It never grants a new epoch, current-input authority, or a second reset.
++use super::*;
++use sha2::Digest;
++
++pub(crate) enum CapacityResetPreparation {
++    Ready {
++        prefix: CapacityPrefix,
++        completion: Option<tokio::sync::oneshot::Receiver<CapacityResetContinuation>>,
++    },
++    NoProgress(CapacityPrefix),
++    Invalid,
++}
++
++pub(super) struct PreparedCapacityReset {
++    pub(super) items: Vec<ResponseItemEnvelope>,
++    pub(super) baseline: WorldStateSnapshot,
++}
++
++pub(super) struct CapacityResetCompletion {
++    gap: Arc<Vec<ResponseItemEnvelope>>,
++    gap_hash: [u8; 32],
++    staged: std::sync::Mutex<Option<CapacitySendSnapshot>>,
++    sender: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<CapacityResetContinuation>>>,
++}
++
++/// In-memory only, owned by the existing run_turn invocation and consumed once.
++pub(crate) struct CapacityResetContinuation {
++    original: request_capacity::Checkpoint,
++    checkpoint: request_capacity::Checkpoint,
++    home: PathBuf,
++    reset: CapacitySendSnapshot,
++    auth_owner_generation: Option<u64>,
++    gap: Arc<Vec<ResponseItemEnvelope>>,
++    gap_hash: [u8; 32],
++}
++
++fn exact_gap_hash(items: &[ResponseItemEnvelope]) -> Option<[u8; 32]> {
++    // Include every native item, all harness provenance, and the internal output
++    // success bit that its wire serializer deliberately excludes.
++    let values = items
++        .iter()
++        .map(|envelope| {
++            let success = match &envelope.item {
++                ResponseItem::FunctionCallOutput { output, .. }
++                | ResponseItem::CustomToolCallOutput { output, .. } => output.success,
++                _ => None,
++            };
++            (&envelope.item, &envelope.metadata, success)
++        })
++        .collect::<Vec<_>>();
++    let bytes = serde_json::to_vec(&values).ok()?;
++    Some(sha2::Sha256::digest(bytes).into())
++}
++
++impl CapacityPrefix {
++    /// Called under the same state lock as the live replacement and its receipt.
++    pub(super) fn stage_reset_continuation(
++        &self,
++        receipt: &CapacitySendSnapshot,
++        installed: &ContextManager,
++    ) {
++        let Some(completion) = &self.reset_completion else {
++            return;
++        };
++        let start = receipt.history.annotated_items().len();
++        let Some(end) = start.checked_add(completion.gap.len()) else {
++            return;
++        };
++        if receipt.generation != installed.history_version()
++            || installed.annotated_items().get(..start) != Some(receipt.history.annotated_items())
++            || installed.annotated_items().get(start..end) != Some(completion.gap.as_slice())
++            || installed.pair_safe_prefix_len(end) != end
++        {
++            return;
++        }
++        if let Ok(mut staged) = completion.staged.lock() {
++            *staged = Some(receipt.clone());
++        }
++    }
++
++    /// Called only after the existing rollout ACK and checkpoint CAS succeeded.
++    pub(super) fn publish_reset_continuation(&self, checkpoint: request_capacity::Checkpoint) {
++        let Some(completion) = &self.reset_completion else {
++            return;
++        };
++        let Some(reset) = completion
++            .staged
++            .lock()
++            .ok()
++            .and_then(|mut staged| staged.take())
++        else {
++            return;
++        };
++        if !checkpoint
++            .binding
++            .same_sampling_scope(&self.checkpoint.binding)
++            || checkpoint.binding.history_anchor != reset.history_anchor
++            || checkpoint.binding.history_anchor == self.checkpoint.binding.history_anchor
++            || checkpoint.prefix_len != reset.history.annotated_items().len()
++            || checkpoint.completed_epoch != self.checkpoint.completed_epoch
++            || checkpoint.response_id != self.checkpoint.response_id
++            || checkpoint.recovery_turn_id != self.checkpoint.recovery_turn_id
++            || checkpoint.recovery_turn_id.is_none()
++            || checkpoint.origin != request_capacity::Origin::TranslatedPrefix
++            || !matches!(
++                checkpoint.matches_prefix(reset.history.annotated_items()),
++                Ok(true)
++            )
++        {
++            return;
++        }
++        let proof = CapacityResetContinuation {
++            original: self.checkpoint.clone(),
++            checkpoint,
++            home: self.home.clone(),
++            reset,
++            auth_owner_generation: self.prefix.auth_owner_generation,
++            gap: Arc::clone(&completion.gap),
++            gap_hash: completion.gap_hash,
++        };
++        if let Some(sender) = completion
++            .sender
++            .lock()
++            .ok()
++            .and_then(|mut sender| sender.take())
++        {
++            // A dropped/cancelled receiver does not create a usable continuation.
++            let _ = sender.send(proof);
++        }
++    }
++}
++
++impl Session {
++    /// Build the original native reset plan after the native pre-compact hook. An unchanged or
++    /// larger request prefix cannot consume a recovery attempt by installing it.
++    pub(crate) async fn prepare_capacity_reset_for_recovery(
++        self: &Arc<Self>,
++        step: &StepContext,
++        world_state: Arc<WorldState>,
++        mut prefix: CapacityPrefix,
++        token: &CancellationToken,
++    ) -> CapacityResetPreparation {
++        if token.is_cancelled() {
++            return CapacityResetPreparation::Invalid;
++        }
++        let retained = self.retained_client_items_for_context_window(&prefix.history);
++        let (updates, baseline) = tokio::select! {
++            biased;
++            _ = token.cancelled() => return CapacityResetPreparation::Invalid,
++            value = self.build_initial_context_with_world_state(step, world_state.as_ref()) => value,
++        };
++        let mut items = crate::context_manager::updates::merge_world_state_updates(updates)
++            .into_iter()
++            .map(ResponseItemEnvelope::new)
++            .chain(retained)
++            .collect::<Vec<_>>();
++        for envelope in &mut items {
++            Self::assign_missing_response_item_id(&mut envelope.item);
++        }
++        {
++            let state = self.state.lock().await;
++            if token.is_cancelled()
++                || state.history.history_version() != prefix.prefix.generation
++                || self.services.model_client.auth_owner_generation()
++                    != prefix.prefix.auth_owner_generation
++                || self.current_window_from_state(&state).0
++                    != prefix.checkpoint.binding.history_anchor
++                || state.request_capacity_checkpoint.as_ref() != Some(&prefix.checkpoint)
++                || !matches!(
++                    prefix
++                        .checkpoint
++                        .matches_prefix(state.history.annotated_items()),
++                    Ok(true)
++                )
++            {
++                return CapacityResetPreparation::Invalid;
++            }
++        }
++        // The exact preserved suffix and non-input settings are identical. Use
++        // the original native builder, including its provider metadata and image
++        // policies, to compare only the changing nonempty prefix contribution.
++        let metadata = crate::responses_metadata::CodexResponsesMetadata::new(
++            String::new(),
++            self.session_id().to_string(),
++            self.thread_id.to_string(),
++            prefix.checkpoint.binding.history_anchor.clone(),
++        );
++        let size = |history: ContextManager| {
++            let prompt = crate::Prompt {
++                input: history.for_prompt(&step.settings.model_info.input_modalities),
++                ..Default::default()
++            };
++            let request = self
++                .services
++                .model_client
++                .build_responses_request(
++                    &prompt,
++                    step.settings.model_info.as_ref(),
++                    None,
++                    step.turn.reasoning_summary(),
++                    step.turn.config.service_tier.clone(),
++                    &metadata,
++                    false,
++                )
++                .ok()?;
++            serde_json::to_vec(&request).ok().map(|bytes| bytes.len())
++        };
++        let mut reset_history = prefix.history.clone();
++        reset_history.replace_annotated(items.clone());
++        let Some((after, before)) = size(reset_history).zip(size(prefix.history.clone())) else {
++            return CapacityResetPreparation::Invalid;
++        };
++        if after >= before {
++            return CapacityResetPreparation::NoProgress(prefix);
++        }
++        let mut receiver = None;
++        if let Some(historical) = &prefix.fresh_summary_history {
++            let start = prefix.prefix.len;
++            let end = historical.annotated_items().len();
++            if historical.annotated_items().get(..start) != Some(prefix.history.annotated_items()) {
++                return CapacityResetPreparation::Invalid;
++            }
++            if end > start {
++                let gap = historical.annotated_items()[start..end].to_vec();
++                if gap.iter().any(|item| {
++                    item.item.turn_id().is_none()
++                        || item.item.turn_id() == Some(step.turn.sub_id.as_str())
++                }) {
++                    return CapacityResetPreparation::Invalid;
++                }
++                let Some(gap_hash) = exact_gap_hash(&gap) else {
++                    return CapacityResetPreparation::Invalid;
++                };
++                let (sender, completion) = tokio::sync::oneshot::channel();
++                prefix.reset_completion = Some(CapacityResetCompletion {
++                    gap: Arc::new(gap),
++                    gap_hash,
++                    staged: std::sync::Mutex::new(None),
++                    sender: std::sync::Mutex::new(Some(sender)),
++                });
++                receiver = Some(completion);
++            }
++        }
++        prefix.prepared_reset = Some(PreparedCapacityReset { items, baseline });
++        CapacityResetPreparation::Ready {
++            prefix,
++            completion: receiver,
++        }
++    }
++
++    /// Consume a one-turn reset continuation without claiming or writing a fence.
++    pub(crate) async fn capacity_prefix_from_reset_continuation(
++        &self,
++        proof: CapacityResetContinuation,
++        turn: &TurnContext,
++        model: &str,
++        token: &CancellationToken,
++    ) -> Option<CapacityPrefix> {
++        if token.is_cancelled()
++            || proof.checkpoint.recovery_turn_id.as_deref() != Some(turn.sub_id.as_str())
++            || proof.original.recovery_turn_id != proof.checkpoint.recovery_turn_id
++            || proof.original.completed_epoch != proof.checkpoint.completed_epoch
++            || proof.original.response_id != proof.checkpoint.response_id
++            || !proof
++                .original
++                .binding
++                .same_sampling_scope(&proof.checkpoint.binding)
++            || self.services.model_client.auth_owner_generation() != proof.auth_owner_generation
++        {
++            return None;
++        }
++        let snapshot = self.capture_capacity_send().await;
++        let start = proof.reset.history.annotated_items().len();
++        let end = start.checked_add(proof.gap.len())?;
++        if snapshot.generation != proof.reset.generation
++            || snapshot.history_anchor != proof.reset.history_anchor
++            || snapshot.history.annotated_items().get(..start)
++                != Some(proof.reset.history.annotated_items())
++            || snapshot.history.annotated_items().get(start..end) != Some(proof.gap.as_slice())
++            || exact_gap_hash(snapshot.history.annotated_items().get(start..end)?)?
++                != proof.gap_hash
++            || snapshot.history.pair_safe_prefix_len(end) != end
++            || proof.gap.iter().any(|item| {
++                item.item.turn_id().is_none() || item.item.turn_id() == Some(turn.sub_id.as_str())
++            })
++        {
++            return None;
++        }
++        let home = turn.config.codex_home.clone();
++        let thread = self.thread_id.to_string();
++        let model = model.to_owned();
++        let provider = turn.config.model_provider_id.clone();
++        let anchor = snapshot.history_anchor.clone();
++        let expected = proof.checkpoint.clone();
++        let durable = self.live_thread().is_some();
++        let memory = self.state.lock().await.request_capacity_checkpoint.clone();
++        let persistence = self.track_native_persistence()?;
++        let valid = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
++            let _persistence = persistence;
++            let binding =
++                request_capacity::Binding::for_profile(&home, &thread, &model, &provider, &anchor)?;
++            if expected.binding != binding || memory.as_ref() != Some(&expected) {
++                return Ok(false);
++            }
++            if durable {
++                return Ok(request_capacity::load(&home, &binding)?.as_ref() == Some(&expected));
++            }
++            Ok(true)
++        })
++        .await
++        .ok()?
++        .ok()?;
++        if !valid || token.is_cancelled() {
++            return None;
++        }
++        let state = self.state.lock().await;
++        if state.history.history_version() != proof.reset.generation
++            || self.current_window_from_state(&state).0 != proof.reset.history_anchor
++            || state.request_capacity_checkpoint.as_ref() != Some(&proof.checkpoint)
++            || self.services.model_client.auth_owner_generation() != proof.auth_owner_generation
++            || state.history.annotated_items().get(..start)
++                != Some(proof.reset.history.annotated_items())
++            || state.history.annotated_items().get(start..end) != Some(proof.gap.as_slice())
++            || !matches!(
++                proof
++                    .checkpoint
++                    .matches_prefix(state.history.annotated_items()),
++                Ok(true)
++            )
++        {
++            return None;
++        }
++        let mut target = snapshot.history.clone();
++        target.replace_annotated(snapshot.history.annotated_items()[..end].to_vec());
++        Some(CapacityPrefix {
++            history: proof.reset.history,
++            prefix: CompactionPrefix {
++                generation: proof.reset.generation,
++                len: start,
++                auth_owner_generation: proof.auth_owner_generation,
++            },
++            checkpoint: proof.checkpoint,
++            home: proof.home,
++            fresh_summary_history: Some(target),
++            pre_compact_hook_ran: false,
++            prepared_reset: None,
++            reset_completion: None,
++        })
++    }
++}
++
++#[cfg(test)]
++#[path = "capacity_reset_continuation_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/session/capacity_reset_continuation_tests.rs b/codex-rs/core/src/session/capacity_reset_continuation_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/core/src/session/capacity_reset_continuation_tests.rs
+@@ -0,0 +1,607 @@
++use super::*;
++use crate::rollout::recorder::RolloutRecorder;
++use crate::session::tests::make_session_and_context_with_auth_and_config_and_rx;
++use codex_features::Feature;
++use codex_login::CodexAuth;
++use codex_model_provider_info::ModelProviderInfo;
++use core_test_support::responses;
++use pretty_assertions::assert_eq;
++use serde_json::{Value, json};
++use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
++use std::time::Duration;
++use wiremock::matchers::{method, path};
++use wiremock::{Mock, MockServer, ResponseTemplate};
++
++const OLD: &str = "01a1a1fc-c598-7870-a58b-e9d0ee722432";
++const IMAGES: &[&str] = &[
++    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPgYPgOAAETAQC5prJ2AAAAAElFTkSuQmCC",
++    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPgZPgGAAEVAQDVMkJTAAAAAElFTkSuQmCC",
++    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPgYvgKAAEXAQBnG1/BAAAAAElFTkSuQmCC",
++    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPgZvgCAAEZAQAFnP5cAAAAAElFTkSuQmCC",
++    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPgYfgMAAEbAQA210JbAAAAAElFTkSuQmCC",
++    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPgZfgEAAEdAQBaQ7J+AAAAAElFTkSuQmCC",
++    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPgY/gIAAEfAQDoaq/sAAAAAElFTkSuQmCC",
++];
++
++#[derive(Default)]
++struct HookCounts {
++    pre: AtomicUsize,
++    post: AtomicUsize,
++    stop: AtomicBool,
++}
++impl codex_hooks::HookMcpExecutor for HookCounts {
++    fn execute(
++        &self,
++        call: codex_hooks::HookMcpCall,
++    ) -> futures::future::BoxFuture<'_, anyhow::Result<codex_hooks::HookMcpOutput>> {
++        Box::pin(async move {
++            let stop = if call.tool == "pre" {
++                self.pre.fetch_add(1, Ordering::SeqCst);
++                self.stop.load(Ordering::SeqCst)
++            } else {
++                assert_eq!(call.tool, "post");
++                self.post.fetch_add(1, Ordering::SeqCst);
++                false
++            };
++            Ok(codex_hooks::HookMcpOutput {
++                text: json!({"continue":!stop,"stopReason":"owned reset hook fixture"}).to_string(),
++                source_tool_namespace: Some("owned_reset_fixture".into()),
++            })
++        })
++    }
++}
++struct DynamicContext(Arc<HookCounts>);
++impl codex_extension_api::ContextContributor for DynamicContext {
++    fn contribute_thread_context<'a>(
++        &'a self,
++        _session: &'a codex_extension_api::ExtensionData,
++        _thread: &'a codex_extension_api::ExtensionData,
++    ) -> codex_extension_api::ExtensionFuture<'a, Vec<codex_extension_api::PromptFragment>> {
++        Box::pin(async move {
++            vec![codex_extension_api::PromptFragment::developer_policy(
++                format!(
++                    "POST_NATIVE_PREHOOK_CONTEXT_{}",
++                    self.0.pre.load(Ordering::SeqCst)
++                ),
++                codex_extension_api::ContentItemKind("test.reset.dynamic_context".into()),
++            )]
++        })
++    }
++}
++fn message(role: &str, text: &str, turn: &str) -> ResponseItem {
++    serde_json::from_value(json!({
++        "type":"message", "id":format!("msg_{}",uuid::Uuid::new_v4()), "role":role,
++        "status":"completed",
++        "content":[{"type":if role=="assistant" {"output_text"} else {"input_text"},"text":text}],
++        "internal_chat_message_metadata_passthrough":{"turn_id":turn}
++    }))
++    .unwrap()
++}
++fn contains_text(history: &ContextManager, needle: &str) -> bool {
++    history.raw_items().any(|item| {
++        matches!(item, ResponseItem::Message { content, .. }
++        if content.iter().any(|part| matches!(part,
++            codex_protocol::models::ContentItem::InputText { text }
++            | codex_protocol::models::ContentItem::OutputText { text, .. }
++            if text.contains(needle))))
++    })
++}
++async fn fixture(
++    stop: bool,
++) -> anyhow::Result<(
++    tempfile::TempDir,
++    Arc<Session>,
++    Arc<TurnContext>,
++    MockServer,
++    async_channel::Receiver<codex_protocol::protocol::Event>,
++    Arc<HookCounts>,
++    PathBuf,
++)> {
++    let home = tempfile::tempdir()?;
++    let home_path = codex_utils_absolute_path::AbsolutePathBuf::from_absolute_path(home.path())?;
++    let server = responses::start_mock_server().await;
++    let provider = ModelProviderInfo::create_openai_provider(Some(format!("{}/v1", server.uri())));
++    let user_hooks = json!({
++        "hooks":{
++            "PreCompact":[{"hooks":[{"type":"mcp_tool","server":"owned_reset_fixture","tool":"pre","input":{}}]}],
++            "PostCompact":[{"hooks":[{"type":"mcp_tool","server":"owned_reset_fixture","tool":"post","input":{}}]}]
++        }
++    });
++    let hook_config_path = home_path.join("config.toml");
++    let (mut session, mut turn, events) = make_session_and_context_with_auth_and_config_and_rx(
++        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
++        Vec::new(),
++        move |config| {
++            config.codex_home = home_path;
++            config.model = Some("gpt-5.2".into());
++            config.model_provider = provider;
++            config.model_provider.supports_websockets = false;
++            config.model_provider.request_max_retries = Some(0);
++            config.model_provider.stream_max_retries = Some(0);
++            config.model_auto_compact_token_limit = Some(1_000_000_000);
++            config.features.enable(Feature::TokenBudget).unwrap();
++            config.features.enable(Feature::CodexHooks).unwrap();
++            config.bypass_hook_trust = true; // This isolated fixture only.
++            let user_hooks: codex_config::TomlValue = serde_json::from_value(user_hooks).unwrap();
++            config.config_layer_stack = config
++                .config_layer_stack
++                .with_user_config(&hook_config_path, user_hooks.clone())
++                .expect("native fixture user hook configuration");
++            std::fs::write(&hook_config_path, toml::to_string(&user_hooks).unwrap()).unwrap();
++            let _ = config.features.disable(Feature::CodeMode);
++            let _ = config.features.disable(Feature::CodeModeOnly);
++        },
++    )
++    .await;
++    Arc::get_mut(&mut turn).unwrap().sub_id = uuid::Uuid::new_v4().to_string();
++    let counts = Arc::new(HookCounts::default());
++    counts.stop.store(stop, Ordering::SeqCst);
++    let mut extensions = codex_extension_api::ExtensionRegistryBuilder::new();
++    extensions.prompt_contributor(Arc::new(DynamicContext(Arc::clone(&counts))));
++    let mutable = Arc::get_mut(&mut session).unwrap();
++    mutable.services.extensions = Arc::new(extensions.build());
++    let live = LiveThread::create(
++        Arc::clone(&mutable.services.thread_store),
++        CreateThreadParams {
++            creator_user_id: None,
++            creator_account_id: None,
++            session_id: mutable.session_id(),
++            thread_id: mutable.thread_id,
++            extra_config: None,
++            forked_from_id: None,
++            parent_thread_id: None,
++            source: codex_protocol::protocol::SessionSource::Exec,
++            attached_thread: false,
++            thread_source: None,
++            originator: "reset_old_gap_native".into(),
++            base_instructions: Default::default(),
++            dynamic_tools: Vec::new(),
++            selected_capability_roots: Vec::new(),
++            multi_agent_version: None,
++            history_mode: Default::default(),
++            subagent_history_start_ordinal: None,
++            history_base: None,
++            initial_window_id: uuid::Uuid::now_v7().to_string(),
++            runtime_workspace_roots: None,
++            metadata: ThreadPersistenceMetadata {
++                cwd: Some(turn.config.cwd.to_path_buf()),
++                model_provider: turn.config.model_provider_id.clone(),
++                memory_mode: codex_protocol::protocol::ThreadMemoryMode::Disabled,
++            },
++        },
++    )
++    .await?;
++    mutable.services.live_thread = Some(live);
++    mutable
++        .ensure_rollout_materialized(PersistContext::Standard)
++        .await;
++    mutable.flush_rollout().await?;
++    let rollout = mutable.current_rollout_path().await?.unwrap();
++    // Admission refreshes handlers from actual configuration/plugin state.
++    // Only the executor is controlled; user hook definitions survive that path.
++    let hook_config = session.get_config().await;
++    let (hooks, _async_events) = codex_hooks::Hooks::new(
++        codex_hooks::HooksConfig {
++            feature_enabled: true,
++            bypass_hook_trust: true,
++            config_layer_stack: Some(hook_config.config_layer_stack.clone()),
++            plugin_hook_sources: Vec::new(),
++            ..Default::default()
++        },
++        session.thread_id,
++        Arc::clone(&counts) as Arc<dyn codex_hooks::HookMcpExecutor>,
++    )?;
++    session.services.hooks.store(Arc::new(hooks));
++    Ok((home, session, turn, server, events, counts, rollout))
++}
++async fn seed_confirmed(
++    session: &Arc<Session>,
++    turn: &Arc<TurnContext>,
++    gap: Vec<ResponseItem>,
++) -> anyhow::Result<()> {
++    let confirmed = message(
++        "user",
++        &format!("CONFIRMED_ONLY_{}", "x".repeat(512 * 1024)),
++        OLD,
++    );
++    session
++        .record_conversation_items(turn, turn.model_info(), &[confirmed])
++        .await;
++    session
++        .confirm_capacity_completion(
++            turn,
++            &turn.model_info().slug,
++            session.capture_capacity_send().await,
++            "ordinary-confirmed-before-gap",
++        )
++        .await;
++    session
++        .record_conversation_items(turn, turn.model_info(), &gap)
++        .await;
++    Ok(())
++}
++async fn compacted_count(session: &Arc<Session>, rollout: &PathBuf) -> anyhow::Result<usize> {
++    session.flush_rollout().await?;
++    let (items, _, errors) = RolloutRecorder::load_rollout_items(rollout).await?;
++    assert_eq!(errors, 0);
++    Ok(items
++        .iter()
++        .filter(|item| matches!(item, codex_history::RolloutItem::Compacted(_)))
++        .count())
++}
++async fn finish(session: &Arc<Session>) -> anyhow::Result<()> {
++    session.drain_capacity_native_persistence_for_test().await;
++    session.hooks().shutdown().await;
++    session.live_thread().unwrap().shutdown().await?;
++    Ok(())
++}
++
++#[test_case::test_case(false; "post native hook plan retains exact old assistant and current suffix")]
++#[test_case::test_case(true; "stopped native hook changes no history window checkpoint or model")]
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn local_reset_with_old_gap_keeps_native_hook_and_writer_contract(
++    stop: bool,
++) -> anyhow::Result<()> {
++    let (_home, session, turn, server, _events, counts, rollout) = fixture(stop).await?;
++    seed_confirmed(
++        &session,
++        &turn,
++        vec![message("assistant", "CAPACITY_SEED_DONE", OLD)],
++    )
++    .await?;
++    session
++        .record_conversation_items(
++            &turn,
++            turn.model_info(),
++            &[message("user", "CURRENT_UNCONSUMED_CANARY", &turn.sub_id)],
++        )
++        .await;
++    let prefix = session
++        .capacity_prefix(&turn, &turn.model_info().slug)
++        .await
++        .unwrap();
++    assert!(prefix.needs_fresh_summary());
++    let before = session.clone_history().await;
++    let suffix = before.annotated_items()[prefix.prefix.len..].to_vec();
++    let before_window = session.current_window().await;
++    let before_cp = session.capacity_checkpoint_for_test().await.unwrap();
++    let token = CancellationToken::new();
++    let step = session
++        .capture_step_context(Arc::clone(&turn), &token)
++        .await?;
++    let world = Arc::new(session.build_world_state_for_step(&step, true).await?);
++    let result = crate::compact_token_budget::run_inline_capacity_reset_with_old_gap(
++        Arc::clone(&session),
++        step,
++        world,
++        prefix,
++        codex_protocol::error::UnexpectedResponseError {
++            status: http::StatusCode::PAYLOAD_TOO_LARGE,
++            body: "Synthetic known pre-response capacity rejection".into(),
++            user_message: None,
++            url: None,
++            cf_ray: None,
++            request_id: None,
++            identity_authorization_error: None,
++            identity_error_code: None,
++        },
++        token,
++    )
++    .await;
++    assert_eq!(counts.pre.load(Ordering::SeqCst), 1);
++    assert!(
++        server.received_requests().await.unwrap().is_empty(),
++        "local reset/STOP sends no model request"
++    );
++    if stop {
++        assert!(
++            matches!(result,Err(ref e) if matches!(e.details(),codex_protocol::error::CodexErrorDetails::TurnAborted))
++        );
++        assert_eq!(
++            session.clone_history().await.annotated_items(),
++            before.annotated_items()
++        );
++        assert_eq!(session.current_window().await, before_window);
++        assert_eq!(
++            serde_json::to_value(session.capacity_checkpoint_for_test().await.unwrap())?,
++            serde_json::to_value(before_cp)?
++        );
++        assert_eq!(counts.post.load(Ordering::SeqCst), 0);
++        assert_eq!(compacted_count(&session, &rollout).await?, 0);
++    } else {
++        let crate::compact_token_budget::CapacityResetOutcome::Reset(proof) = result? else {
++            panic!("real local reset required")
++        };
++        assert!(
++            proof.is_some(),
++            "real ACK/CAS must mint old-gap continuation"
++        );
++        let after = session.clone_history().await;
++        assert_eq!(
++            &after.annotated_items()[after.annotated_items().len() - suffix.len()..],
++            suffix.as_slice()
++        );
++        assert!(
++            contains_text(&after, "POST_NATIVE_PREHOOK_CONTEXT_1"),
++            "context must be built after the actual native pre-hook"
++        );
++        assert_eq!(session.current_window().await.1, before_window.1 + 1);
++        assert_eq!(counts.post.load(Ordering::SeqCst), 1);
++        assert_eq!(compacted_count(&session, &rollout).await?, 1);
++        assert!(
++            session
++                .capacity_prefix(&turn, &turn.model_info().slug)
++                .await
++                .is_none(),
++            "same fence cannot be claimed again"
++        );
++    }
++    finish(&session).await
++}
++
++#[derive(Default)]
++struct WireState {
++    ordinary: usize,
++    summaries: usize,
++    accepted_images: Vec<String>,
++    last_summary: Option<String>,
++}
++fn image_urls(value: &Value, result: &mut Vec<String>) {
++    match value {
++        Value::Object(map) => {
++            if map.get("type").and_then(Value::as_str) == Some("input_image") {
++                result.push(
++                    map.get("image_url")
++                        .and_then(Value::as_str)
++                        .unwrap()
++                        .to_owned(),
++                );
++            }
++            for value in map.values() {
++                image_urls(value, result);
++            }
++        }
++        Value::Array(values) => {
++            for value in values {
++                image_urls(value, result);
++            }
++        }
++        _ => {}
++    }
++}
++fn is_compact(body: &Value) -> bool {
++    body["input"].as_array().unwrap().iter().any(|item| {
++        item["content"].as_array().is_some_and(|parts| {
++            parts.iter().any(|part| {
++                part["text"].as_str().is_some_and(|text| {
++                    text == crate::compact::SUMMARIZATION_PROMPT
++                        || text.starts_with("Compaction-only partial historical content:")
++                })
++            })
++        })
++    })
++}
++fn release(barrier: &(std::sync::Mutex<bool>, std::sync::Condvar)) {
++    *barrier.0.lock().unwrap() = true;
++    barrier.1.notify_all();
++}
++async fn request_or_end(
++    notify: &tokio::sync::Notify,
++    events: &async_channel::Receiver<codex_protocol::protocol::Event>,
++) -> anyhow::Result<()> {
++    loop {
++        tokio::select! {
++            biased;
++            _=notify.notified()=>return Ok(()),
++            event=events.recv()=>{
++                let event=event?;
++                if matches!(event.msg,EventMsg::TurnComplete(_)|EventMsg::TurnAborted(_)){
++                    anyhow::bail!("native turn ended before expected real ordinary request: {:?}",event.msg);
++                }
++            }
++        }
++    }
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn real_sampling_reset_then_413_fresh_old_gap_then_ordinary_preserves_current()
++-> anyhow::Result<()> {
++    let (_home, session, turn, server, events, counts, rollout) = fixture(false).await?;
++    let gap = vec![
++        serde_json::from_value(
++            json!({"type":"custom_tool_call","id":"ct_old_gap","status":"completed",
++            "call_id":"old-gap-pair","name":"fixture","input":"already completed; never execute",
++            "internal_chat_message_metadata_passthrough":{"turn_id":OLD}}),
++        )?,
++        serde_json::from_value(json!({"type":"custom_tool_call_output","id":"ctco_old_gap",
++            "call_id":"old-gap-pair","output":IMAGES.iter().map(|url|json!({"type":"input_image","image_url":url,"detail":"original"})).collect::<Vec<_>>(),
++            "internal_chat_message_metadata_passthrough":{"turn_id":OLD}}))?,
++    ];
++    seed_confirmed(&session, &turn, gap).await?;
++    let initial_cp = serde_json::to_value(session.capacity_checkpoint_for_test().await.unwrap())?;
++    let initial_window = session.current_window().await;
++    let wire = Arc::new(std::sync::Mutex::new(WireState::default()));
++    let first = Arc::new(tokio::sync::Notify::new());
++    let second = Arc::new(tokio::sync::Notify::new());
++    let first_release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
++    let second_release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
++    let w = Arc::clone(&wire);
++    let n1 = Arc::clone(&first);
++    let n2 = Arc::clone(&second);
++    let b1 = Arc::clone(&first_release);
++    let b2 = Arc::clone(&second_release);
++    Mock::given(method("POST"))
++        .and(path("/v1/responses"))
++        .respond_with(move |request: &wiremock::Request| {
++            let encoding = request
++                .headers
++                .get("content-encoding")
++                .and_then(|v| v.to_str().ok());
++            let decoded = responses::decode_body_bytes(&request.body, encoding);
++            let body: Value = serde_json::from_slice(&decoded).unwrap();
++            let compact = is_compact(&body);
++            let mut images = Vec::new();
++            image_urls(&body["input"], &mut images);
++            let mut state = w.lock().unwrap();
++            if !compact {
++                state.ordinary += 1;
++                let number = state.ordinary;
++                drop(state);
++                if number <= 2 {
++                    let (notify, barrier) = if number == 1 { (&n1, &b1) } else { (&n2, &b2) };
++                    notify.notify_one();
++                    let (released, timed) = barrier
++                        .1
++                        .wait_timeout_while(
++                            barrier.0.lock().unwrap(),
++                            Duration::from_secs(10),
++                            |v| !*v,
++                        )
++                        .unwrap();
++                    assert!(
++                        *released && !timed.timed_out(),
++                        "actual ordinary request barrier"
++                    );
++                }
++            } else {
++                drop(state);
++            }
++            eprintln!(
++                "NATIVE_RESET_OLD_GAP_REQUEST compact={compact} images={} bytes={}",
++                images.len(),
++                decoded.len()
++            );
++            if decoded.len() > 262144 || images.len() > 6 {
++                return ResponseTemplate::new(413).set_body_json(
++                    json!({"error":{"message":"fixed byte and six-image capacity"}}),
++                );
++            }
++            let mut state = w.lock().unwrap();
++            let (text, response) = if compact {
++                assert!(
++                    body.get("tools")
++                        .is_none_or(|v| v.as_array().is_some_and(Vec::is_empty))
++                );
++                if let Some(previous) = &state.last_summary {
++                    assert!(
++                        body["input"]
++                            .as_array()
++                            .unwrap()
++                            .iter()
++                            .any(|item| item["content"].as_array().is_some_and(|parts| parts
++                                .iter()
++                                .any(|p| p["text"].as_str() == Some(previous.as_str())))),
++                        "fresh compactor must carry the exact prior successful summary"
++                    );
++                }
++                for image in images {
++                    state.accepted_images.push(image);
++                }
++                state.summaries += 1;
++                let text = format!("OLD_GAP_FRESH_{}", state.summaries);
++                state.last_summary = Some(format!("{}\n{text}", crate::compact::SUMMARY_PREFIX));
++                (text, format!("old-gap-summary-{}", state.summaries))
++            } else {
++                ("FINAL_NATIVE_DONE".into(), "ordinary-after-gap".into())
++            };
++            ResponseTemplate::new(200)
++                .insert_header("content-type", "text/event-stream")
++                .set_body_string(responses::sse(vec![
++                    responses::ev_assistant_message("native-result", &text),
++                    responses::ev_completed(&response),
++                ]))
++        })
++        .mount(&server)
++        .await;
++    session
++        .spawn_task(
++            Arc::clone(&turn),
++            vec![TurnInput::UserInput {
++                metadata: Default::default(),
++                content: vec![codex_protocol::user_input::UserInput::Text {
++                    text: "CURRENT_UNCONSUMED_CANARY".into(),
++                    text_elements: Vec::new(),
++                }],
++                client_id: None,
++            }],
++            crate::tasks::RegularTask::new(),
++        )
++        .await;
++    request_or_end(&first, &events).await?;
++    let before = session.clone_history().await;
++    let original_gap_end=before.annotated_items().iter().position(|e|
++        matches!(&e.item,ResponseItem::CustomToolCallOutput{call_id,..} if call_id=="old-gap-pair")).unwrap()+1;
++    let current = before.annotated_items()[original_gap_end..].to_vec();
++    assert!(!current.is_empty());
++    release(&first_release);
++    request_or_end(&second, &events).await?;
++    let after_reset = session.clone_history().await;
++    assert_eq!(
++        &after_reset.annotated_items()[after_reset.annotated_items().len() - current.len()..],
++        current.as_slice()
++    );
++    assert_eq!(
++        session.current_window().await.1,
++        initial_window.1 + 1,
++        "native reset must precede second ordinary 413"
++    );
++    assert_eq!(compacted_count(&session, &rollout).await?, 1);
++    let reset_cp = serde_json::to_value(session.capacity_checkpoint_for_test().await.unwrap())?;
++    assert_eq!(reset_cp["completed_epoch"], initial_cp["completed_epoch"]);
++    assert_eq!(reset_cp["response_id"], initial_cp["response_id"]);
++    assert_eq!(reset_cp["recovery_turn_id"], turn.sub_id);
++    assert_eq!(counts.pre.load(Ordering::SeqCst), 1);
++    assert_eq!(counts.post.load(Ordering::SeqCst), 1);
++    release(&second_release);
++    loop {
++        let event = events.recv().await?;
++        let value = serde_json::to_value(&event.msg)?;
++        assert_ne!(
++            value.get("call_id").and_then(Value::as_str),
++            Some("old-gap-pair"),
++            "historical tool effects cannot execute again"
++        );
++        match event.msg {
++            EventMsg::TurnComplete(_) => {
++                break;
++            }
++            EventMsg::TurnAborted(_) => anyhow::bail!("native old-gap turn aborted"),
++            _ => {}
++        }
++    }
++    let after = session.clone_history().await;
++    assert!(contains_text(&after, "FINAL_NATIVE_DONE"));
++    assert!(contains_text(&after, "CURRENT_UNCONSUMED_CANARY"));
++    assert_eq!(
++        compacted_count(&session, &rollout).await?,
++        2,
++        "one native reset and one whole fresh old-gap commit"
++    );
++    assert_eq!(session.current_window().await.1, initial_window.1 + 2);
++    assert_eq!(
++        counts.pre.load(Ordering::SeqCst),
++        2,
++        "later fresh is a new lifecycle"
++    );
++    assert_eq!(counts.post.load(Ordering::SeqCst), 2);
++    assert!(contains_text(&after, "POST_NATIVE_PREHOOK_CONTEXT_2"));
++    let state = wire.lock().unwrap();
++    assert_eq!(
++        state.ordinary, 3,
++        "real original ordinary, post-reset 413, post-fresh success"
++    );
++    assert_eq!(
++        state.accepted_images,
++        IMAGES.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
++        "all exact old-gap images read once before final commit"
++    );
++    assert!(state.summaries >= 2);
++    drop(state);
++    let cp = serde_json::to_value(session.capacity_checkpoint_for_test().await.unwrap())?;
++    assert!(
++        cp["completed_epoch"].as_u64().unwrap() > initial_cp["completed_epoch"].as_u64().unwrap()
++    );
++    assert!(cp["recovery_turn_id"].is_null());
++    assert_eq!(cp["response_id"], "ordinary-after-gap");
++    finish(&session).await
++}
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -245,6 +245,7 @@
+ use codex_protocol::exec_output::StreamOutput;
+ 
+ pub(crate) mod async_compaction;
++mod capacity_reset_continuation;
+ mod code_mode_warning;
+ mod config_refresh;
+ pub(crate) mod context_window;
+@@ -257,6 +258,8 @@
+ mod inject;
+ mod reasoning_effort;
+ pub(crate) mod request_capacity;
++pub(crate) use capacity_reset_continuation::CapacityResetContinuation;
++pub(crate) use capacity_reset_continuation::CapacityResetPreparation;
+ mod submission;
+ pub(crate) use reasoning_effort::RequestEffortUsage;
+ pub(crate) use submission::Submission;
+@@ -490,9 +493,20 @@
+     checkpoint: request_capacity::Checkpoint,
+     home: PathBuf,
+     fresh_summary_history: Option<ContextManager>,
++    pre_compact_hook_ran: bool,
++    prepared_reset: Option<capacity_reset_continuation::PreparedCapacityReset>,
++    reset_completion: Option<capacity_reset_continuation::CapacityResetCompletion>,
+ }
+ 
+ impl CapacityPrefix {
++    pub(crate) fn pre_compact_hook_already_ran(&self) -> bool {
++        self.pre_compact_hook_ran
++    }
++
++    pub(crate) fn mark_pre_compact_hook_ran(&mut self) {
++        self.pre_compact_hook_ran = true;
++    }
++
+     /// A cold legacy cursor cannot authorize resetting unread historical input.
+     pub(crate) fn needs_fresh_summary(&self) -> bool {
+         self.fresh_summary_history
+@@ -4826,6 +4840,13 @@
+                 history_anchor: self.current_window_from_state(&state).0,
+                 generation: state.history.history_version(),
+             });
++            if let (
++                Some(CapacityCheckpointInstallation::TranslateReset { prefix, .. }),
++                Some(receipt),
++            ) = (capacity.as_ref(), capacity_receipt.as_ref())
++            {
++                prefix.stage_reset_continuation(receipt, &state.history);
++            }
+             (compacted_item, started_item, capacity_receipt)
+         };
+ 
+@@ -4884,8 +4905,12 @@
+                     turn_context,
+                     ..
+                 } => {
+-                    self.translate_capacity_checkpoint(prefix, receipt, turn_context)
+-                        .await;
++                    if let Some(checkpoint) = self
++                        .translate_capacity_checkpoint(prefix, receipt, turn_context)
++                        .await
++                    {
++                        prefix.publish_reset_continuation(checkpoint);
++                    }
+                 }
+                 CapacityCheckpointInstallation::ManualGenesis {
+                     turn_context,
+@@ -5295,6 +5320,23 @@
+         &self,
+     ) -> Option<request_capacity::Checkpoint> {
+         self.state.lock().await.request_capacity_checkpoint.clone()
++    }
++
++    #[cfg(test)]
++    pub(crate) async fn capacity_checkpoint_matches_history_for_test(
++        &self,
++        history: &[ResponseItemEnvelope],
++    ) -> anyhow::Result<bool> {
++        let state = self.state.lock().await;
++        match &state.request_capacity_checkpoint {
++            Some(checkpoint) => checkpoint.matches_prefix(history),
++            None => Ok(false),
++        }
++    }
++
++    #[cfg(test)]
++    pub(crate) async fn drain_capacity_native_persistence_for_test(&self) {
++        self.drain_code_mode_messages().await;
+     }
+ 
+     #[cfg(test)]
+@@ -5614,6 +5656,9 @@
+             checkpoint,
+             home: prefix_home,
+             fresh_summary_history,
++            pre_compact_hook_ran: false,
++            prepared_reset: None,
++            reset_completion: None,
+         })
+     }
+ 
+@@ -5622,7 +5667,7 @@
+         prefix: &CapacityPrefix,
+         receipt: CapacitySendSnapshot,
+         turn_context: &TurnContext,
+-    ) {
++    ) -> Option<request_capacity::Checkpoint> {
+         let old = prefix.checkpoint.clone();
+         let home = prefix.home.clone();
+         // Use the binding's logical model/provider; compactor responses do not rearm it.
+@@ -5652,12 +5697,12 @@
+                 "checkpoint translation could not be constructed",
+             )
+             .await;
+-            return;
++            return None;
+         };
+         if self.live_thread().is_some() {
+             if let Err(error) = self.flush_rollout().await {
+                 self.capacity_unavailable(turn_context, error).await;
+-                return;
++                return None;
+             }
+             let disk_checkpoint = checkpoint.clone();
+             let result = tokio::task::spawn_blocking(move || {
+@@ -5667,10 +5712,11 @@
+             if !matches!(result, Ok(Ok(()))) {
+                 self.capacity_unavailable(turn_context, format!("{result:?}"))
+                     .await;
+-                return;
+-            }
+-        }
+-        self.state.lock().await.request_capacity_checkpoint = Some(checkpoint);
++                return None;
++            }
++        }
++        self.state.lock().await.request_capacity_checkpoint = Some(checkpoint.clone());
++        Some(checkpoint)
+     }
+ 
+     pub(crate) async fn clone_history(&self) -> ContextManager {
+@@ -5754,27 +5800,33 @@
+         self: &Arc<Self>,
+         step_context: &StepContext,
+         world_state: Arc<WorldState>,
+-        prefix: CapacityPrefix,
++        mut prefix: CapacityPrefix,
+         cancellation_token: &CancellationToken,
+     ) -> bool {
+         if cancellation_token.is_cancelled() {
+             return false;
+         }
+-        let retained_client_items = self.retained_client_items_for_context_window(&prefix.history);
+-        // Native context updates need not implement Send. Select directly,
+-        // retaining cancellation priority without strengthening native types.
+-        let (context_updates, world_state_snapshot) = tokio::select! {
+-            biased;
+-            _ = cancellation_token.cancelled() => return false,
+-            context = self.build_initial_context_with_world_state(
+-                step_context, world_state.as_ref(),
+-            ) => context,
+-        };
+-        let items = crate::context_manager::updates::merge_world_state_updates(context_updates)
+-            .into_iter()
+-            .map(ResponseItemEnvelope::new)
+-            .chain(retained_client_items)
+-            .collect();
++        let (items, world_state_snapshot) = if let Some(prepared) = prefix.prepared_reset.take() {
++            (prepared.items, prepared.baseline)
++        } else {
++            let retained_client_items =
++                self.retained_client_items_for_context_window(&prefix.history);
++            // Native context updates need not implement Send. Select directly,
++            // retaining cancellation priority without strengthening native types.
++            let (context_updates, world_state_snapshot) = tokio::select! {
++                biased;
++                _ = cancellation_token.cancelled() => return false,
++                context = self.build_initial_context_with_world_state(
++                    step_context, world_state.as_ref(),
++                ) => context,
++            };
++            let items = crate::context_manager::updates::merge_world_state_updates(context_updates)
++                .into_iter()
++                .map(ResponseItemEnvelope::new)
++                .chain(retained_client_items)
++                .collect();
++            (items, world_state_snapshot)
++        };
+         let compaction_prefix = prefix.prefix;
+         let installed = self
+             .install_local_compaction(
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -471,6 +471,7 @@
+ 
+     let mut next_step_context = Some(first_step_context);
+     let mut guardian_budget_compacted = false;
++    let mut capacity_reset_continuation = None;
+     loop {
+         // Note that pending_input would be something like a message the user
+         // submitted through the UI while the model was running. Though the UI
+@@ -599,21 +600,38 @@
+                         rejection.known_rejected && rejection.turn_id == turn_context.sub_id
+                     })
+         });
+-        if known_capacity_rejection
++        // The next ordinary result consumes this one-turn proof, successful or
++        // not. A continuation never reclaims the reset turn/epoch fence.
++        let reset_continuation = capacity_reset_continuation.take();
++        let continuing_reset = reset_continuation.is_some();
++        let recovery_allowed = known_capacity_rejection
+             && auto_compaction_enabled
+             && !crate::guardian::is_basic_session_source(&turn_context.session_source)
+             && (turn_context.config.features.enabled(Feature::TokenBudget)
+                 || matches!(
+                     turn_context.provider.capabilities().remote_compaction,
+                     RemoteCompactionSupport::Unsupported
+-                ))
+-            && let Some(prefix) = sess
+-                .capacity_prefix(
++                ));
++        let recovery_prefix = if recovery_allowed {
++            if let Some(proof) = reset_continuation {
++                sess.capacity_prefix_from_reset_continuation(
++                    proof,
++                    turn_context.as_ref(),
++                    &step_context.settings.model_info.slug,
++                    &cancellation_token,
++                )
++                .await
++            } else {
++                sess.capacity_prefix(
+                     turn_context.as_ref(),
+                     &step_context.settings.model_info.slug,
+                 )
+                 .await
+-        {
++            }
++        } else {
++            None
++        };
++        if let Some(prefix) = recovery_prefix {
+             // Existing same-body retry advice has already been exhausted.
+             let retry_at = sess
+                 .services
+@@ -640,27 +658,48 @@
+                 _ => unreachable!("known HTTP413"),
+             };
+             let token_budget_enabled = turn_context.config.features.enabled(Feature::TokenBudget);
+-            let historical_summary_required = prefix.needs_fresh_summary();
+-            if token_budget_enabled && historical_summary_required {
+-                sess.send_event(
+-                    turn_context.as_ref(),
+-                    EventMsg::Warning(codex_protocol::protocol::WarningEvent {
+-                        message: "Request-byte recovery found historical input beyond its confirmed cursor. Native compaction must read that history before replacing it; token-budget reset remains enabled.".to_owned(),
+-                    }),
+-                )
+-                .await;
+-            }
+-            let recovered = if token_budget_enabled && !historical_summary_required {
+-                crate::compact_token_budget::run_inline_capacity_reset_task(
++            let recovered = if token_budget_enabled && !continuing_reset {
++                match crate::compact_token_budget::run_inline_capacity_reset_with_old_gap(
+                     Arc::clone(&sess),
+                     Arc::clone(&step_context),
+-                    capacity_world_state,
++                    Arc::clone(&capacity_world_state),
+                     prefix,
+-                    rejection,
++                    rejection.clone(),
+                     cancellation_token.child_token(),
+                 )
+                 .await
++                {
++                    Ok(crate::compact_token_budget::CapacityResetOutcome::Reset(continuation)) => {
++                        capacity_reset_continuation = continuation;
++                        Ok(())
++                    }
++                    Ok(crate::compact_token_budget::CapacityResetOutcome::FreshSummary(prefix)) => {
++                        sess.send_event(turn_context.as_ref(),
++                            EventMsg::Warning(codex_protocol::protocol::WarningEvent {
++                                message: "The local token-budget reset would not shorten its confirmed input. Native compaction will read the captured historical input; current input remains unchanged.".to_owned(),
++                            }),
++                        ).await;
++                        crate::compact::run_inline_capacity_compact_task(
++                            Arc::clone(&sess),
++                            Arc::clone(&turn_context),
++                            Arc::clone(&step_context),
++                            capacity_world_state,
++                            prefix,
++                            rejection,
++                            cancellation_token.child_token(),
++                        )
++                        .await
++                    }
++                    Err(error) => Err(error),
++                }
+             } else {
++                if continuing_reset {
++                    sess.send_event(turn_context.as_ref(),
++                        EventMsg::Warning(codex_protocol::protocol::WarningEvent {
++                            message: "The native reset preserved historical input that still exceeds request capacity. Native compaction will read that captured history; current input remains unchanged.".to_owned(),
++                        }),
++                    ).await;
++                }
+                 crate::compact::run_inline_capacity_compact_task(
+                     Arc::clone(&sess),
+                     Arc::clone(&turn_context),
+diff --git a/codex-rs/windows-sandbox-rs/src/desktop.rs b/codex-rs/windows-sandbox-rs/src/desktop.rs
+--- a/codex-rs/windows-sandbox-rs/src/desktop.rs
++++ b/codex-rs/windows-sandbox-rs/src/desktop.rs
+@@ -68,6 +68,9 @@
+ use windows_sys::Win32::System::StationsAndDesktops::OpenDesktopW;
+ use windows_sys::Win32::System::StationsAndDesktops::UOI_NAME;
+ 
++#[path = "service_station.rs"]
++mod service_station;
++
+ const PRIVATE_DESKTOP_PREFIX: &str = "CodexSandboxDesktop-";
+ 
+ const DESKTOP_ALL_ACCESS: u32 = DESKTOP_READOBJECTS
+@@ -187,7 +190,12 @@
+ 
+ fn current_window_station_name() -> Result<Vec<u16>> {
+     // This is a borrowed process handle. It must not be closed or rebound.
+-    let station = unsafe { GetProcessWindowStation() };
++    station_name_for_handle(unsafe { GetProcessWindowStation() })
++}
++
++fn station_name_for_handle(
++    station: windows_sys::Win32::System::StationsAndDesktops::HWINSTA,
++) -> Result<Vec<u16>> {
+     if station.is_null() {
+         anyhow::bail!("GetProcessWindowStation failed: {}", unsafe {
+             GetLastError()
+@@ -354,6 +362,9 @@
+ ) -> Result<String> {
+     let sandbox_sid =
+         string_from_sid_bytes(&resolve_sid(sandbox_username)?).map_err(anyhow::Error::msg)?;
++    // The target has a different logon token. Authorize only this caller-owned
++    // noninteractive station before every launch, including a desktop cache hit.
++    service_station::ensure_access(&sandbox_sid)?;
+     let mut desktops = SHARED_PRIVATE_DESKTOPS
+         .get_or_init(|| Mutex::new(HashMap::new()))
+         .lock()
+@@ -370,8 +381,8 @@
+         sid?
+     };
+     let owner_user_sid = string_from_sid_bytes(&owner_user_sid).map_err(anyhow::Error::msg)?;
+-    // CreateProcessWithLogonW shares the caller's logon SID with the sandbox account.
+-    // Grant ACL-management rights to the caller's user SID instead.
++    // Keep ACL-management rights with the caller. CreateProcessWithLogonW does
++    // not guarantee a shared logon SID; the target receives participant rights.
+     // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createprocesswithlogonw
+     let sddl = to_wide(format!(
+         "D:P(A;;0x{DESKTOP_ALL_ACCESS:x};;;{owner_user_sid})(A;;0x{DESKTOP_PARTICIPANT_ACCESS:x};;;{sandbox_sid})"
+diff --git a/codex-rs/windows-sandbox-rs/src/service_station.rs b/codex-rs/windows-sandbox-rs/src/service_station.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/service_station.rs
+@@ -0,0 +1,317 @@
++//! Native access required when an alternate-user runner joins a caller-owned
++//! noninteractive service window station. No desktop, station binding, or agent
++//! execution policy is changed here.
++use super::station_name_for_handle;
++use crate::private_acl_lock::PrivateLockDirectory;
++use crate::token::{get_current_token_for_restriction, get_user_sid_bytes};
++use crate::winutil::sid_bytes_from_string;
++use anyhow::{Context, Result, ensure};
++use sha2::{Digest, Sha256};
++use std::{ffi::c_void, fs::File, mem::size_of, ptr};
++use windows_sys::Win32::Foundation::{
++    CloseHandle, ERROR_SUCCESS, GetLastError, HANDLE, HLOCAL, LocalFree,
++};
++use windows_sys::Win32::Security::Authorization::{
++    EXPLICIT_ACCESS_W, GRANT_ACCESS, GetSecurityInfo, SE_WINDOW_OBJECT, SetEntriesInAclW,
++    SetSecurityInfo, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
++};
++use windows_sys::Win32::Security::{
++    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, EqualSid, GENERIC_MAPPING,
++    GetAce, GetLengthSid, GetTokenInformation, IsValidSid, MapGenericMask,
++    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, TOKEN_STATISTICS, TokenSessionId,
++    TokenStatistics,
++};
++use windows_sys::Win32::System::StationsAndDesktops::{
++    GetProcessWindowStation, GetUserObjectInformationW, UOI_FLAGS, USEROBJECTFLAGS,
++};
++
++// GENERIC_EXECUTE for a noninteractive station, plus READATTRIBUTES for the
++// existing runner's station-name query. Actual Session0/alternate-token tests
++// prove every component; no clipboard, desktop creation, or ACL-management rights.
++const REQUIRED_ACCESS: u32 = 0x0002_0062;
++const INHERIT_ONLY: u8 = 0x08;
++
++struct LocalMemory(*mut c_void);
++impl Drop for LocalMemory {
++    fn drop(&mut self) {
++        unsafe {
++            LocalFree(self.0 as HLOCAL);
++        }
++    }
++}
++// Keep this zero-byte coordination inode. Per-operation deletion would race a
++// new opener after unlock; the file stores no lease or application state.
++struct StationLock {
++    _file: File,
++    _directory: PrivateLockDirectory,
++    _leaf: String,
++}
++fn lock_station(session: u32, station: &[u16], owner: &[u8]) -> Result<StationLock> {
++    let mut hash = Sha256::new();
++    hash.update(b"native-service-window-station\0");
++    hash.update(session.to_le_bytes());
++    for unit in station {
++        hash.update(unit.to_le_bytes());
++    }
++    hash.update(owner);
++    let leaf = format!("station-{:x}.lock", hash.finalize());
++    // Known-folder caller-owned location shared across homes, versions, CDS and
++    // CADSG. Never derive the lock root/key from a provider or CODEX_HOME.
++    let directory = PrivateLockDirectory::open()?;
++    let file = directory.open_leaf(&leaf)?;
++    file.lock()
++        .context("lock current service window station ACL")?;
++    Ok(StationLock {
++        _file: file,
++        _directory: directory,
++        _leaf: leaf,
++    })
++}
++fn caller_identity() -> Result<(Vec<u8>, u32, TOKEN_STATISTICS)> {
++    let token = unsafe { get_current_token_for_restriction()? };
++    let result = (|| {
++        let user = unsafe { get_user_sid_bytes(token)? };
++        let mut session = 0_u32;
++        let mut stats: TOKEN_STATISTICS = unsafe { std::mem::zeroed() };
++        let mut returned = 0;
++        ensure!(
++            unsafe {
++                GetTokenInformation(
++                    token,
++                    TokenSessionId,
++                    (&mut session as *mut u32).cast(),
++                    size_of::<u32>() as u32,
++                    &mut returned,
++                )
++            } != 0,
++            "query caller session: {}",
++            unsafe { GetLastError() }
++        );
++        ensure!(
++            returned as usize == size_of::<u32>(),
++            "invalid caller session size"
++        );
++        ensure!(
++            unsafe {
++                GetTokenInformation(
++                    token,
++                    TokenStatistics,
++                    (&mut stats as *mut TOKEN_STATISTICS).cast(),
++                    size_of::<TOKEN_STATISTICS>() as u32,
++                    &mut returned,
++                )
++            } != 0,
++            "query caller logon identity: {}",
++            unsafe { GetLastError() }
++        );
++        ensure!(
++            returned as usize == size_of::<TOKEN_STATISTICS>(),
++            "invalid caller statistics size"
++        );
++        Ok((user, session, stats))
++    })();
++    unsafe {
++        CloseHandle(token);
++    }
++    result
++}
++fn station_security(station: HANDLE) -> Result<(LocalMemory, *mut c_void, *mut ACL)> {
++    let mut owner = ptr::null_mut();
++    let mut acl = ptr::null_mut();
++    let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
++    let error = unsafe {
++        GetSecurityInfo(
++            station,
++            SE_WINDOW_OBJECT,
++            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
++            &mut owner,
++            ptr::null_mut(),
++            &mut acl,
++            ptr::null_mut(),
++            &mut sd,
++        )
++    };
++    ensure!(
++        error == ERROR_SUCCESS,
++        "read current service station ACL: {error}"
++    );
++    let allocation = LocalMemory(sd);
++    ensure!(
++        !sd.is_null() && !owner.is_null(),
++        "missing current service station owner"
++    );
++    Ok((allocation, owner, acl))
++}
++fn map_station_mask(mut mask: u32) -> u32 {
++    // Microsoft WinSta generic mappings; retain all pre-existing generic grants.
++    let mapping = GENERIC_MAPPING {
++        GenericRead: 0x0002_0103,
++        GenericWrite: 0x0002_000c,
++        GenericExecute: 0x0002_0060,
++        GenericAll: 0x000f_037f,
++    };
++    unsafe {
++        MapGenericMask(&mut mask, &mapping);
++    }
++    mask
++}
++fn target_masks(acl: *const ACL, target: &[u8]) -> Result<(u32, u32)> {
++    let mut allowed = 0;
++    let mut denied = 0;
++    for index in 0..unsafe { (*acl).AceCount } {
++        let mut raw = ptr::null_mut();
++        ensure!(
++            unsafe { GetAce(acl, index as u32, &mut raw) } != 0,
++            "read service station ACE: {}",
++            unsafe { GetLastError() }
++        );
++        let header = unsafe { &*raw.cast::<ACE_HEADER>() };
++        if !matches!(header.AceType, 0 | 1) || header.AceFlags & INHERIT_ONLY != 0 {
++            continue;
++        }
++        ensure!(
++            header.AceSize as usize >= 16,
++            "truncated station access ACE"
++        );
++        let ace = unsafe { &*raw.cast::<ACCESS_ALLOWED_ACE>() };
++        let sid = ptr::addr_of!(ace.SidStart).cast_mut().cast();
++        let size = unsafe { GetLengthSid(sid) } as usize;
++        ensure!(
++            size >= 8 && size <= header.AceSize as usize - 8 && unsafe { IsValidSid(sid) } != 0,
++            "invalid station ACE SID"
++        );
++        if unsafe { EqualSid(sid, target.as_ptr().cast_mut().cast()) } == 0 {
++            continue;
++        }
++        if header.AceType == 0 {
++            allowed |= map_station_mask(ace.Mask);
++        } else {
++            denied |= map_station_mask(ace.Mask);
++        }
++    }
++    Ok((allowed, denied))
++}
++pub(super) fn ensure_access(target_sid: &str) -> Result<()> {
++    // Scope this additive compatibility grant to the exact held current object.
++    // Outside that scope, preserve the existing native launch path unchanged.
++    let station = unsafe { GetProcessWindowStation() };
++    if station.is_null() {
++        return Ok(());
++    }
++    let Ok(name) = station_name_for_handle(station) else {
++        return Ok(());
++    };
++    let mut flags: USEROBJECTFLAGS = unsafe { std::mem::zeroed() };
++    let mut returned = 0;
++    if unsafe {
++        GetUserObjectInformationW(
++            station,
++            UOI_FLAGS,
++            (&mut flags as *mut USEROBJECTFLAGS).cast(),
++            size_of::<USEROBJECTFLAGS>() as u32,
++            &mut returned,
++        )
++    } == 0
++        || returned as usize != size_of::<USEROBJECTFLAGS>()
++        || flags.dwFlags & 1 != 0
++    {
++        return Ok(());
++    }
++    let Ok(station_name) = String::from_utf16(&name) else {
++        return Ok(());
++    };
++    if !station_name.to_ascii_lowercase().starts_with("service-0x") || !station_name.ends_with('$')
++    {
++        return Ok(());
++    }
++    let Ok((caller, session, statistics)) = caller_identity() else {
++        return Ok(());
++    };
++    let expected = format!(
++        "Service-0x{:x}-{:x}$",
++        statistics.AuthenticationId.HighPart as u32, statistics.AuthenticationId.LowPart
++    );
++    if !station_name.eq_ignore_ascii_case(&expected) {
++        return Ok(());
++    }
++    let Ok((_scope_sd, owner, _)) = station_security(station) else {
++        return Ok(());
++    };
++    if unsafe { EqualSid(owner, caller.as_ptr().cast_mut().cast()) } == 0 {
++        return Ok(());
++    }
++    let target = sid_bytes_from_string(target_sid)?;
++    let _lock = lock_station(session, &name, &caller)?;
++    // Read the latest descriptor only after the cross-process lock. All original
++    // deny/allow/inheritance entries are retained by the native GRANT merge.
++    let (_old_sd, owner, acl) = station_security(station)?;
++    if unsafe { EqualSid(owner, caller.as_ptr().cast_mut().cast()) } == 0 {
++        return Ok(());
++    }
++    // A pre-existing NULL DACL grants all access. Do not replace it with a more
++    // restrictive DACL or pretend ownership of pre-existing authorization.
++    if acl.is_null() {
++        return Ok(());
++    }
++    let (existing, denied) = target_masks(acl, &target)?;
++    ensure!(
++        denied & REQUIRED_ACCESS == 0,
++        "current service station explicitly denies runner startup access"
++    );
++    let missing = REQUIRED_ACCESS & !existing;
++    if missing == 0 {
++        return Ok(());
++    }
++    let entry = EXPLICIT_ACCESS_W {
++        grfAccessPermissions: missing,
++        grfAccessMode: GRANT_ACCESS,
++        grfInheritance: 0,
++        Trustee: TRUSTEE_W {
++            pMultipleTrustee: ptr::null_mut(),
++            MultipleTrusteeOperation: 0,
++            TrusteeForm: TRUSTEE_IS_SID,
++            TrusteeType: TRUSTEE_IS_USER,
++            ptstrName: target.as_ptr().cast_mut().cast(),
++        },
++    };
++    let mut updated = ptr::null_mut();
++    let error = unsafe { SetEntriesInAclW(1, &entry, acl, &mut updated) };
++    ensure!(
++        error == ERROR_SUCCESS,
++        "merge native service station startup grant: {error}"
++    );
++    let _updated = LocalMemory(updated.cast());
++    let error = unsafe {
++        SetSecurityInfo(
++            station,
++            SE_WINDOW_OBJECT,
++            DACL_SECURITY_INFORMATION,
++            ptr::null_mut(),
++            ptr::null_mut(),
++            updated,
++            ptr::null_mut(),
++        )
++    };
++    ensure!(
++        error == ERROR_SUCCESS,
++        "authorize native service station startup: {error}"
++    );
++    let (_readback_sd, owner, readback_acl) = station_security(station)?;
++    ensure!(
++        unsafe { EqualSid(owner, caller.as_ptr().cast_mut().cast()) } != 0
++            && !readback_acl.is_null(),
++        "service station owner/DACL changed during grant"
++    );
++    let (actual, denied) = target_masks(readback_acl, &target)?;
++    ensure!(
++        actual & REQUIRED_ACCESS == REQUIRED_ACCESS && denied & REQUIRED_ACCESS == 0,
++        "native service station startup grant did not persist"
++    );
++    // Add-only for this ephemeral object lifetime, like the existing private
++    // desktop cache. Per-run revoke/whole-SD restore would race other runners and
++    // erase pre-existing grants; the OS retires this station with its logon.
++    Ok(())
++}
++#[cfg(test)]
++#[path = "service_station_tests.rs"]
++mod tests;
+diff --git a/codex-rs/windows-sandbox-rs/src/service_station_tests.rs b/codex-rs/windows-sandbox-rs/src/service_station_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/service_station_tests.rs
+@@ -0,0 +1,428 @@
++use super::*;
++use crate::desktop::current_window_station_name;
++use crate::winutil::string_from_sid_bytes;
++use codex_protocol::models::PermissionProfile;
++use serde_json::json;
++use std::{
++    collections::HashMap,
++    path::{Path, PathBuf},
++    process::{Command, Stdio},
++};
++use windows_sys::Win32::Security::Authorization::DENY_ACCESS;
++use windows_sys::Win32::Security::GetSecurityDescriptorLength;
++
++fn sd_bytes(sd: &LocalMemory) -> Vec<u8> {
++    let len = unsafe { GetSecurityDescriptorLength(sd.0) } as usize;
++    assert!(len > 0 && len <= 1024 * 1024);
++    unsafe { std::slice::from_raw_parts(sd.0.cast::<u8>(), len) }.to_vec()
++}
++struct ExclusiveFixtureRestore {
++    station: HANDLE,
++    original: LocalMemory,
++    acl: *mut ACL,
++    out: PathBuf,
++    restored: bool,
++}
++impl ExclusiveFixtureRestore {
++    fn restore(&mut self) -> Result<()> {
++        if self.restored {
++            return Ok(());
++        }
++        let error = unsafe {
++            SetSecurityInfo(
++                self.station,
++                SE_WINDOW_OBJECT,
++                DACL_SECURITY_INFORMATION,
++                ptr::null_mut(),
++                ptr::null_mut(),
++                self.acl,
++                ptr::null_mut(),
++            )
++        };
++        ensure!(
++            error == ERROR_SUCCESS,
++            "exclusive test fixture restore: {error}"
++        );
++        let (actual, _, _) = station_security(self.station)?;
++        let equal = sd_bytes(&actual) == sd_bytes(&self.original);
++        std::fs::write(
++            self.out.join("exclusive-fixture-restore.json"),
++            serde_json::to_vec_pretty(
++                &json!({"test_fixture_only_not_production_cleanup":true,"original_SD_byte_equal":equal}),
++            )?,
++        )?;
++        ensure!(equal, "exclusive test station was not restored");
++        self.restored = true;
++        Ok(())
++    }
++}
++impl Drop for ExclusiveFixtureRestore {
++    fn drop(&mut self) {
++        if !self.restored {
++            let _ = self.restore();
++        }
++    }
++}
++fn fixture_merge(station: HANDLE, sid: &str, mask: u32, deny: bool) -> Result<()> {
++    let bytes = sid_bytes_from_string(sid)?;
++    let (_sd, _, acl) = station_security(station)?;
++    ensure!(
++        !acl.is_null(),
++        "test requires a concrete original station DACL"
++    );
++    let entry = EXPLICIT_ACCESS_W {
++        grfAccessPermissions: mask,
++        grfAccessMode: if deny { DENY_ACCESS } else { GRANT_ACCESS },
++        grfInheritance: 0,
++        Trustee: TRUSTEE_W {
++            pMultipleTrustee: ptr::null_mut(),
++            MultipleTrusteeOperation: 0,
++            TrusteeForm: TRUSTEE_IS_SID,
++            TrusteeType: TRUSTEE_IS_USER,
++            ptstrName: bytes.as_ptr().cast_mut().cast(),
++        },
++    };
++    let mut updated = ptr::null_mut();
++    let error = unsafe { SetEntriesInAclW(1, &entry, acl, &mut updated) };
++    ensure!(error == ERROR_SUCCESS, "merge test fixture ACL: {error}");
++    let _updated = LocalMemory(updated.cast());
++    let error = unsafe {
++        SetSecurityInfo(
++            station,
++            SE_WINDOW_OBJECT,
++            DACL_SECURITY_INFORMATION,
++            ptr::null_mut(),
++            ptr::null_mut(),
++            updated,
++            ptr::null_mut(),
++        )
++    };
++    ensure!(error == ERROR_SUCCESS, "install test fixture ACE: {error}");
++    Ok(())
++}
++fn other_aces(acl: *const ACL, excluded: &[Vec<u8>]) -> Result<Vec<Vec<u8>>> {
++    let mut result = vec![];
++    for index in 0..unsafe { (*acl).AceCount } {
++        let mut raw = ptr::null_mut();
++        ensure!(
++            unsafe { GetAce(acl, index as u32, &mut raw) } != 0,
++            "read test ACE"
++        );
++        let head = unsafe { &*raw.cast::<ACE_HEADER>() };
++        let own = if matches!(head.AceType, 0 | 1) && head.AceSize >= 16 {
++            let ace = unsafe { &*raw.cast::<ACCESS_ALLOWED_ACE>() };
++            let sid = ptr::addr_of!(ace.SidStart).cast_mut().cast();
++            excluded
++                .iter()
++                .any(|s| unsafe { EqualSid(sid, s.as_ptr().cast_mut().cast()) } != 0)
++        } else {
++            false
++        };
++        if !own {
++            result.push(
++                unsafe { std::slice::from_raw_parts(raw.cast::<u8>(), head.AceSize as usize) }
++                    .to_vec(),
++            );
++        }
++    }
++    result.sort();
++    Ok(result)
++}
++fn native_readonly(
++    home: &Path,
++    cwd: &Path,
++    label: &str,
++    target: &str,
++) -> Result<serde_json::Value> {
++    let output_name = format!("native-station-forbidden-{label}.txt");
++    ensure!(
++        !cwd.join(&output_name).exists(),
++        "forbidden test destination pre-exists"
++    );
++    let nonce = format!("CDS_NATIVE_AUTOMATIC_STATION_{label}");
++    let command = vec![
++        std::env::var("SystemRoot")? + "\\System32\\cmd.exe",
++        "/d".into(),
++        "/c".into(),
++        format!(
++            "type native-station-input.txt & (echo forbidden> {output_name}) 2>nul & if exist {output_name} (exit /b 21) else (echo {nonce} & whoami /user)"
++        ),
++    ];
++    let profile = PermissionProfile::read_only();
++    let capture = crate::run_windows_sandbox_capture_for_permission_profile_elevated(
++        crate::ElevatedSandboxProfileCaptureRequest {
++            permission_profile: &profile,
++            workspace_roots: &[],
++            codex_home: home,
++            command,
++            cwd,
++            env_map: std::env::vars().collect::<HashMap<_, _>>(),
++            timeout_ms: Some(60000),
++            cancellation: None,
++            proxy_enforced: false,
++            network_proxy_restricting_sid: None,
++            read_roots_override: None,
++            read_roots_include_platform_defaults: false,
++            write_roots_override: None,
++            deny_read_paths_override: &[],
++            deny_write_paths_override: &[],
++        },
++    )?;
++    let stdout = String::from_utf8_lossy(&capture.stdout);
++    let stderr = String::from_utf8_lossy(&capture.stderr);
++    ensure!(
++        capture.exit_code == 0
++            && !capture.timed_out
++            && stdout.contains(&nonce)
++            && stdout.contains("CDS_NATIVE_READ_ALLOWED")
++            && stdout.contains(target),
++        "native readonly command failed: rc={} timedout={} stdout={stdout} stderr={stderr}",
++        capture.exit_code,
++        capture.timed_out
++    );
++    ensure!(
++        !cwd.join(&output_name).exists(),
++        "readonly sandbox wrote forbidden file"
++    );
++    Ok(
++        json!({"label":label,"exit_code":capture.exit_code,"timed_out":capture.timed_out,"stdout":stdout,"stderr":stderr,"forbidden_file_absent":true}),
++    )
++}
++#[test]
++#[ignore = "requires the project's controlled own standard-user Session0 task"]
++fn actual_owned_service_station_concurrent_child() -> Result<()> {
++    let sid = std::env::var("CDS_OWN_STATION_CHILD_SID")?;
++    let (caller, session, _) = caller_identity()?;
++    ensure!(session == 0, "child requires own Session0");
++    ensure!(
++        string_from_sid_bytes(&caller).map_err(anyhow::Error::msg)?
++            == std::env::var("CDS_OWN_EXPECTED_USER_SID")?,
++        "wrong child caller"
++    );
++    ensure_access(&sid)?;
++    let name = current_window_station_name()?;
++    let lock = lock_station(session, &name, &caller)?;
++    println!("OWN_STATION_CHILD_ACTUAL_GRANT {}", lock._leaf);
++    Ok(())
++}
++#[test]
++#[ignore = "requires the project's exclusive controlled own standard-user Session0 task"]
++fn actual_owned_service_station_native_automatic_allow_deny_and_concurrency() -> Result<()> {
++    let home = PathBuf::from(std::env::var_os("CDS_OWN_HOST_HOME").context("own home required")?);
++    let cwd = PathBuf::from(std::env::var_os("CDS_OWN_HOST_WORK").context("own work required")?);
++    let out = PathBuf::from(
++        std::env::var_os("CDS_OWN_NATIVE_STATION_OUT").context("own output required")?,
++    );
++    let target = std::env::var("CDS_OWN_EXPECTED_TARGET_SID")?;
++    let (caller, session, _) = caller_identity()?;
++    ensure!(session == 0, "fixture requires Session0");
++    ensure!(
++        string_from_sid_bytes(&caller).map_err(anyhow::Error::msg)?
++            == std::env::var("CDS_OWN_EXPECTED_USER_SID")?,
++        "wrong fixture caller"
++    );
++    ensure!(
++        !home.as_os_str().is_empty() && cwd.is_dir() && out.is_dir(),
++        "invalid controlled paths"
++    );
++    let station = unsafe { GetProcessWindowStation() };
++    let (original, owner, acl) = station_security(station)?;
++    ensure!(
++        unsafe { EqualSid(owner, caller.as_ptr().cast_mut().cast()) } != 0 && !acl.is_null(),
++        "wrong exclusive station owner"
++    );
++    let target_bytes = sid_bytes_from_string(&target)?;
++    ensure!(
++        target_masks(acl, &target_bytes)? == (0, 0),
++        "fixture must start without target pregrant"
++    );
++    let mut restore = ExclusiveFixtureRestore {
++        station,
++        original,
++        acl,
++        out: out.clone(),
++        restored: false,
++    };
++    let original_other = other_aces(acl, std::slice::from_ref(&target_bytes))?;
++    // First prove automatic admission from a fresh station with ZERO target ACE.
++    std::fs::write(
++        cwd.join("native-station-input.txt"),
++        b"CDS_NATIVE_READ_ALLOWED\r\n",
++    )?;
++    let mut captures = vec![native_readonly(&home, &cwd, "freshzero", &target)?];
++    let (fresh_sd, _, fresh_acl) = station_security(station)?;
++    ensure!(
++        target_masks(fresh_acl, &target_bytes)? == (REQUIRED_ACCESS, 0),
++        "fresh automatic startup grant is incomplete or excessive"
++    );
++    ensure!(
++        other_aces(fresh_acl, std::slice::from_ref(&target_bytes))? == original_other,
++        "fresh grant changed other original ACEs"
++    );
++    let cache_names = super::super::SHARED_PRIVATE_DESKTOPS
++        .get()
++        .context("native private desktop cache was not populated")?
++        .lock()
++        .map_err(|_| anyhow::anyhow!("desktop cache poisoned"))?
++        .values()
++        .map(|d| d.name.clone())
++        .collect::<std::collections::BTreeSet<_>>();
++    ensure!(
++        !cache_names.is_empty(),
++        "native private desktop cache is empty"
++    );
++    // Exclusive TEST fixture reset only: retain the live private desktop cache,
++    // remove the earlier station grant, then require real cache-hit reauthorization.
++    let error = unsafe {
++        SetSecurityInfo(
++            station,
++            SE_WINDOW_OBJECT,
++            DACL_SECURITY_INFORMATION,
++            ptr::null_mut(),
++            ptr::null_mut(),
++            restore.acl,
++            ptr::null_mut(),
++        )
++    };
++    ensure!(
++        error == ERROR_SUCCESS,
++        "exclusive cache-hit fixture reset failed: {error}"
++    );
++    let (reset_sd, _, reset_acl) = station_security(station)?;
++    ensure!(
++        sd_bytes(&reset_sd) == sd_bytes(&restore.original)
++            && target_masks(reset_acl, &target_bytes)? == (0, 0),
++        "cache-hit fixture reset is incomplete"
++    );
++    drop(fresh_sd);
++    // A pre-existing partial allow, extra unrelated right, and deny must survive.
++    fixture_merge(station, &target, 0x20100, false)?;
++    fixture_merge(station, &target, 0x8, true)?;
++    captures.push(native_readonly(
++        &home,
++        &cwd,
++        "cachehit_reauthorize",
++        &target,
++    )?);
++    let after_cache_names = super::super::SHARED_PRIVATE_DESKTOPS
++        .get()
++        .context("native desktop cache disappeared")?
++        .lock()
++        .map_err(|_| anyhow::anyhow!("desktop cache poisoned"))?
++        .values()
++        .map(|d| d.name.clone())
++        .collect::<std::collections::BTreeSet<_>>();
++    ensure!(
++        cache_names == after_cache_names,
++        "test did not exercise the same native private desktop cache"
++    );
++    let (first, _, first_acl) = station_security(station)?;
++    ensure!(
++        target_masks(first_acl, &target_bytes)? == (0x20162, 0x8),
++        "pre-existing target permissions lost or overgranted"
++    );
++    ensure!(
++        other_aces(first_acl, std::slice::from_ref(&target_bytes))? == original_other,
++        "other original ACEs changed"
++    );
++    captures.push(native_readonly(&home, &cwd, "idempotent", &target)?);
++    let (second, _, _) = station_security(station)?;
++    ensure!(
++        sd_bytes(&first) == sd_bytes(&second),
++        "cache hit must be idempotent"
++    );
++    let mut threads = vec![];
++    for n in 0..2 {
++        let h = home.clone();
++        let w = cwd.clone();
++        let t = target.clone();
++        threads.push(std::thread::spawn(move || {
++            native_readonly(&h, &w, &format!("parallel{n}"), &t)
++        }));
++    }
++    let joined = threads.into_iter().map(|t| t.join()).collect::<Vec<_>>();
++    for result in joined {
++        captures.push(result.map_err(|_| anyhow::anyhow!("native parallel thread panicked"))??);
++    }
++    // Separate process/home values still take the same caller/session/station lock.
++    let prefix = target
++        .rsplit_once('-')
++        .context("local account SID required")?
++        .0;
++    let synthetic = [
++        format!("{prefix}-4294967293"),
++        format!("{prefix}-4294967294"),
++    ];
++    let mut children = vec![];
++    for (n, sid) in synthetic.iter().enumerate() {
++        let child_home = out.join(format!("child-home-{n}"));
++        std::fs::create_dir(&child_home)?;
++        children.push(Command::new(std::env::current_exe()?).args(["--exact","desktop::service_station::tests::actual_owned_service_station_concurrent_child","--ignored","--show-output","--test-threads=1"]).env("CDS_OWN_STATION_CHILD_SID",sid).env("CODEX_HOME",child_home).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?);
++    }
++    let joined = children
++        .into_iter()
++        .map(|c| c.wait_with_output())
++        .collect::<Vec<_>>();
++    let mut child_outputs = vec![];
++    let expected_key = {
++        let name = current_window_station_name()?;
++        let lock = lock_station(session, &name, &caller)?;
++        lock._leaf.clone()
++    };
++    for child in joined {
++        let r = child?;
++        let text = String::from_utf8_lossy(&r.stdout).into_owned();
++        ensure!(
++            r.status.success()
++                && text.contains(&format!("OWN_STATION_CHILD_ACTUAL_GRANT {expected_key}"))
++                && text.contains("1 passed; 0 failed; 0 ignored"),
++            "child did not actually execute native grant: {} {text}",
++            r.status
++        );
++        child_outputs.push(text);
++    }
++    let (_current_sd, _, current_acl) = station_security(station)?;
++    for sid in &synthetic {
++        ensure!(
++            target_masks(current_acl, &sid_bytes_from_string(sid)?)?.0 == REQUIRED_ACCESS,
++            "concurrent distinct SID grant lost"
++        );
++    }
++    ensure!(
++        target_masks(current_acl, &target_bytes)? == (0x20162, 0x8),
++        "concurrent grant lost existing target rights"
++    );
++    let mut excluded = vec![target_bytes.clone()];
++    for sid in &synthetic {
++        excluded.push(sid_bytes_from_string(sid)?);
++    }
++    ensure!(
++        other_aces(current_acl, &excluded)? == original_other,
++        "concurrent grant changed other original ACEs"
++    );
++    let (before_invalid, _, _) = station_security(station)?;
++    ensure!(ensure_access("not-a-sid").is_err(), "invalid SID accepted");
++    let (after_invalid, _, _) = station_security(station)?;
++    ensure!(
++        sd_bytes(&before_invalid) == sd_bytes(&after_invalid),
++        "invalid SID mutated ACL"
++    );
++    fixture_merge(station, &target, 0x20, true)?;
++    let (before_deny, _, _) = station_security(station)?;
++    ensure!(
++        ensure_access(&target).is_err(),
++        "explicit target deny was overridden"
++    );
++    let (after_deny, _, _) = station_security(station)?;
++    ensure!(
++        sd_bytes(&before_deny) == sd_bytes(&after_deny),
++        "denied startup changed ACL"
++    );
++    let report = json!({"status":"ACTUAL_NATIVE_AUTOMATIC_STATION_GRANT_AND_READONLY_PASSED","production_required_mask":"0x20062","external_pregrant":false,"fresh_zero_target_ACE_native_passed":true,"same_private_desktop_cache_reauthorized_after_fixture_reset":true,"preexisting_allow_and_deny_preserved":true,"other_original_aces_preserved":true,"cache_hit_SD_byte_equal":true,"native_readonly_captures":captures,"distinct_process_different_home_same_station_key":expected_key,"concurrent_child_outputs":child_outputs,"invalid_sid_failed_without_mutation":true,"required_target_deny_failed_without_mutation":true,"no_CREATE_SUSPENDED_or_admin_token_hook":true});
++    std::fs::write(
++        out.join("native-station-result.json"),
++        serde_json::to_vec_pretty(&report)?,
++    )?;
++    restore.restore()?;
++    Ok(())
++}

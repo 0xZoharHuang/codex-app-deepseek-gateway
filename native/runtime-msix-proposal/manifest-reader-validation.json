@@ -1,0 +1,11 @@
+{
+  "method": "Installed Windows IAppxFactory::CreateManifestReader over memory IStream",
+  "manifest_sha256": "c56013197c57830ff49cb90282ab13dfc8ea5bee18d07b340fa1791d3a976844",
+  "hresult": "0x00000000",
+  "manifest_reader_created": true,
+  "manifest_schema_reader_accepted": true,
+  "native_assets_built_or_present": false,
+  "package_signed": false,
+  "package_installed": false,
+  "limits": "Does not qualify executable closure, signer trust, service deployment or actual alias/kernel identity/stdio."
+}

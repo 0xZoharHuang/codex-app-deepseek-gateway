@@ -4,7 +4,21 @@
 
 标准 builder 可选 --jobs 1 或 --jobs 2，使用官方 Cargo --jobs 参数。固定 PROFILE / release_environment 中 CARGO_BUILD_JOBS=2 是锁定的最大并发值；显式 CLI override 优先，实际 argv 和 locked_max_build_jobs / effective_build_jobs / build_jobs_override 会同时写入构建回执。打包器严格核对这些字段与实际命令，并在分发 provenance 记录有效资源设置。无 override 的旧回执沿用原校验。此资源限制保留代码生成参数、源指纹、原生四目标和 owner/cache 的检查。
 
-## 当前 P7：来源、构建、装配与 App 资格分开
+## 0.2.0 / P19 的原生输入
+
+构建和打包均传入 `native/build-lock.O165-P19-source.json`。保留该锁中的源码、工具链、V8 输入与 release profile。六个程序包括 CLI、Code Mode host、command runner、setup helper、managed-deny probe 和 sandbox service。分发格式为 `cadsg-native-source-bundle`，固定 App 使用 Legacy 路径，不需要安装项目服务注册或新的证书信任。
+
+## 历史 P9 源码提案
+
+当时的 P9 锁在原七补丁 P7 后依次追加 `cadsg-request-capacity-port-0165.patch`、`cadsg-request-capacity-cancel-0165.patch` 和 `windows-host-boundaries-0165.patch`。P7/P8 原锁已按原字节归档；App、native version、工具链、profile 和原有四目标保持各自固定身份。当前 P9 锁 SHA256 为 `b50a9d41b30c902a77fa4fa7193b5a4e1a1d62117341c73c5768bf407b7af309`，derived prepared source 为 `495125857fc45dc71a780d16832f2b2132ad129aea72f0353ebd12adeafc0c9b` /9,518 files，Cargo.lock 为 `24ec41c0cad0145b14a2cda3a5b343540dfcb7043c24bef32a65ae46edc7f980`。
+
+该来源身份使用 builder 的 `{path:{sha256,size}}` 算法，从已验证 P7 完整 map 加 20+9+5 条变更范围推导，未重新扫描或构建全部源码。补丁顺序和稀疏前后字节已验证；rustfmt 与 Python source 合同不等于 Rust 类型检查、native 单测或真实 App 运行。`native/host-P9-source-candidate.json` 明确记录 **compiled=false、native unit=false、service-station=false、App GUI=false**。
+
+容量/取消改动复用原生 token、writer 和 persistence tracker，保护新增 checkpoint 的前缀证明、epoch/fence 与提交顺序，不另建任务循环。host 提案只改五个 native 文件：canonical SID 去重、显式目标用户 readiness、当前 station 的 UTF-16 desktop 名、bootstrap `lpDesktop` 与原进程启动状态诊断。三方合并保留 0.165 的 schema/setup version/所有权验证；新测试 fixture 使用实际 JSON namespace sidecar，没有恢复旧版结构字段或放松账户解析。
+
+标准 builder 按锁逐个校验 patch 并构建，未添加 patch 数量白名单。**发布 packager 的原有 topology 守卫没有扩张，仍拒绝 P8/P9 借用 P7 资格。** 下面 P7 产物、来源、命令及其装配结论是公开历史范围，不是当前 active P9 的运行证明；新的发布和完整安装回滚步骤待实际门槛关闭后另定。
+
+## 公开 0.1.0 / P7：历史来源、构建与 App 资格
 
 固定 App 26.1023.6621.0 / native 0.165.0-alpha.1.2，上游 `720fec862a608ae1e5878d1eecb04fb93192e93c`。完整 prepared source 为 `1125f5c87733fb267177522de600918b06a0a41489543b57c721a3bcce6d7c56`，9,516 文件；锁为 `da4e194baa449c3caa4457021770876d4ddc5d663869995bd0fb1cae6eb497e6`，Cargo.lock 为 `7537da7c5e154334b15ef9b59091f5fed3a8e480b77c037e3a8b7f07d1614709`。Rust 1.99.1 / x86_64-pc-windows-msvc，当前实际 producer 使用正常 release profile、jobs1。
 
@@ -162,3 +176,9 @@ cargo build --locked --release -p codex-cli -p codex-windows-sandbox --bin codex
 ## Checkpoint compatibility when downgrading
 
 本节只说明历史0.163 M/N与CDS相关容量扩展，不把旧配方用于O165。历史N修正缺省/显式默认元数据的重放哈希并写入v3检查点；旧M不保证在下一次容量拒绝时消费它。回滚保留历史，不表示旧二进制理解新格式。不得手改检查点、拼历史或换producer标签绕过不兼容。O165使用上游压缩与恢复实现，按自身版本验收。
+
+## Code Mode host 的固定 V8 构建输入
+
+包含 `codex-code-mode-host.exe` 的完整运行时构建，使用固定上游源码 `.github/actions/setup-rusty-v8/action.yml` 指定的 Codex 自产 `ptrcomp_sandbox_release` 产物。按源码 Cargo.lock 的 v8 版本，从 `https://github.com/openai/codex/releases/download/rusty-v8-v<version>/` 取得目标平台的 `.sha256`、`.lib.gz` 和 `src_binding_*.rs` 三个文件，传给正常构建入口 `--rusty-v8-dir <目录>`。
+
+构建器先以固定源码 `third_party/v8/rusty_v8_<version>_release_manifests.sha256` 验证清单原始字节，再验证两项产物；原始 CRLF 不做归一化。验证后仅对子 Cargo 设置 `RUSTY_V8_ARCHIVE` 和 `RUSTY_V8_SRC_BINDING_PATH`，并在构建后复核其哈希。来源、大小和哈希写入构建回执。普通上游 Windows V8 包与该 sandbox ABI 不同，不能替换使用；缺失输入会在 Cargo 前明确失败。此步骤不关闭 V8 sandbox，不改变原生源码或构建优化配置。

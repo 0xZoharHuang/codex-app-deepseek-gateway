@@ -263,6 +263,7 @@ def main(argv=None):
         if name in {"app-check", "app-launch"}:
             command.add_argument("--accessibility", action="store_true")
             command.add_argument("--observation-seconds", type=int, default=60)
+            command.add_argument("--trace-root", type=Path, help="Private container for this launch's optional official Codex rollout trace")
         if name == "app-launch":
             command.add_argument("--wait-seconds", type=int, default=60)
         if name == "app-status":
@@ -297,6 +298,7 @@ def main(argv=None):
                     result = delivery.status(args.install_root, run_id=args.run_id)
                 else:
                     options = dict(accessibility=args.accessibility, observation_seconds=args.observation_seconds)
+                    if args.trace_root is not None: options["trace_root"] = args.trace_root
                     if args.command == "app-launch": options["wait_seconds"] = args.wait_seconds
                     result = getattr(delivery, "launch" if args.command == "app-launch" else "check")(args.install_root, **options)
                 print(json.dumps(result))

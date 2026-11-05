@@ -178,10 +178,11 @@ def single_recipe(tmp_path):
     return native, lock, lock_digest, value, build
 
 
-def test_current_pinned_single_producer_recipe_is_admitted_by_packager():
-    # Exercise the real reviewed lock and patches, rather than only a synthetic
-    # recipe which can accidentally stay in sync with a stale three-patch rule.
-    lock = pack.load(ROOT / "native/build-lock.json")
+def test_historical_p7_pinned_single_producer_recipe_is_admitted_by_packager():
+    # Retain the exact reviewed P7 source/patch graph while P8 is source-only.
+    path = ROOT / "native/build-lock.O165-P7-original.json"
+    assert pack.sha(path) == "da4e194baa449c3caa4457021770876d4ddc5d663869995bd0fb1cae6eb497e6"
+    lock = pack.load(path)
     graph = pack.single_graph(lock, ROOT / "native")
     assert graph["producer_id"] == "O165"
     assert graph["producer_sources_remain_separate"] is False
@@ -467,3 +468,161 @@ def test_single_producer_jobs_cannot_be_silently_misreported(tmp_path, corruptio
             del value[key]
     with pytest.raises(ValueError):
         pack.single_sources(value, lock, digest, "4"*64, build)
+
+
+
+@pytest.mark.parametrize("lock_name,patch_count", [
+    ("build-lock.O165-P8-source.json", 9), ("build-lock.json", 10)])
+def test_p8_p9_source_candidates_cannot_reuse_p7_release_packaging_gate(lock_name, patch_count):
+    lock = pack.load(ROOT / "native" / lock_name)
+    assert len(lock["patches"]) == patch_count
+    with pytest.raises(ValueError, match="Single-producer patch topology differs"):
+        pack.single_graph(lock, ROOT / "native")
+
+
+def test_p16_six_target_graph_requires_exact_reviewed_lock():
+    lock = pack.load(ROOT / "native/build-lock.O165-P16-source.json")
+    assert set(lock["binaries"]) == pack.SOURCE_BINARIES
+    proof = pack.single_graph(lock, ROOT / "native")
+    assert proof["producer_id"] == "O165"
+    changed = copy.deepcopy(lock)
+    changed["prepared_source_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="reviewed P16 lock"):
+        pack.single_graph(changed, ROOT / "native")
+
+
+@pytest.mark.parametrize("problem", [None, "missing", "extra", "registered", "unknown_kind"])
+def test_six_target_public_bundle_keeps_exact_inventory_and_explicit_legacy_mode(problem):
+    value = {"schema_version":1, "status":"built-not-app-qualified",
+             "kind":pack.SOURCE_BUNDLE_KIND, "runtime_mode":"legacy",
+             "outputs":[{"name":name, "size":1, "sha256":"1"*64} for name in sorted(pack.SOURCE_BINARIES)]}
+    if problem == "missing": value["outputs"].pop()
+    elif problem == "extra": value["outputs"].append({"name":"foreign.exe", "size":1, "sha256":"1"*64})
+    elif problem == "registered": value["runtime_mode"] = "registered_core"
+    elif problem == "unknown_kind": value["kind"] = "asserted-signed-runtime"
+    if problem:
+        with pytest.raises(ValueError): pack.raw_outputs(value)
+    else:
+        assert set(pack.raw_outputs(value)) == pack.SOURCE_BINARIES
+
+
+@pytest.mark.parametrize("lock_name", ["build-lock.O165-P16-source.json", "build-lock.O165-P17-source.json", "build-lock.O165-P18-source.json", "build-lock.O165-P19-source.json"])
+def test_reviewed_source_public_projection_and_archive_keep_all_six_producers(tmp_path, lock_name):
+    _, _, _, value, build = single_recipe(tmp_path)
+    lock_path = ROOT/"native"/lock_name
+    lock = pack.load(lock_path)
+    digest = pack.sha(lock_path)
+    value.update(build_lock_sha256=digest, upstream_commit=lock["upstream_commit"],
+                 native_version=lock["native_version"], archive_sha256=lock["archive_sha256"],
+                 source_sha256=lock["prepared_source_sha256"], patches=copy.deepcopy(lock["patches"]),
+                 profile=copy.deepcopy(lock["release_environment"]),
+                 commands=build.build_commands(Path("private-rust"),lock["binaries"],runtime_package=True),
+                 outputs=[{"name":name,"size":len(name.encode()),"sha256":hashlib.sha256(name.encode()).hexdigest()}
+                          for name in sorted(pack.SOURCE_BINARIES)])
+    refs,index,public = pack.single_sources(value,lock,digest,"4"*64,build)
+    assert public["kind"] == pack.SOURCE_BUNDLE_KIND and public["runtime_mode"] == "legacy"
+    assert {x["name"] for x in public["outputs"]} == pack.SOURCE_BINARIES
+    assert {x["producer_id"] for x in public["outputs"]} == {"O165"}
+    assert str(tmp_path) not in json.dumps([refs,index,public])
+    stage = tmp_path/"six-stage"; stage.mkdir()
+    for row in public["outputs"]: (stage/row["name"]).write_bytes(row["name"].encode())
+    pack.write(stage/"manifest.json",public)
+    for name in ["LICENSE","NOTICE","licenses/codex-LICENSE","licenses/codex-NOTICE"]:
+        path=stage/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b"fixture license")
+    pack.write(stage/"licenses/rust/index.json",{"packages":[]})
+    pack.write(stage/"provenance/producer-references.json",refs)
+    pack.copy_bytes(lock_path,stage/"provenance/O165-original-build-lock.json")
+    for patch in lock["patches"]: pack.copy_bytes(ROOT/"native"/patch["file"],stage/"provenance/patches"/patch["file"])
+    archive=tmp_path/"six.tar.gz"
+    pack.make_archive(stage,archive,1234567890,build_lock=lock_path)
+    with tarfile.open(archive) as opened:
+        assert {m.name for m in opened.getmembers() if m.name.endswith(".exe")} == pack.SOURCE_BINARIES
+        assert all(m.isfile() for m in opened.getmembers())
+    (stage/"unexpected.exe").write_bytes(b"MZnot allowed")
+    with pytest.raises(ValueError,match="Unexpected public native file"):
+        pack.validate_tree(stage,build_lock=lock_path)
+
+
+@pytest.mark.parametrize("problem", [None, "source", "missing_patch", "foreign_patch", "extra_field", "profile"])
+def test_p17_source_graph_requires_exact_new_lock_and_preserves_p16(problem):
+    old_path = ROOT/"native/build-lock.O165-P16-source.json"
+    assert pack.sha(old_path) == pack.P16_LOCK_SHA256
+    path = ROOT/"native/build-lock.O165-P17-source.json"
+    assert pack.sha(path) == pack.P17_LOCK_SHA256
+    lock = pack.load(path)
+    assert lock["patches"][-1]["file"] == "cadsg-native-opaque-metadata-deny-0165.patch"
+    if problem == "source": lock["prepared_source_sha256"] = "0" * 64
+    elif problem == "missing_patch": lock["patches"].pop()
+    elif problem == "foreign_patch": lock["patches"].append({"file":"foreign.patch", "sha256":"0"*64})
+    elif problem == "extra_field": lock["unreviewed_extension"] = True
+    elif problem == "profile": lock["release_environment"]["CARGO_PROFILE_RELEASE_LTO"] = "true"
+    if problem:
+        with pytest.raises(ValueError, match="reviewed P17 lock"):
+            pack.single_graph(lock, ROOT/"native")
+    else:
+        assert pack.single_graph(lock, ROOT/"native")["producer_id"] == "O165"
+    assert pack.sha(old_path) == pack.P16_LOCK_SHA256
+
+
+@pytest.mark.parametrize("problem", ["different_raw_bytes", "unreviewed_filename"])
+def test_p17_equal_json_cannot_replace_exact_reviewed_disk_pin(tmp_path, problem):
+    lock = pack.load(ROOT/"native/build-lock.O165-P17-source.json")
+    native = tmp_path/"native"; native.mkdir()
+    name = "build-lock.O165-P17-source.json" if problem == "different_raw_bytes" else "unreviewed.json"
+    # Same parsed recipe is insufficient: both exact file identity and SHA are required.
+    (native/name).write_text(json.dumps(lock, separators=(",", ":")), encoding="utf-8")
+    with pytest.raises(ValueError, match="reviewed P17 lock"):
+        pack.single_graph(lock, native)
+
+
+@pytest.mark.parametrize("problem", [None, "source", "missing_fixture_patch", "foreign_field", "profile"])
+def test_p18_source_graph_keeps_exact_fixture_delta_and_prior_source_identities(problem):
+    old = ROOT/"native/build-lock.O165-P17-source.json"
+    assert pack.sha(old) == pack.P17_LOCK_SHA256
+    path = ROOT/"native/build-lock.O165-P18-source.json"
+    assert pack.sha(path) == pack.P18_LOCK_SHA256
+    lock = pack.load(path)
+    assert lock["patches"][:-1] == pack.load(old)["patches"]
+    assert lock["patches"][-1]["file"] == "cadsg-native-conditional-fixture-inheritance-0165.patch"
+    if problem == "source": lock["prepared_source_sha256"] = "0"*64
+    elif problem == "missing_fixture_patch": lock["patches"].pop()
+    elif problem == "foreign_field": lock["unreviewed_extension"] = True
+    elif problem == "profile": lock["release_environment"]["CARGO_PROFILE_RELEASE_LTO"] = "true"
+    if problem:
+        with pytest.raises(ValueError, match="reviewed P18 lock"):
+            pack.single_graph(lock, ROOT/"native")
+    else:
+        assert pack.single_graph(lock, ROOT/"native")["producer_id"] == "O165"
+    assert pack.sha(old) == pack.P17_LOCK_SHA256
+
+
+@pytest.mark.parametrize("problem", [None, "source", "missing_trace", "trace_sha", "profile", "extra_field"])
+def test_p19_source_graph_requires_exact_official_trace_delta(problem):
+    previous_path = ROOT/"native/build-lock.O165-P18-source.json"
+    assert pack.sha(previous_path) == pack.P18_LOCK_SHA256
+    path = ROOT/"native/build-lock.O165-P19-source.json"
+    assert pack.sha(path) == pack.P19_LOCK_SHA256
+    lock = pack.load(path)
+    assert lock["patches"][:-1] == pack.load(previous_path)["patches"]
+    assert lock["patches"][-1]["file"] == "cadsg-official-local-compaction-trace-context-0165.patch"
+    if problem == "source": lock["prepared_source_sha256"] = "0"*64
+    elif problem == "missing_trace": lock["patches"].pop()
+    elif problem == "trace_sha": lock["patches"][-1]["sha256"] = "0"*64
+    elif problem == "profile": lock["release_environment"]["CARGO_PROFILE_RELEASE_LTO"] = "true"
+    elif problem == "extra_field": lock["unreviewed_extension"] = True
+    if problem:
+        with pytest.raises(ValueError, match="reviewed P19 lock"):
+            pack.single_graph(lock, ROOT/"native")
+    else:
+        assert pack.single_graph(lock, ROOT/"native")["producer_id"] == "O165"
+    assert pack.sha(previous_path) == pack.P18_LOCK_SHA256
+
+
+@pytest.mark.parametrize("problem", ["different_bytes", "different_name"])
+def test_p19_equal_json_cannot_replace_exact_original_disk_pin(tmp_path, problem):
+    lock = pack.load(ROOT/"native/build-lock.O165-P19-source.json")
+    native = tmp_path/"native"; native.mkdir()
+    name = "build-lock.O165-P19-source.json" if problem == "different_bytes" else "unreviewed.json"
+    (native/name).write_text(json.dumps(lock, separators=(",", ":")), encoding="utf-8")
+    with pytest.raises(ValueError, match="reviewed P19 lock"):
+        pack.single_graph(lock, native)

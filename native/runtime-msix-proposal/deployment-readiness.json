@@ -1,0 +1,78 @@
+{
+  "created_utc": "2026-11-04T11:49:20.171540+00:00",
+  "read_only_policy": [
+    {
+      "hive": "HKLM",
+      "key": "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\AppModelUnlock",
+      "values": {
+        "AllowDevelopmentWithoutDevLicense": {
+          "present": false
+        },
+        "AllowAllTrustedApps": {
+          "present": false
+        }
+      }
+    },
+    {
+      "hive": "HKLM",
+      "key": "SOFTWARE\\Policies\\Microsoft\\Windows\\Appx",
+      "values": {
+        "AllowDevelopmentWithoutDevLicense": {
+          "present": false
+        },
+        "AllowAllTrustedApps": {
+          "present": false
+        },
+        "BlockNonAdminUserInstall": {
+          "present": false
+        }
+      }
+    },
+    {
+      "hive": "HKLM",
+      "key": "SOFTWARE\\Microsoft\\PolicyManager\\current\\device\\ApplicationManagement",
+      "values": {},
+      "key_absent": true
+    },
+    {
+      "hive": "HKLM",
+      "key": "SOFTWARE\\Microsoft\\PolicyManager\\current\\device\\ApplicationManagement\\AllowDeveloperUnlock",
+      "values": {},
+      "key_absent": true
+    },
+    {
+      "hive": "HKLM",
+      "key": "SOFTWARE\\Microsoft\\PolicyManager\\current\\device\\ApplicationManagement\\AllowAllTrustedApps",
+      "values": {},
+      "key_absent": true
+    }
+  ],
+  "SDK_tools": {
+    "makeappx.exe": {
+      "path": "C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0.26100.0\\x64\\makeappx.exe",
+      "sha256": "00fff202b71c1266b8c3899701e42b5468ea153b2b33a0a47215fe27695f16d0"
+    },
+    "signtool.exe": {
+      "path": "C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0.26100.0\\x64\\signtool.exe",
+      "sha256": "431ee314c83988cacda86606356fd321b75ae0093481b97e3b738e99c412f2a0"
+    }
+  },
+  "Developer_Mode_enable_evidence": false,
+  "loose_unsigned_register_currently_qualified": false,
+  "normal_trusted_signed_MSIX_sideload": "Windows10 19045 supports signed trusted packages without enabling DeveloperMode; no explicit queried GPO/MDM block found. Actual signer/deployment not tested.",
+  "unsigned_AllowUnsigned": "Windows11-only; not a Windows10 deployment route.",
+  "package_signer": {
+    "chosen": false,
+    "private_key_read": false,
+    "certificate_imported": false,
+    "required_subject": "Manifest Publisher must equal the real code signing certificate subject exactly; current CN=CADSG Native Runtime is a proposal, not an issued certificate.",
+    "required_EKU": "1.3.6.1.5.5.7.3.3 Code Signing; digital signature key usage; valid time/chain; package SHA256 and timestamp.",
+    "trust_scope": "Already-trusted machine/system chain usable for the owner and native sandbox-account package registrations. A user-only trusted development certificate is not assumed sufficient.",
+    "permitted_final_options": [
+      "Existing legitimate CA-trusted signing/deployment identity that needs no new local trust roots",
+      "Proper Store/managed enterprise distribution of this own runtime identity"
+    ]
+  },
+  "admin_boundary": "MSIX packages containing localSystem services require elevated package installation; no install/SCM/registry/protection changes performed.",
+  "manifest_identity_is_not_OS_assigned_identity": true
+}
