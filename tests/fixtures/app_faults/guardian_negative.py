@@ -12,7 +12,7 @@ core = importlib.util.module_from_spec(_core_spec)
 sys.modules[_core_spec.name] = core
 _core_spec.loader.exec_module(core)
 
-EXPECTED_CORE_SHA = "fc829866537883fa42711a912f5364574aff751407a3441cc8cb7a2eeea602ad"
+EXPECTED_CORE_SHA = "a6bd2756523109b9ca40bf57d1c7e60b04086e0ed09894f40dd4feb0f25e7308"
 POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 STATE_NAME = "guardian-negative.json"
 SYNTHETIC_REASONING_TEXT = core.SYNTHETIC_REASONING_TEXT
