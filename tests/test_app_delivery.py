@@ -463,6 +463,11 @@ def test_configuration_with_foreign_App_keeps_three_way_rollback_and_later_user_
     assert state==before and not f.backend.spawned
 
 
+def binding_backup_inventory(installation):
+    root = installation.data / "app-binding-backups"
+    return {p.relative_to(root): app.sha(p) for p in root.rglob("*") if p.is_file()}
+
+
 @pytest.fixture
 def prior_cohort(fixture, monkeypatch):
     """Retained installation verification is a lifecycle boundary, never executed here."""
@@ -488,7 +493,7 @@ def prior_cohort(fixture, monkeypatch):
     path = delivery.binding_path(f.installation)
     app.save(path, old)
     return SimpleNamespace(f=f, old=old, raw=path.read_bytes(), receipt=receipt,
-                           baseline=baseline, verified=verified)
+                           baseline=baseline, verified=verified, prior_backups=binding_backup_inventory(f.installation))
 
 
 def test_explicit_cohort_upgrade_keeps_recoverable_binding_but_requires_new_catalog(prior_cohort):
@@ -619,7 +624,7 @@ def test_cohort_upgrade_rejects_prior_installation_junction_before_resolving(pri
         with pytest.raises(ValueError, match="junction"):
             bind(f)
         assert delivery.binding_path(f.installation).read_bytes() == old.raw
-        assert not (f.installation.data / "app-binding-backups").exists()
+        assert binding_backup_inventory(f.installation) == old.prior_backups
     finally:
         os.rmdir(prior)  # Remove only the junction; retained fixture bytes remain.
 
@@ -649,7 +654,7 @@ def test_cohort_retained_receipt_change_during_verification_cannot_be_backed_up(
     with pytest.raises(delivery.DeliveryError, match="provenance changed"):
         bind(f)
     assert delivery.binding_path(f.installation).read_bytes() == old.raw
-    assert not (f.installation.data / "app-binding-backups").exists()
+    assert binding_backup_inventory(f.installation) == old.prior_backups
 
 
 def test_fresh_defaults_precede_native_config_and_noop_does_not_duplicate_checkpoints(fixture, monkeypatch):
@@ -754,3 +759,68 @@ def test_powershell_passes_only_explicit_trace_root_without_app_activation(tmp_p
     assert run.returncode == 0, run.stderr
     request = json.loads(capture.read_text())
     assert (request.get('trace_root') == trace) if trace is not None else ('trace_root' not in request)
+
+
+def test_same_cohort_rebind_configure_and_guarded_restore(fixture):
+    f = fixture
+    configure(f)
+    path = delivery.binding_path(f.installation)
+    original = path.read_bytes()
+    new_manifest = f.manifest.with_name("new-runtime-manifest.json")
+    new_manifest.write_bytes(f.manifest.read_bytes())
+    f.manifest = new_manifest
+    transition = bind(f)
+    first = Path(transition["binding_backup"])
+    assert "prior_cohort_backup" not in transition
+    assert (first / "binding.before.json").read_bytes() == original
+    assert delivery.read_binding(f.installation, f.backend)["catalog"] is None
+    second = Path(delivery.configure(f.installation.root, f.catalog, app.sha(f.catalog),
+                                     backend=f.backend)["binding_backup"])
+    final = path.read_bytes()
+    assert (second / "binding.before.json").read_bytes() == (first / "binding.after.json").read_bytes()
+    assert (second / "binding.after.json").read_bytes() == final
+    assert "binding_backup" not in bind(f)
+    assert configure(f)["binding_backup"] is None
+
+    def undo(backups):
+        return delivery.restore_binding(f.installation.root, backups, backend=f.backend)
+    with pytest.raises(delivery.DeliveryError, match="continuous"):
+        undo([first, second])
+    external = final + b" "
+    path.write_bytes(external)
+    with pytest.raises(delivery.DeliveryError, match="later selection preserved"):
+        undo([second, first])
+    assert path.read_bytes() == external
+    path.write_bytes(final)
+    (second / "binding.after.json").write_bytes(external)
+    with pytest.raises(delivery.DeliveryError, match="recorded digest"):
+        undo([second, first])
+    assert path.read_bytes() == final
+    (second / "binding.after.json").write_bytes(final)
+    assert undo([second, first])["status"] == "binding_restored"
+    assert path.read_bytes() == original
+    assert undo([second, first])["status"] == "binding_already_restored"
+
+
+def test_restore_binding_rejects_backup_outside_owned_data(fixture, tmp_path):
+    f = fixture
+    configure(f)
+    path = delivery.binding_path(f.installation)
+    before = path.read_bytes()
+    with pytest.raises(delivery.DeliveryError, match="owned binding_backup"):
+        delivery.restore_binding(f.installation.root, [tmp_path / ("0" * 64)], backend=f.backend)
+    assert path.read_bytes() == before
+
+
+def test_configure_preserves_a_binding_changed_during_native_configuration(fixture, monkeypatch):
+    f = fixture
+    bind(f)
+    path = delivery.binding_path(f.installation)
+    external = path.read_bytes() + b" "
+    def changed(*args, **kwargs):
+        path.write_bytes(external)
+        return {"state": "configured"}
+    monkeypatch.setattr(delivery.tools, "bootstrap", changed)
+    with pytest.raises(delivery.DeliveryError, match="later selection preserved"):
+        delivery.configure(f.installation.root, f.catalog, app.sha(f.catalog), backend=f.backend)
+    assert path.read_bytes() == external

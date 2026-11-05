@@ -71,6 +71,25 @@ configuration checkpoint workflow. If the binding has changed since the upgrade,
 stop and preserve the later explicit selection. Never copy an old binding over
 an unknown current file or remove it to bypass compatibility validation.
 
+Changes within the same App version also produce a private `binding_backup`.
+Both `app-bind` and `app-configure` return its directory whenever the selected
+runtime, gateway release, or catalog changes. Keep these results in operation
+order. A repeated operation which already selects the same binding does not
+create a transition. A new backup contains the exact binding bytes before and
+after publication. The records use content hashes and publication checks the
+previous selection again.
+
+After exiting the dedicated App, restore the binding chain newest first from
+the active gateway's installed entry:
+```powershell
+& $cdag app-restore-binding --install-root $managed --backup $configureBackup --backup $bindBackup
+```
+This checks the entire chain and replaces the binding once. A later unrelated
+selection or edited backup stops restoration. Older cohort migration backups
+retain their original SHA-bound recovery format. Restore any provider/config
+checkpoints separately and explicitly select the old gateway release before
+restarting its service.
+
 ## Configure installed authentication
 
 Supply the version-matched model catalog and its trusted release SHA:

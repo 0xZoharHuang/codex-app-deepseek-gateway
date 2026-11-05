@@ -199,15 +199,18 @@ def _prior_binding_for_explicit_rebind(installation, backend):
     return value, raw, state, retained
 
 
-def _backup_prior_binding(installation, raw, retained, applied_sha256):
+def _backup_prior_binding(installation, raw, retained, applied):
+    applied_sha256 = hashlib.sha256(applied).hexdigest()
     digest = hashlib.sha256(raw).hexdigest()
     transition = hashlib.sha256((digest + ":" + applied_sha256).encode("ascii")).hexdigest()
     directory = installation.data / "app-binding-backups" / transition
     _regular_path(directory / "binding.before.json", "Prior binding backup")
     directory.mkdir(parents=True, exist_ok=True)
     _private(directory, directory=True)
-    files = {"binding.before.json": raw, "prior-installation.json": retained["installation"],
-             "prior-app-baseline.json": retained["baseline"]}
+    files = {"binding.before.json": raw, "binding.after.json": applied}
+    if retained is not None:
+        files.update({"prior-installation.json": retained["installation"],
+                      "prior-app-baseline.json": retained["baseline"]})
     for name, content in files.items():
         path = _regular_path(directory / name, "Prior binding backup")
         if path.exists():
@@ -221,15 +224,96 @@ def _backup_prior_binding(installation, raw, retained, applied_sha256):
             _private(path)
     record = _regular_path(directory / "migration.json", "Prior binding backup record")
     value = {"schema_version": 1, "before_sha256": digest, "planned_binding_sha256": applied_sha256,
-             "before_file": "binding.before.json", "prior_installation_file": "prior-installation.json",
-             "prior_App_baseline_file": "prior-app-baseline.json",
+             "before_file": "binding.before.json",
              "rollback_rule": "Restore only if current binding still matches planned_binding_sha256; preserve any later explicit binding selection."}
+    if retained is not None:
+        value.update(prior_installation_file="prior-installation.json",
+                     prior_App_baseline_file="prior-app-baseline.json")
+    legacy = value
+    value = {**legacy, "schema_version": 2, "after_file": "binding.after.json"}
     if record.exists():
-        if app.load_json(record) != value:
+        recorded = app.load_json(record)
+        if record.stat().st_nlink != 1 or not (recorded == value or (retained is not None and recorded == legacy)):
             raise DeliveryError("Prior binding migration record changed")
     else:
         app.save(record, value)
     return str(directory)
+
+
+def _publish_binding(installation, snapshot, value, retained=None):
+    path = binding_path(installation)
+    before_state = snapshot[2] if snapshot else None
+    if target_state(path) != before_state:
+        raise DeliveryError("App binding changed before publication; later selection preserved")
+    if snapshot and snapshot[0] == value:
+        return None
+    payload = (json.dumps(value, indent=2) + "\n").encode()
+    backup = _backup_prior_binding(installation, snapshot[1], retained, payload) if snapshot else None
+    if target_state(path) != before_state:
+        raise DeliveryError("App binding changed before publication; later selection preserved")
+    _atomic_write(path, payload, expected_sha256=before_state[1] if before_state else None)
+    return backup
+
+
+def _backup_bytes(path):
+    _regular_path(path, "Binding backup")
+    state = target_state(path)
+    if state is None or path.stat().st_nlink != 1:
+        raise DeliveryError("Missing or shared App binding backup file")
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != state[1] or target_state(path) != state:
+        raise DeliveryError("Binding backup changed during inspection")
+    return raw
+
+
+def _binding_undo_step(installation, directory, backend):
+    directory = Path(directory).absolute()
+    base = installation.data / "app-binding-backups"
+    if directory.parent != base or not re.fullmatch("[0-9a-f]{64}", directory.name):
+        raise DeliveryError("Use an owned binding_backup directory from this installation")
+    metadata = json.loads(_backup_bytes(directory / "migration.json"),
+                          object_pairs_hook=gp._unique_config_object)
+    if not isinstance(metadata, dict) or type(metadata.get("schema_version")) is not int:
+        raise DeliveryError("Unrecognized binding backup format")
+    before = _backup_bytes(directory / "binding.before.json")
+    prior_sha = hashlib.sha256(before).hexdigest()
+    after_sha = metadata.get("planned_binding_sha256")
+    if (not isinstance(after_sha, str) or not re.fullmatch("[0-9a-f]{64}", after_sha)
+            or metadata.get("before_file") != "binding.before.json" or metadata.get("before_sha256") != prior_sha
+            or hashlib.sha256((prior_sha + ":" + after_sha).encode("ascii")).hexdigest() != directory.name):
+        raise DeliveryError("Binding backup does not match its recorded transition")
+    if metadata.get("schema_version") == 2 and metadata.get("after_file") == "binding.after.json":
+        if hashlib.sha256(_backup_bytes(directory / "binding.after.json")).hexdigest() != after_sha:
+            raise DeliveryError("Saved replacement binding differs from its recorded digest")
+    elif not (metadata.get("schema_version") == 1
+              and metadata.get("prior_installation_file") == "prior-installation.json"
+              and metadata.get("prior_App_baseline_file") == "prior-app-baseline.json"):
+        raise DeliveryError("Unrecognized binding backup format")
+    previous = json.loads(before, object_pairs_hook=gp._unique_config_object)
+    _validate_binding(previous, installation, backend, previous_release=True, verify_catalog=True,
+                      baselines={app.BASELINE_SHA256, *PRIOR_APP_BASELINES})
+    return before, prior_sha, after_sha
+
+
+def restore_binding(root, backups, *, backend=None):
+    installation = installed(root)
+    backend = backend or app.WindowsBackend()
+    owner = interactive(backend)
+    with lc._operation_lease(installation.root), backend.launch_lock(owner["sid"]):
+        app.require_disjoint_apps(backend, owner, app.defaults())
+        active, _, current = _binding_snapshot(installation)
+        _validate_binding(active, installation, backend, previous_release=True, verify_catalog=False,
+                          baselines={app.BASELINE_SHA256, *PRIOR_APP_BASELINES})
+        steps = [_binding_undo_step(installation, path, backend) for path in backups]
+        if not steps or any(earlier[2] != later[1] for later, earlier in zip(steps, steps[1:])):
+            raise DeliveryError("Binding backups must form a continuous newest-to-oldest chain")
+        before, prior_sha, _ = steps[-1]
+        if current[1] == prior_sha:
+            return {"status": "binding_already_restored", "binding_sha256": prior_sha}
+        if current[1] != steps[0][2]:
+            raise DeliveryError("Current binding differs from the backup; later selection preserved")
+        _atomic_write(binding_path(installation), before, expected_sha256=current[1])
+    return {"status": "binding_restored", "binding_sha256": prior_sha}
 
 
 def native_request(binding, *, accessibility=False, observation_seconds=60, trace_root=None):
@@ -280,25 +364,22 @@ def bind(root, manifest, digest, *, backend=None):
                  "native_manifest": str(manifest), "native_manifest_sha256": digest,
                  "app_baseline_sha256": app.BASELINE_SHA256, "catalog": None}
         path = binding_path(installation)
-        before_state = None
+        snapshot = None
         retained = None
-        backup = None
         if path.exists():
             previous, raw, before_state, retained = _prior_binding_for_explicit_rebind(installation, backend)
+            snapshot = (previous, raw, before_state)
             if (previous["app_baseline_sha256"] == app.BASELINE_SHA256
                     and previous["native_manifest"] == str(manifest) and previous["native_manifest_sha256"] == digest):
                 old_catalog = previous["catalog"]
                 if old_catalog is not None and Path(old_catalog["path"]).is_file() and app.sha(old_catalog["path"]) == old_catalog["sha256"]:
                     value["catalog"] = old_catalog
-        payload = (json.dumps(value, indent=2) + "\n").encode()
-        if retained is not None:
-            backup = _backup_prior_binding(installation, raw, retained, hashlib.sha256(payload).hexdigest())
-        if target_state(path) != before_state:
-            raise DeliveryError("App binding changed before publication; later selection preserved")
-        _atomic_write(path, payload, expected_sha256=before_state[1] if before_state else None)
+        backup = _publish_binding(installation, snapshot, value, retained)
     result = {"status": "runtime_bound_not_launched", "binding": str(path),
               "native_manifest_sha256": digest, "gateway_release_id": installation.receipt["release_id"]}
     if backup is not None:
+        result["binding_backup"] = backup
+    if retained is not None and backup is not None:
         result["prior_cohort_backup"] = backup
         result["catalog_reconfiguration_required"] = True
     return result
@@ -323,7 +404,9 @@ def configure(root, catalog, catalog_sha256, *, port=42817, backend=None):
             app.require_disjoint_apps(backend, owner, paths)
         except app.LaunchError as error:
             raise DeliveryError(str(error)) from error
-        value = read_binding(installation, backend, verify_catalog=False)
+        snapshot = _binding_snapshot(installation)
+        value = _validate_binding(snapshot[0], installation, backend, previous_release=False,
+                                  verify_catalog=False, baselines={app.BASELINE_SHA256})
         package = app.verify_package(backend.package(expected), expected)
         bundle = app.verify_launch_bundle(value["native_manifest"], value["native_manifest_sha256"],
                                          expected, backend, owner, paths["home"])
@@ -394,11 +477,11 @@ def configure(root, catalog, catalog_sha256, *, port=42817, backend=None):
             if gp.load_service_config(installation.data).config_sha256 != policy.config_sha256:
                 raise DeliveryError("Gateway policy changed after App configuration; retain registered checkpoints "
                                     + ", ".join(checkpoints) + " and explicitly configure again")
-            value["catalog"] = {"path": str(target), "sha256": catalog_sha256}
-            app.save(binding_path(installation), value)
+            selected = {**value, "catalog": {"path": str(target), "sha256": catalog_sha256}}
+            binding_backup = _publish_binding(installation, snapshot, selected)
     return {"status": "private_app_configured_not_launched", "config": str(paths["home"] / "config.toml"),
             "checkpoint": str(checkpoint.manifest_path) if checkpoint is not None else None,
-            "checkpoints": checkpoints, "registered_checkpoint": registered,
+            "checkpoints": checkpoints, "registered_checkpoint": registered, "binding_backup": binding_backup,
             "native_app_tools": {"state": native_tools["state"], "plugin_id": tools.PLUGIN_ID},
             "catalog": str(target), "auth_command": str(executable), "auth_args": list(AUTH_ARGS),
             "home_identity": home_identity, "gateway_policy": policy_result, "instruction": "Start or explicitly restart the owned gateway, then run app-check",

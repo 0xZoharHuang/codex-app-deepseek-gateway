@@ -246,12 +246,15 @@ def main(argv=None):
         if name == "image-cache-cleanup":
             command.add_argument("--all-unpinned", action="store_true")
     for name in ("service-start", "service-stop", "diagnose", "app-prepare-runtime", "app-bind",
-                 "app-configure", "app-check", "app-launch", "app-status"):
+                 "app-configure", "app-check", "app-launch", "app-status", "app-restore-binding"):
         command = sub.add_parser(name)
         command.add_argument("--install-root", type=Path, default=default_home()/"managed-install")
         if name in {"app-prepare-runtime", "app-bind"}:
             command.add_argument("--native-manifest", type=Path, required=True)
             command.add_argument("--native-manifest-sha256", required=True)
+        if name == "app-restore-binding":
+            command.add_argument("--backup", type=Path, action="append", required=True,
+                                 help="Binding backup directory; repeat newest to oldest")
         if name == "app-configure":
             command.add_argument("--catalog", type=Path, required=True)
             command.add_argument("--catalog-sha256", required=True)
@@ -292,6 +295,8 @@ def main(argv=None):
                     result = delivery.prepare_runtime(args.install_root, args.native_manifest, args.native_manifest_sha256)
                 elif args.command == "app-bind":
                     result = delivery.bind(args.install_root, args.native_manifest, args.native_manifest_sha256)
+                elif args.command == "app-restore-binding":
+                    result = delivery.restore_binding(args.install_root, args.backup)
                 elif args.command == "app-configure":
                     result = delivery.configure(args.install_root, args.catalog, args.catalog_sha256, port=args.port)
                 elif args.command == "app-status":

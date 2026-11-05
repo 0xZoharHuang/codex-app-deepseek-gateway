@@ -135,6 +135,17 @@ if ($LASTEXITCODE -ne 0) { throw 'app-configure 失败' }
 
 若 `gateway.json` 声明了旧 `native_sha256`，在网关仍停止时只更新该字段。以备份的原始 SHA 为条件调用已安装模块 `codex_app_deepseek.app_config._atomic_write` 的 `expected_sha256` 参数；冲突则重新读取，不覆盖并发修改。解析写后 JSON 并确认其他键和值与原配置相同，保留原始、写后两个摘要供回滚。回滚时核验当前 native_sha256 等于本次安装值，再基于最新内容、以最新 SHA 作条件恢复旧字段，保留后续无关设置。省略该字段的已有配置可继续使用原选项。
 
+升级前保留原网关的 release ID。记录 app-bind 与 app-configure 各自返回的
+binding_backup。若需恢复旧绑定，先正常退出本项目 App，在当前网关仍激活时执行以下命令，
+把新目录配置的备份放在运行时重绑备份之前。随后分别恢复配置检查点、网关声明并重新激活原版本。
+
+```powershell
+& $cdag app-restore-binding --install-root $managed --backup $configureBackup --backup $bindBackup
+```
+
+命令校验整条变更链和当前绑定，成功时只替换一次。若其间有人选择了其他运行时或目录，
+命令会保留对方的更改。已经选中相同绑定的重复操作没有新备份，只传实际返回的目录。
+
 声明字段记录操作者选择的版本。`diagnose` 单独核对官方签名 App 自带的原生基线；`app-status` 以实际 App 与 backend 的 PID、出生时间、映像路径和 SHA 核验本次加载。切换后同时检查配置摘要、运行服务加载的配置以及实际进程身份。
 
 ## 5. 启动并回读同一次操作
