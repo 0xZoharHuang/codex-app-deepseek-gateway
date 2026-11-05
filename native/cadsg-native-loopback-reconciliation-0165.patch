@@ -1,0 +1,1205 @@
+--- a/codex-rs/windows-sandbox-rs/src/setup.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup.rs
+@@ -48,7 +48,8 @@
+ use windows_sys::Win32::Security::FreeSid;
+ use windows_sys::Win32::Security::SECURITY_NT_AUTHORITY;
+ 
+-pub const SETUP_VERSION: u32 = 5;
++// Earlier gateway revisions used 6/7; all precede the mandatory legacy WFP migration.
++pub const SETUP_VERSION: u32 = 8;
+ pub const OFFLINE_USERNAME: &str = "CodexSandboxOffline";
+ pub const ONLINE_USERNAME: &str = "CodexSandboxOnline";
+ const ERROR_CANCELLED: u32 = 1223;
+@@ -2777,4 +2778,28 @@
+             vec![existing, missing]
+         );
+     }
+-}
++
++    #[test]
++    fn legacy_matching_network_markers_still_require_p20_migration() {
++        let mut marker = SetupMarker {
++            version: 5,
++            offline_username: "fixture-offline".to_owned(),
++            online_username: "fixture-online".to_owned(),
++            created_at: None,
++            proxy_ports: vec![63797],
++            allow_local_binding: true,
++        };
++        let settings = marker.offline_proxy_settings();
++        for old_version in [5, 6, 7] {
++            marker.version = old_version;
++            assert!(!marker.version_matches());
++            assert!(
++                marker
++                    .request_mismatch_reason(SandboxNetworkIdentity::Offline, &settings)
++                    .is_none()
++            );
++        }
++        marker.version = SETUP_VERSION;
++        assert!(marker.version_matches());
++    }
++}
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+@@ -797,6 +797,16 @@
+     })?;
+     let offline_sid_str = string_from_sid_bytes(&offline_sid).map_err(anyhow::Error::msg)?;
+     configure_offline_sandbox_network(payload, &offline_sid_str, log, namespace)?;
++    // A loopback reconciliation error must not be swallowed by the stock best-effort supplemental WFP path.
++    let (retired, installed) = crate::wfp::reconcile_loopback_policy(
++        &namespace.key,
++        &payload.proxy_ports,
++        payload.allow_local_binding,
++    )?;
++    log_line(
++        log,
++        &format!("reconciled loopback WFP filters: retired={retired}, installed={installed}"),
++    )?;
+     let wfp_result = crate::wfp_setup::install_wfp_filters_for_namespace(
+         &namespace.key,
+         &payload.codex_home,
+--- a/codex-rs/windows-sandbox-rs/src/uninstall_windows.rs
++++ b/codex-rs/windows-sandbox-rs/src/uninstall_windows.rs
+@@ -174,6 +174,10 @@
+             );
+         }
+         self.users.validate_current()?;
++        // Preserve state and identities when legacy ownership is ambiguous. The existing
++        // WFP transaction retires only validated objects and rolls back on any error.
++        crate::wfp::remove_namespaced_wfp_filters(&self.namespace)?;
++        report("remove WFP filters: completed");
+         let mut errors = Vec::new();
+ 
+         if let Some(codex_home) = codex_home {
+@@ -210,10 +214,6 @@
+ 
+         for (operation, result) in [
+             (
+-                "remove WFP filters",
+-                crate::wfp::remove_namespaced_wfp_filters(&self.namespace),
+-            ),
+-            (
+                 "remove firewall rules",
+                 firewall::cleanup_firewall_rules(&self.namespace),
+             ),
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/wfp/legacy_loopback_migration/tests.rs
+@@ -0,0 +1,337 @@
++use super::*;
++use crate::to_wide;
++use std::ffi::OsStr;
++use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
++
++struct Descriptor {
++    pointer: *mut c_void,
++    blob: FWP_BYTE_BLOB,
++}
++impl Descriptor {
++    fn new(sddl: &str) -> Self {
++        let text = to_wide(OsStr::new(sddl));
++        let mut pointer = null_mut();
++        let mut length = 0;
++        assert_ne!(
++            unsafe {
++                ConvertStringSecurityDescriptorToSecurityDescriptorW(
++                    text.as_ptr(),
++                    1,
++                    &mut pointer,
++                    &mut length,
++                )
++            },
++            0
++        );
++        Self {
++            pointer,
++            blob: FWP_BYTE_BLOB {
++                size: length,
++                data: pointer.cast(),
++            },
++        }
++    }
++}
++impl Drop for Descriptor {
++    fn drop(&mut self) {
++        unsafe { LocalFree(self.pointer as HLOCAL) };
++    }
++}
++fn fixture(rule: LegacyRule, inspect: impl FnOnce(&mut FWPM_FILTER0, &NamespaceKey, &[u16])) {
++    // No real SAM account, filesystem/home or WFP object is created by these unit fixtures.
++    let namespace = NamespaceKey::from_id(&"11".repeat(32)).unwrap();
++    let mut provider = namespaced_guid(&namespace, super::super::PROVIDER_KEY);
++    let name = to_wide(OsStr::new(LEGACY_NAME));
++    let mut descriptor = Descriptor::new("D:(A;;CC;;;SY)");
++    let expected = user_descriptor(&descriptor.blob).unwrap();
++    let mut conditions = vec![
++        FWPM_FILTER_CONDITION0 {
++            fieldKey: FWPM_CONDITION_ALE_USER_ID,
++            matchType: FWP_MATCH_EQUAL,
++            conditionValue: FWP_CONDITION_VALUE0 {
++                r#type: FWP_SECURITY_DESCRIPTOR_TYPE,
++                Anonymous: FWP_CONDITION_VALUE0_0 {
++                    sd: &mut descriptor.blob,
++                },
++            },
++        },
++        FWPM_FILTER_CONDITION0 {
++            fieldKey: FWPM_CONDITION_FLAGS,
++            matchType: FWP_MATCH_FLAGS_ALL_SET,
++            conditionValue: FWP_CONDITION_VALUE0 {
++                r#type: FWP_UINT32,
++                Anonymous: FWP_CONDITION_VALUE0_0 {
++                    uint32: FWP_CONDITION_FLAG_IS_LOOPBACK,
++                },
++            },
++        },
++        FWPM_FILTER_CONDITION0 {
++            fieldKey: FWPM_CONDITION_IP_PROTOCOL,
++            matchType: FWP_MATCH_EQUAL,
++            conditionValue: FWP_CONDITION_VALUE0 {
++                r#type: FWP_UINT8,
++                Anonymous: FWP_CONDITION_VALUE0_0 {
++                    uint8: rule.protocol,
++                },
++            },
++        },
++    ];
++    let (first, last) = rule.ports.unwrap_or((0, 0));
++    let mut range = FWP_RANGE0 {
++        valueLow: FWP_VALUE0 {
++            r#type: FWP_UINT16,
++            Anonymous: FWP_VALUE0_0 { uint16: first },
++        },
++        valueHigh: FWP_VALUE0 {
++            r#type: FWP_UINT16,
++            Anonymous: FWP_VALUE0_0 { uint16: last },
++        },
++    };
++    if rule.ports.is_some() {
++        conditions.push(FWPM_FILTER_CONDITION0 {
++            fieldKey: FWPM_CONDITION_IP_REMOTE_PORT,
++            matchType: FWP_MATCH_RANGE,
++            conditionValue: FWP_CONDITION_VALUE0 {
++                r#type: FWP_RANGE_TYPE,
++                Anonymous: FWP_CONDITION_VALUE0_0 {
++                    rangeValue: &mut range,
++                },
++            },
++        });
++    }
++    let mut item: FWPM_FILTER0 = unsafe { std::mem::zeroed() };
++    item.filterKey = namespaced_guid(&namespace, GUID::from_u128(rule.key()));
++    item.providerKey = &mut provider;
++    item.subLayerKey = namespaced_guid(&namespace, LEGACY_SUBLAYER);
++    item.layerKey = match (rule.inbound, rule.ipv6) {
++        (false, false) => FWPM_LAYER_ALE_AUTH_CONNECT_V4,
++        (false, true) => FWPM_LAYER_ALE_AUTH_CONNECT_V6,
++        (true, false) => FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
++        (true, true) => FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
++    };
++    item.displayData.name = name.as_ptr() as *mut _;
++    item.flags = FWPM_FILTER_FLAG_PERSISTENT;
++    item.action.r#type = FWP_ACTION_BLOCK;
++    item.numFilterConditions = conditions.len() as u32;
++    item.filterCondition = conditions.as_mut_ptr();
++    inspect(&mut item, &namespace, &expected);
++}
++fn tcp() -> LegacyRule {
++    LegacyRule {
++        ipv6: false,
++        inbound: false,
++        protocol: 6,
++        ports: Some((1, 65535)),
++    }
++}
++
++#[test]
++fn historical_golden_key_matches_independent_old_generator() {
++    fixture(tcp(), |item, ns, expected| {
++        assert!(same_guid(
++            item.filterKey,
++            GUID::from_u128(0x01acc10bc61a894f8e6ac8eb8d2b0b26_u128)
++        ));
++        validate_filter(item, ns, expected).unwrap();
++    });
++}
++#[test]
++fn legal_old_ipv4_ipv6_inbound_udp_and_proxy_complement_ranges_are_recognized() {
++    for ipv6 in [false, true] {
++        for ports in [
++            (1, 1),
++            (2, 442),
++            (444, 8079),
++            (8081, 65534),
++            (65535, 65535),
++            (1, 65535),
++        ] {
++            fixture(
++                LegacyRule {
++                    ipv6,
++                    ports: Some(ports),
++                    ..tcp()
++                },
++                |item, ns, sd| validate_filter(item, ns, sd).unwrap(),
++            );
++        }
++        for (inbound, protocol) in [(false, 17), (true, 6), (true, 17)] {
++            fixture(
++                LegacyRule {
++                    ipv6,
++                    inbound,
++                    protocol,
++                    ports: None,
++                },
++                |item, ns, sd| validate_filter(item, ns, sd).unwrap(),
++            );
++        }
++    }
++}
++#[test]
++fn another_user_or_extra_descriptor_grant_is_never_retired() {
++    for sddl in [
++        "D:(A;;CC;;;BA)",
++        "D:(A;;CC;;;SY)(A;;CC;;;BA)",
++        "D:(D;;CC;;;BA)(A;;CC;;;SY)",
++        "O:SYD:(A;;CC;;;SY)",
++    ] {
++        fixture(tcp(), |item, ns, expected| {
++            let mut other = Descriptor::new(sddl);
++            unsafe { (*item.filterCondition).conditionValue.Anonymous.sd = &mut other.blob };
++            assert!(validate_filter(item, ns, expected).is_err());
++        });
++    }
++}
++#[test]
++fn namespace_provider_and_dedicated_sublayer_collisions_are_rejected() {
++    fixture(tcp(), |item, ns, expected| {
++        let mut foreign = GUID::from_u128(1);
++        item.providerKey = &mut foreign;
++        assert!(validate_filter(item, ns, expected).is_err());
++    });
++    fixture(tcp(), |item, ns, expected| {
++        item.subLayerKey = namespaced_guid(ns, super::super::SUBLAYER_KEY);
++        assert!(validate_filter(item, ns, expected).is_err());
++    });
++    fixture(tcp(), |item, _ns, expected| {
++        let foreign = NamespaceKey::from_id(&"22".repeat(32)).unwrap();
++        assert!(validate_filter(item, &foreign, expected).is_err());
++    });
++}
++#[test]
++fn modified_key_or_port_range_is_not_a_historical_rule() {
++    fixture(tcp(), |item, ns, expected| {
++        item.filterKey = GUID::from_u128(0);
++        assert!(validate_filter(item, ns, expected).is_err());
++    });
++    fixture(tcp(), |item, ns, expected| {
++        unsafe {
++            (*(*item.filterCondition.add(3))
++                .conditionValue
++                .Anonymous
++                .rangeValue)
++                .valueLow
++                .Anonymous
++                .uint16 = 2
++        };
++        assert!(validate_filter(item, ns, expected).is_err());
++    });
++}
++#[test]
++fn unknown_disabled_nonblock_and_newer_rule_shapes_are_preserved_by_rejection() {
++    fixture(tcp(), |item, ns, expected| {
++        item.flags |= FWPM_FILTER_FLAG_DISABLED;
++        assert!(validate_filter(item, ns, expected).is_err());
++    });
++    fixture(tcp(), |item, ns, expected| {
++        item.action.r#type = FWP_ACTION_PERMIT;
++        assert!(validate_filter(item, ns, expected).is_err());
++    });
++    fixture(tcp(), |item, ns, expected| {
++        item.providerData.size = 1;
++        assert!(validate_filter(item, ns, expected).is_err());
++    });
++    fixture(tcp(), |item, ns, expected| {
++        item.numFilterConditions -= 1;
++        assert!(validate_filter(item, ns, expected).is_err());
++    });
++    fixture(tcp(), |item, ns, expected| {
++        unsafe {
++            (*item.filterCondition.add(1))
++                .conditionValue
++                .Anonymous
++                .uint32 = 0
++        };
++        assert!(validate_filter(item, ns, expected).is_err());
++    });
++    fixture(tcp(), |item, ns, expected| {
++        unsafe { (*item.filterCondition.add(2)).fieldKey = FWPM_CONDITION_ALE_USER_ID };
++        assert!(validate_filter(item, ns, expected).is_err());
++    });
++}
++#[test]
++fn malformed_range_and_unknown_layer_never_authorize_deletion() {
++    fixture(tcp(), |item, ns, expected| {
++        item.layerKey = FWPM_LAYER_ALE_RESOURCE_ASSIGNMENT_V4;
++        assert!(validate_filter(item, ns, expected).is_err());
++    });
++    for (first, last) in [(0, 10), (10, 9)] {
++        fixture(tcp(), |item, ns, expected| {
++            unsafe {
++                let range = &mut *(*item.filterCondition.add(3))
++                    .conditionValue
++                    .Anonymous
++                    .rangeValue;
++                range.valueLow.Anonymous.uint16 = first;
++                range.valueHigh.Anonymous.uint16 = last;
++            }
++            assert!(validate_filter(item, ns, expected).is_err());
++        });
++    }
++}
++
++fn complete_collection(ports: &[(u16, u16)]) -> Vec<LegacyRule> {
++    let mut rules = Vec::new();
++    for ipv6 in [false, true] {
++        for (inbound, protocol) in [(false, 17), (true, 6), (true, 17)] {
++            rules.push(LegacyRule {
++                ipv6,
++                inbound,
++                protocol,
++                ports: None,
++            });
++        }
++        rules.extend(ports.iter().map(|ports| LegacyRule {
++            ipv6,
++            inbound: false,
++            protocol: 6,
++            ports: Some(*ports),
++        }));
++    }
++    rules
++}
++#[test]
++fn only_complete_atomic_historical_collections_are_retired() {
++    validate_collection(&[]).unwrap();
++    for ports in [
++        &[][..],
++        &[(1, 65535)][..],
++        &[(1, 442), (444, 8079), (8081, 65535)][..],
++    ] {
++        validate_collection(&complete_collection(ports)).unwrap();
++    }
++    let mut partial = complete_collection(&[(1, 65535)]);
++    partial.pop();
++    assert!(validate_collection(&partial).is_err());
++    let mut mismatched = complete_collection(&[(1, 65535)]);
++    mismatched.last_mut().unwrap().ports = Some((1, 442));
++    assert!(validate_collection(&mismatched).is_err());
++    for invalid in [&[(1, 100), (100, 200)][..], &[(1, 100), (101, 200)][..]] {
++        assert!(validate_collection(&complete_collection(invalid)).is_err());
++    }
++}
++
++#[test]
++fn runtime_sublayer_weight_does_not_replace_exact_ownership_checks() {
++    let namespace = NamespaceKey::from_id(&"11".repeat(32)).unwrap();
++    let mut provider = namespaced_guid(&namespace, super::super::PROVIDER_KEY);
++    let name = to_wide(OsStr::new(LEGACY_NAME));
++    let mut layer: FWPM_SUBLAYER0 = unsafe { std::mem::zeroed() };
++    layer.subLayerKey = namespaced_guid(&namespace, LEGACY_SUBLAYER);
++    layer.providerKey = &mut provider;
++    layer.flags = FWPM_SUBLAYER_FLAG_PERSISTENT;
++    layer.displayData.name = name.as_ptr() as *mut _;
++    for weight in [0x8001, 0x80e0, 0x8165] {
++        layer.weight = weight;
++        validate_sublayer(&layer, &namespace).unwrap();
++    }
++    layer.providerData.size = 1;
++    assert!(validate_sublayer(&layer, &namespace).is_err());
++    layer.providerData.size = 0;
++    layer.flags = 0;
++    assert!(validate_sublayer(&layer, &namespace).is_err());
++    layer.flags = FWPM_SUBLAYER_FLAG_PERSISTENT;
++    provider.data1 ^= 1;
++    assert!(validate_sublayer(&layer, &namespace).is_err());
++}
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/wfp/legacy_loopback_migration.rs
+@@ -0,0 +1,436 @@
++//! Retire only the superseded, home-scoped loopback objects from earlier gateway builds.
++//! Stock 0.165 remains responsible for the current network policy; this is not a new policy.
++use super::{UserMatchCondition, delete_filter_if_present, ensure_success, namespaced_guid};
++use crate::namespace_key::NamespaceKey;
++use anyhow::{Context, Result, ensure};
++use std::ffi::c_void;
++use std::ptr::null_mut;
++use windows_sys::Win32::Foundation::{
++    FWP_E_NOT_FOUND, FWP_E_SUBLAYER_NOT_FOUND, GetLastError, HANDLE, HLOCAL, LocalFree,
++};
++use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::*;
++use windows_sys::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
++use windows_sys::Win32::Security::{GetSecurityDescriptorLength, IsValidSecurityDescriptor};
++use windows_sys::core::GUID;
++
++pub(super) const LEGACY_SUBLAYER: GUID = GUID::from_u128(0xd26d371d_8cef_4e6c_ae77_73b4677e0cac);
++const LEGACY_NAME: &str = "Codex offline loopback policy";
++
++struct WfpMemory(*mut c_void);
++impl Drop for WfpMemory {
++    fn drop(&mut self) {
++        if !self.0.is_null() {
++            unsafe { FwpmFreeMemory0(&mut self.0) };
++        }
++    }
++}
++struct LocalMemory(HLOCAL);
++impl Drop for LocalMemory {
++    fn drop(&mut self) {
++        if !self.0.is_null() {
++            unsafe { LocalFree(self.0) };
++        }
++    }
++}
++struct Enumeration {
++    engine: HANDLE,
++    handle: HANDLE,
++}
++impl Drop for Enumeration {
++    fn drop(&mut self) {
++        unsafe { FwpmFilterDestroyEnumHandle0(self.engine, self.handle) };
++    }
++}
++fn same_guid(a: GUID, b: GUID) -> bool {
++    a.data1 == b.data1 && a.data2 == b.data2 && a.data3 == b.data3 && a.data4 == b.data4
++}
++// BFE owns the valid NUL-terminated strings. Stop at the first mismatch/NUL.
++unsafe fn wide_equals(value: *const u16, expected: &str) -> bool {
++    if value.is_null() {
++        return expected.is_empty();
++    }
++    for (offset, character) in expected.encode_utf16().chain([0]).enumerate() {
++        if unsafe { *value.add(offset) } != character {
++            return false;
++        }
++    }
++    true
++}
++fn user_descriptor(blob: &FWP_BYTE_BLOB) -> Result<Vec<u16>> {
++    ensure!(
++        !blob.data.is_null() && blob.size >= 20,
++        "legacy user descriptor is missing"
++    );
++    let descriptor = blob.data.cast();
++    ensure!(
++        unsafe { IsValidSecurityDescriptor(descriptor) } != 0,
++        "invalid legacy user descriptor"
++    );
++    ensure!(
++        unsafe { GetSecurityDescriptorLength(descriptor) } == blob.size,
++        "unexpected legacy descriptor size"
++    );
++    let mut text = null_mut();
++    let mut length = 0;
++    // Compare the entire native SD's canonical representation, not just a matching trustee.
++    // Extra grants, denies, owner/group/SACL changes must not authorize deletion.
++    let ok = unsafe {
++        ConvertSecurityDescriptorToStringSecurityDescriptorW(
++            descriptor,
++            1,
++            0xf,
++            &mut text,
++            &mut length,
++        )
++    };
++    let _text = LocalMemory(text as HLOCAL);
++    if ok == 0 {
++        // Failure must remain failure even if an anomalous provider leaves LastError zero.
++        anyhow::bail!("format legacy user descriptor failed: {}", unsafe {
++            GetLastError()
++        });
++    }
++    ensure!(
++        !text.is_null() && length != 0,
++        "empty legacy user descriptor conversion"
++    );
++    let result = unsafe { std::slice::from_raw_parts(text, length as usize).to_vec() };
++    Ok(result)
++}
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++struct LegacyRule {
++    ipv6: bool,
++    inbound: bool,
++    protocol: u8,
++    ports: Option<(u16, u16)>,
++}
++impl LegacyRule {
++    fn key(self) -> u128 {
++        let (first, last) = self.ports.unwrap_or((0, 0));
++        0x126c0bde_1df2_4bc1_8d00_000000000000_u128
++            | ((self.ipv6 as u128) << 40)
++            | ((self.inbound as u128) << 41)
++            | ((self.protocol as u128) << 32)
++            | ((first as u128) << 16)
++            | last as u128
++    }
++}
++fn validate_rule(
++    item: &FWPM_FILTER0,
++    namespace: &NamespaceKey,
++    expected_user: &[u16],
++) -> Result<LegacyRule> {
++    let provider = namespaced_guid(namespace, super::PROVIDER_KEY);
++    let sublayer = namespaced_guid(namespace, LEGACY_SUBLAYER);
++    ensure!(
++        !item.providerKey.is_null()
++            && same_guid(unsafe { *item.providerKey }, provider)
++            && same_guid(item.subLayerKey, sublayer),
++        "foreign legacy loopback ownership"
++    );
++    ensure!(
++        item.flags == FWPM_FILTER_FLAG_PERSISTENT
++            && item.action.r#type == FWP_ACTION_BLOCK
++            && item.weight.r#type == FWP_EMPTY
++            && item.providerData.size == 0
++            && unsafe { item.Anonymous.rawContext } == 0
++            && same_guid(
++                unsafe { item.action.Anonymous.filterType },
++                GUID::from_u128(0)
++            )
++            && unsafe { wide_equals(item.displayData.name, LEGACY_NAME) }
++            && unsafe { wide_equals(item.displayData.description, "") },
++        "ambiguous legacy loopback filter"
++    );
++    let mut rule = if same_guid(item.layerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V4) {
++        LegacyRule {
++            ipv6: false,
++            inbound: false,
++            protocol: 0,
++            ports: None,
++        }
++    } else if same_guid(item.layerKey, FWPM_LAYER_ALE_AUTH_CONNECT_V6) {
++        LegacyRule {
++            ipv6: true,
++            inbound: false,
++            protocol: 0,
++            ports: None,
++        }
++    } else if same_guid(item.layerKey, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4) {
++        LegacyRule {
++            ipv6: false,
++            inbound: true,
++            protocol: 0,
++            ports: None,
++        }
++    } else if same_guid(item.layerKey, FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6) {
++        LegacyRule {
++            ipv6: true,
++            inbound: true,
++            protocol: 0,
++            ports: None,
++        }
++    } else {
++        anyhow::bail!("unknown legacy loopback layer");
++    };
++    ensure!(
++        (3..=4).contains(&item.numFilterConditions) && !item.filterCondition.is_null(),
++        "unknown legacy condition count"
++    );
++    let mut user = false;
++    let mut flags = false;
++    let mut protocol = false;
++    for condition in unsafe {
++        std::slice::from_raw_parts(item.filterCondition, item.numFilterConditions as usize)
++    } {
++        let value = condition.conditionValue;
++        if same_guid(condition.fieldKey, FWPM_CONDITION_ALE_USER_ID) {
++            ensure!(
++                !user
++                    && condition.matchType == FWP_MATCH_EQUAL
++                    && value.r#type == FWP_SECURITY_DESCRIPTOR_TYPE,
++                "ambiguous legacy user condition"
++            );
++            let sd = unsafe { value.Anonymous.sd };
++            ensure!(!sd.is_null(), "missing legacy user descriptor");
++            ensure!(
++                user_descriptor(unsafe { &*sd })? == expected_user,
++                "legacy filter targets another identity or descriptor"
++            );
++            user = true;
++        } else if same_guid(condition.fieldKey, FWPM_CONDITION_FLAGS) {
++            ensure!(
++                !flags
++                    && condition.matchType == FWP_MATCH_FLAGS_ALL_SET
++                    && value.r#type == FWP_UINT32
++                    && unsafe { value.Anonymous.uint32 } == FWP_CONDITION_FLAG_IS_LOOPBACK,
++                "ambiguous legacy loopback flag"
++            );
++            flags = true;
++        } else if same_guid(condition.fieldKey, FWPM_CONDITION_IP_PROTOCOL) {
++            ensure!(
++                !protocol && condition.matchType == FWP_MATCH_EQUAL && value.r#type == FWP_UINT8,
++                "ambiguous legacy protocol"
++            );
++            rule.protocol = unsafe { value.Anonymous.uint8 };
++            protocol = true;
++        } else if same_guid(condition.fieldKey, FWPM_CONDITION_IP_REMOTE_PORT) {
++            ensure!(
++                rule.ports.is_none()
++                    && condition.matchType == FWP_MATCH_RANGE
++                    && value.r#type == FWP_RANGE_TYPE,
++                "ambiguous legacy port condition"
++            );
++            let range = unsafe { value.Anonymous.rangeValue };
++            ensure!(!range.is_null(), "missing legacy port range");
++            let range = unsafe { &*range };
++            ensure!(
++                range.valueLow.r#type == FWP_UINT16 && range.valueHigh.r#type == FWP_UINT16,
++                "unknown legacy port range type"
++            );
++            let first = unsafe { range.valueLow.Anonymous.uint16 };
++            let last = unsafe { range.valueHigh.Anonymous.uint16 };
++            ensure!(first != 0 && first <= last, "invalid legacy port range");
++            rule.ports = Some((first, last));
++        } else {
++            anyhow::bail!("unknown condition in legacy loopback sublayer");
++        }
++    }
++    ensure!(
++        user && flags && protocol,
++        "incomplete legacy loopback conditions"
++    );
++    ensure!(
++        matches!(rule.protocol, 6 | 17)
++            && if rule.inbound || rule.protocol == 17 {
++                rule.ports.is_none()
++            } else {
++                rule.ports.is_some()
++            },
++        "unknown legacy loopback rule shape"
++    );
++    ensure!(
++        same_guid(
++            item.filterKey,
++            namespaced_guid(namespace, GUID::from_u128(rule.key()))
++        ),
++        "legacy loopback key does not match its rule"
++    );
++    Ok(rule)
++}
++
++#[cfg(test)]
++fn validate_filter(
++    item: &FWPM_FILTER0,
++    namespace: &NamespaceKey,
++    expected_user: &[u16],
++) -> Result<()> {
++    validate_rule(item, namespace, expected_user).map(|_| ())
++}
++
++fn validate_collection(rules: &[LegacyRule]) -> Result<()> {
++    if rules.is_empty() {
++        return Ok(());
++    }
++    // Historical replacement was atomic: both address families share a complete policy.
++    // A partial/de-synchronized collection cannot be attributed to that old transaction.
++    for ipv6 in [false, true] {
++        for (inbound, protocol) in [(false, 17), (true, 6), (true, 17)] {
++            ensure!(
++                rules
++                    .iter()
++                    .filter(|r| r.ipv6 == ipv6
++                        && r.inbound == inbound
++                        && r.protocol == protocol
++                        && r.ports.is_none())
++                    .count()
++                    == 1,
++                "incomplete legacy loopback fixed rule set"
++            );
++        }
++    }
++    let ranges = |ipv6| {
++        let mut spans = rules
++            .iter()
++            .filter(|r| r.ipv6 == ipv6 && !r.inbound && r.protocol == 6)
++            .map(|r| r.ports.expect("validated TCP range"))
++            .collect::<Vec<_>>();
++        spans.sort_unstable();
++        spans
++    };
++    let ipv4 = ranges(false);
++    let ipv6 = ranges(true);
++    ensure!(ipv4 == ipv6, "legacy loopback IPv4/IPv6 policies differ");
++    ensure!(
++        ipv4.windows(2)
++            .all(|pair| u32::from(pair[0].1) + 1 < u32::from(pair[1].0)),
++        "legacy TCP ranges are not a canonical proxy-port complement"
++    );
++    ensure!(
++        rules.len() == 6 + 2 * ipv4.len(),
++        "unknown legacy loopback collection"
++    );
++    Ok(())
++}
++
++fn validate_sublayer(old: &FWPM_SUBLAYER0, namespace: &NamespaceKey) -> Result<()> {
++    let provider = namespaced_guid(namespace, super::PROVIDER_KEY);
++    let sublayer = namespaced_guid(namespace, LEGACY_SUBLAYER);
++    // Weight is runtime ordering, not ownership: real old objects requested at
++    // 0x8001 were read back at different weights. Durable identity/shape stays exact.
++    ensure!(
++        same_guid(old.subLayerKey, sublayer)
++            && !old.providerKey.is_null()
++            && same_guid(unsafe { *old.providerKey }, provider)
++            && old.flags == FWPM_SUBLAYER_FLAG_PERSISTENT
++            && old.providerData.size == 0
++            && unsafe { wide_equals(old.displayData.name, LEGACY_NAME) }
++            && unsafe { wide_equals(old.displayData.description, "") },
++        "ambiguous legacy loopback sublayer ownership"
++    );
++    Ok(())
++}
++
++pub(super) fn validate_provider(engine: HANDLE, namespace: &NamespaceKey) -> Result<()> {
++    let provider = namespaced_guid(namespace, super::PROVIDER_KEY);
++    let mut object: *mut FWPM_PROVIDER0 = null_mut();
++    ensure_success(
++        unsafe { FwpmProviderGetByKey0(engine, &provider, &mut object) },
++        "query legacy loopback provider",
++    )?;
++    let _object = WfpMemory(object.cast());
++    ensure!(!object.is_null(), "missing legacy provider result");
++    let object = unsafe { &*object };
++    ensure!(
++        same_guid(object.providerKey, provider)
++            && object.flags == FWPM_PROVIDER_FLAG_PERSISTENT
++            && object.providerData.size == 0
++            && unsafe { wide_equals(object.serviceName, "") }
++            && unsafe { wide_equals(object.displayData.name, super::PROVIDER_NAME) }
++            && unsafe { wide_equals(object.displayData.description, super::PROVIDER_DESCRIPTION) },
++        "ambiguous legacy loopback provider ownership"
++    );
++    Ok(())
++}
++
++/// Called only while the existing WFP transaction is held. Validate the whole collection
++/// before deleting anything; an error anywhere rolls back both migration and uninstall.
++pub(super) fn retire(engine: HANDLE, namespace: &NamespaceKey) -> Result<usize> {
++    let provider = namespaced_guid(namespace, super::PROVIDER_KEY);
++    let sublayer = namespaced_guid(namespace, LEGACY_SUBLAYER);
++    let mut old: *mut FWPM_SUBLAYER0 = null_mut();
++    let status = unsafe { FwpmSubLayerGetByKey0(engine, &sublayer, &mut old) };
++    if [FWP_E_SUBLAYER_NOT_FOUND as u32, FWP_E_NOT_FOUND as u32].contains(&status) {
++        return Ok(0);
++    }
++    ensure_success(status, "query legacy loopback sublayer")?;
++    let _old = WfpMemory(old.cast());
++    ensure!(!old.is_null(), "missing legacy sublayer result");
++    let old = unsafe { &*old };
++    validate_sublayer(old, namespace)?;
++    validate_provider(engine, namespace)?;
++    // Resolve the current validated account, rather than trusting a SID found in an old rule.
++    let user = UserMatchCondition::for_account(&namespace.offline())?;
++    let expected_user = user_descriptor(&user.blob)?;
++    let mut keys = Vec::new();
++    let mut rules = Vec::new();
++    for layer in [
++        FWPM_LAYER_ALE_AUTH_CONNECT_V4,
++        FWPM_LAYER_ALE_AUTH_CONNECT_V6,
++        FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
++        FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
++    ] {
++        let mut provider = provider;
++        let template = FWPM_FILTER_ENUM_TEMPLATE0 {
++            providerKey: &mut provider,
++            layerKey: layer,
++            enumType: FWP_FILTER_ENUM_FULLY_CONTAINED,
++            flags: FWP_FILTER_ENUM_FLAG_INCLUDE_DISABLED,
++            actionMask: u32::MAX,
++            ..unsafe { std::mem::zeroed() }
++        };
++        let mut handle = HANDLE::default();
++        ensure_success(
++            unsafe { FwpmFilterCreateEnumHandle0(engine, &template, &mut handle) },
++            "enumerate legacy loopback scope",
++        )?;
++        let enumeration = Enumeration { engine, handle };
++        loop {
++            let mut entries: *mut *mut FWPM_FILTER0 = null_mut();
++            let mut count = 0;
++            let status = unsafe {
++                FwpmFilterEnum0(engine, enumeration.handle, 128, &mut entries, &mut count)
++            };
++            let _entries = WfpMemory(entries.cast());
++            ensure_success(status, "read legacy loopback filters")?;
++            if count == 0 {
++                break;
++            }
++            ensure!(!entries.is_null(), "missing legacy filter enumeration");
++            for entry in unsafe { std::slice::from_raw_parts(entries, count as usize) } {
++                ensure!(!entry.is_null(), "missing legacy filter");
++                let item = unsafe { &**entry };
++                if same_guid(item.subLayerKey, sublayer) {
++                    rules.push(
++                        validate_rule(item, namespace, &expected_user)
++                            .context("refuse ambiguous legacy loopback migration")?,
++                    );
++                    keys.push(item.filterKey);
++                }
++            }
++        }
++    }
++    validate_collection(&rules)?;
++    for key in &keys {
++        delete_filter_if_present(engine, key)?;
++    }
++    // Unexpected layers/foreign provider objects cause IN_USE and transaction rollback.
++    ensure_success(
++        unsafe { FwpmSubLayerDeleteByKey0(engine, &sublayer) },
++        "retire legacy loopback sublayer",
++    )?;
++    Ok(keys.len())
++}
++
++#[cfg(test)]
++mod tests;
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/wfp/loopback_policy.rs
+@@ -0,0 +1,144 @@
++//! Pure native proxy-port complement; shared by Firewall COM and WFP.
++pub(crate) fn blocked_port_ranges(proxy_ports: &[u16]) -> Vec<(u16, u16)> {
++    let mut allowed = proxy_ports
++        .iter()
++        .copied()
++        .filter(|port| *port != 0)
++        .collect::<Vec<_>>();
++    allowed.sort_unstable();
++    allowed.dedup();
++    let mut result = Vec::new();
++    let mut start = 1_u32;
++    for port in allowed {
++        let port = u32::from(port);
++        if port > start {
++            result.push((start as u16, (port - 1) as u16));
++        }
++        start = port + 1;
++    }
++    if start <= u32::from(u16::MAX) {
++        result.push((start as u16, u16::MAX));
++    }
++    result
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(super) struct LoopbackRule {
++    pub(super) ipv6: bool,
++    pub(super) inbound: bool,
++    pub(super) protocol: u8,
++    pub(super) ports: Option<(u16, u16)>,
++}
++impl LoopbackRule {
++    pub(super) fn key(self) -> u128 {
++        let (start, end) = self.ports.unwrap_or((0, 0));
++        0x126c0bde_1df2_4bc1_8d00_000000000000_u128
++            | ((self.ipv6 as u128) << 40)
++            | ((self.inbound as u128) << 41)
++            | ((self.protocol as u128) << 32)
++            | ((start as u128) << 16)
++            | end as u128
++    }
++}
++pub(super) fn rules(proxy_ports: &[u16], allow_local_binding: bool) -> Vec<LoopbackRule> {
++    if allow_local_binding {
++        return Vec::new();
++    }
++    let ports = blocked_port_ranges(proxy_ports);
++    [false, true]
++        .into_iter()
++        .flat_map(|ipv6| {
++            std::iter::once(LoopbackRule {
++                ipv6,
++                inbound: false,
++                protocol: 17,
++                ports: None,
++            })
++            .chain(ports.iter().copied().map(move |ports| LoopbackRule {
++                ipv6,
++                inbound: false,
++                protocol: 6,
++                ports: Some(ports),
++            }))
++            // Proxy exceptions authorize connections initiated by the sandbox only.
++            // A restricted sandbox listener must not accept arbitrary local clients.
++            .chain([6, 17].into_iter().map(move |protocol| LoopbackRule {
++                ipv6,
++                inbound: true,
++                protocol,
++                ports: None,
++            }))
++        })
++        .collect()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{blocked_port_ranges, rules};
++    #[test]
++    fn empty_proxy_set_blocks_every_tcp_port() {
++        assert_eq!(blocked_port_ranges(&[]), vec![(1, 65535)]);
++    }
++    #[test]
++    fn ports_zero_duplicates_and_extremes_preserve_exact_complement() {
++        assert_eq!(
++            blocked_port_ranges(&[65535, 443, 0, 1, 443]),
++            vec![(2, 442), (444, 65534)]
++        );
++    }
++    #[test]
++    fn each_port_is_either_explicitly_allowed_or_blocked_once() {
++        let allowed = [1, 2, 17, 18, 8080, 32768, 65534, 65535];
++        let ranges = blocked_port_ranges(&allowed);
++        for port in 1..=u16::MAX {
++            let count = ranges
++                .iter()
++                .filter(|(first, last)| (*first..=*last).contains(&port))
++                .count();
++            assert_eq!(count, usize::from(!allowed.contains(&port)));
++        }
++    }
++    #[test]
++    fn explicitly_allowing_all_ports_leaves_no_tcp_block() {
++        assert!(blocked_port_ranges(&(1..=u16::MAX).collect::<Vec<_>>()).is_empty());
++    }
++    #[test]
++    fn local_binding_removes_all_loopback_restrictions() {
++        assert!(rules(&[], true).is_empty());
++        assert!(rules(&[3128, 8080], true).is_empty());
++    }
++    #[test]
++    fn proxy_tcp_exceptions_never_allow_udp_and_keys_do_not_alias() {
++        let result = rules(&[3128, 8080], false);
++        let keys = result
++            .iter()
++            .map(|rule| rule.key())
++            .collect::<std::collections::BTreeSet<_>>();
++        assert_eq!(keys.len(), result.len());
++        for ipv6 in [false, true] {
++            assert_eq!(
++                result
++                    .iter()
++                    .filter(|r| r.ipv6 == ipv6
++                        && !r.inbound
++                        && r.protocol == 17
++                        && r.ports.is_none())
++                    .count(),
++                1
++            );
++            for port in [3128, 8080] {
++                assert!(!result.iter().any(|r| r.ipv6 == ipv6
++                    && r.protocol == 6
++                    && r.ports.is_some_and(|(a, b)| (a..=b).contains(&port))));
++            }
++        }
++        assert_eq!(rules(&[], false).len(), 8);
++        assert_eq!(
++            result
++                .iter()
++                .filter(|r| r.inbound && r.ports.is_none())
++                .count(),
++            4
++        );
++    }
++}
+--- /dev/null
++++ b/codex-rs/windows-sandbox-rs/src/wfp/loopback_reconcile.rs
+@@ -0,0 +1,138 @@
++//! Apply the already reviewed native ALE loopback rules to the effective profile.
++//! No tool execution, proxy implementation, or agent scheduling lives here.
++use super::legacy_loopback_migration::LEGACY_SUBLAYER;
++use super::{
++    PROVIDER_KEY, UserMatchCondition, empty_blob, empty_value, ensure_success, loopback_policy,
++    namespaced_guid, zero_guid,
++};
++use crate::namespace_key::NamespaceKey;
++use crate::to_wide;
++use anyhow::Result;
++use std::ffi::OsStr;
++use std::ptr::null_mut;
++use windows_sys::Win32::Foundation::HANDLE;
++use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::*;
++use windows_sys::core::GUID;
++
++pub(super) fn install(
++    engine: HANDLE,
++    namespace: &NamespaceKey,
++    user: &UserMatchCondition,
++    proxy_ports: &[u16],
++    allow_local_binding: bool,
++) -> Result<usize> {
++    let rules = loopback_policy::rules(proxy_ports, allow_local_binding);
++    if rules.is_empty() {
++        return Ok(0);
++    }
++    let mut provider = namespaced_guid(namespace, PROVIDER_KEY);
++    let sublayer_key = namespaced_guid(namespace, LEGACY_SUBLAYER);
++    let name = to_wide(OsStr::new("Codex offline loopback policy"));
++    let sublayer = FWPM_SUBLAYER0 {
++        subLayerKey: sublayer_key,
++        displayData: FWPM_DISPLAY_DATA0 {
++            name: name.as_ptr() as *mut _,
++            description: null_mut(),
++        },
++        flags: FWPM_SUBLAYER_FLAG_PERSISTENT,
++        providerKey: &mut provider,
++        providerData: empty_blob(),
++        weight: 0x8001,
++    };
++    ensure_success(
++        unsafe { FwpmSubLayerAdd0(engine, &sublayer, null_mut()) },
++        "add owned loopback sublayer after validated migration",
++    )?;
++    for rule in &rules {
++        let mut conditions = vec![
++            FWPM_FILTER_CONDITION0 {
++                fieldKey: FWPM_CONDITION_ALE_USER_ID,
++                matchType: FWP_MATCH_EQUAL,
++                conditionValue: FWP_CONDITION_VALUE0 {
++                    r#type: FWP_SECURITY_DESCRIPTOR_TYPE,
++                    Anonymous: FWP_CONDITION_VALUE0_0 {
++                        sd: &user.blob as *const _ as *mut _,
++                    },
++                },
++            },
++            FWPM_FILTER_CONDITION0 {
++                fieldKey: FWPM_CONDITION_FLAGS,
++                matchType: FWP_MATCH_FLAGS_ALL_SET,
++                conditionValue: FWP_CONDITION_VALUE0 {
++                    r#type: FWP_UINT32,
++                    Anonymous: FWP_CONDITION_VALUE0_0 {
++                        uint32: FWP_CONDITION_FLAG_IS_LOOPBACK,
++                    },
++                },
++            },
++            FWPM_FILTER_CONDITION0 {
++                fieldKey: FWPM_CONDITION_IP_PROTOCOL,
++                matchType: FWP_MATCH_EQUAL,
++                conditionValue: FWP_CONDITION_VALUE0 {
++                    r#type: FWP_UINT8,
++                    Anonymous: FWP_CONDITION_VALUE0_0 {
++                        uint8: rule.protocol,
++                    },
++                },
++            },
++        ];
++        let (first, last) = rule.ports.unwrap_or((0, 0));
++        let mut range = FWP_RANGE0 {
++            valueLow: FWP_VALUE0 {
++                r#type: FWP_UINT16,
++                Anonymous: FWP_VALUE0_0 { uint16: first },
++            },
++            valueHigh: FWP_VALUE0 {
++                r#type: FWP_UINT16,
++                Anonymous: FWP_VALUE0_0 { uint16: last },
++            },
++        };
++        if rule.ports.is_some() {
++            conditions.push(FWPM_FILTER_CONDITION0 {
++                fieldKey: FWPM_CONDITION_IP_REMOTE_PORT,
++                matchType: FWP_MATCH_RANGE,
++                conditionValue: FWP_CONDITION_VALUE0 {
++                    r#type: FWP_RANGE_TYPE,
++                    Anonymous: FWP_CONDITION_VALUE0_0 {
++                        rangeValue: &mut range,
++                    },
++                },
++            });
++        }
++        let filter = FWPM_FILTER0 {
++            filterKey: namespaced_guid(namespace, GUID::from_u128(rule.key())),
++            displayData: FWPM_DISPLAY_DATA0 {
++                name: name.as_ptr() as *mut _,
++                description: null_mut(),
++            },
++            flags: FWPM_FILTER_FLAG_PERSISTENT,
++            providerKey: &mut provider,
++            providerData: empty_blob(),
++            layerKey: match (rule.inbound, rule.ipv6) {
++                (false, false) => FWPM_LAYER_ALE_AUTH_CONNECT_V4,
++                (false, true) => FWPM_LAYER_ALE_AUTH_CONNECT_V6,
++                (true, false) => FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,
++                (true, true) => FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6,
++            },
++            subLayerKey: sublayer_key,
++            weight: empty_value(),
++            numFilterConditions: conditions.len() as u32,
++            filterCondition: conditions.as_mut_ptr(),
++            action: FWPM_ACTION0 {
++                r#type: FWP_ACTION_BLOCK,
++                Anonymous: FWPM_ACTION0_0 {
++                    filterType: zero_guid(),
++                },
++            },
++            Anonymous: FWPM_FILTER0_0 { rawContext: 0 },
++            reserved: null_mut(),
++            filterId: 0,
++            effectiveWeight: empty_value(),
++        };
++        ensure_success(
++            unsafe { FwpmFilterAdd0(engine, &filter, null_mut(), null_mut()) },
++            "add owned loopback block",
++        )?;
++    }
++    Ok(rules.len())
++}
+--- a/codex-rs/windows-sandbox-rs/src/wfp.rs
++++ b/codex-rs/windows-sandbox-rs/src/wfp.rs
+@@ -1,4 +1,7 @@
+ mod filter_specs;
++mod legacy_loopback_migration;
++mod loopback_policy;
++mod loopback_reconcile;
+ 
+ use crate::to_wide;
+ use anyhow::Result;
+@@ -118,12 +121,42 @@
+     Ok(installed_filter_count)
+ }
+ 
++/// Effective loopback policy is mandatory on Win10, where COM rules alone do not
++/// enforce the per-account local restriction. Retire validated old/current rules
++/// and install the exact desired profile in one existing native WFP transaction.
++pub(crate) fn reconcile_loopback_policy(
++    namespace: &crate::namespace_key::NamespaceKey,
++    proxy_ports: &[u16],
++    allow_local_binding: bool,
++) -> Result<(usize, usize)> {
++    let engine = Engine::open(INFINITE)?;
++    let mut transaction = engine.begin_transaction()?;
++    let retired = legacy_loopback_migration::retire(engine.handle, namespace)?;
++    let installed = if allow_local_binding {
++        0
++    } else {
++        ensure_provider(engine.handle, namespace)?;
++        legacy_loopback_migration::validate_provider(engine.handle, namespace)?;
++        let user = UserMatchCondition::for_account(&namespace.offline())?;
++        loopback_reconcile::install(
++            engine.handle,
++            namespace,
++            &user,
++            proxy_ports,
++            allow_local_binding,
++        )?
++    };
++    transaction.commit()?;
++    Ok((retired, installed))
++}
++
+ pub(crate) fn remove_namespaced_wfp_filters(
+     namespace: &crate::namespace_key::NamespaceKey,
+ ) -> Result<()> {
+     // Leave time for other cleanup if a WFP policy writer holds the transaction lock.
+     let engine = Engine::open(/*transaction_wait_timeout_ms*/ 1_000)?;
+     let mut transaction = engine.begin_transaction()?;
++    legacy_loopback_migration::retire(engine.handle, namespace)?;
+     for spec in FILTER_SPECS {
+         delete_filter_if_present(engine.handle, &namespaced_guid(namespace, spec.key))?;
+     }

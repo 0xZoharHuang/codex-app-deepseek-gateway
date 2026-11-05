@@ -1,0 +1,150 @@
+diff --git a/codex-rs/windows-sandbox-rs/src/helper_materialization/copy.rs b/codex-rs/windows-sandbox-rs/src/helper_materialization/copy.rs
+index 2658bd3..3a69fb7 100644
+--- a/codex-rs/windows-sandbox-rs/src/helper_materialization/copy.rs
++++ b/codex-rs/windows-sandbox-rs/src/helper_materialization/copy.rs
+@@ -1,9 +1,11 @@
+-//! Copies legacy helpers using destination-inherited ACLs and the existing freshness check.
++//! Copies helpers with destination-inherited ACLs and verifies cached executable bytes.
+ 
+ use anyhow::Context;
+ use anyhow::Result;
+ use anyhow::anyhow;
+ use std::fs;
++use std::io::BufRead;
++use std::io::BufReader;
+ use std::io::Write;
+ use std::path::Path;
+ use tempfile::NamedTempFile;
+@@ -64,12 +66,7 @@ pub(super) fn copy_from_source_if_needed(source: &Path, destination: &Path) -> R
+         .with_context(|| format!("flush temporary helper file {}", temp_path_buf.display()))?;
+     drop(temp_file);
+ 
+-    if destination.exists() {
+-        fs::remove_file(destination).with_context(|| {
+-            format!("remove stale helper destination {}", destination.display())
+-        })?;
+-    }
+-
++    // Keep the previous helper available if Windows refuses the replacement.
+     match fs::rename(&temp_path_buf, destination) {
+         Ok(()) => Ok(CopyOutcome::ReCopied),
+         Err(rename_err) => {
+@@ -112,7 +109,52 @@ fn destination_is_fresh(source: &Path, destination: &Path) -> Result<bool> {
+         .modified()
+         .with_context(|| format!("read helper destination mtime {}", destination.display()))?;
+ 
+-    Ok(destination_modified >= source_modified)
++    if destination_modified < source_modified {
++        return Ok(false);
++    }
++
++    // Different native builds can have the same version, size and file times.
++    // Only reuse a cached executable if its contents still match this source.
++    let source_file = fs::File::open(source)
++        .with_context(|| format!("open helper source for comparison {}", source.display()))?;
++    let destination_file = match fs::File::open(destination) {
++        Ok(file) => file,
++        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
++        Err(err) => {
++            return Err(err).with_context(|| {
++                format!(
++                    "open cached helper for comparison {}",
++                    destination.display()
++                )
++            });
++        }
++    };
++    helper_contents_match(source_file, destination_file).with_context(|| {
++        format!(
++            "compare native helper {} with {}",
++            source.display(),
++            destination.display()
++        )
++    })
++}
++
++fn helper_contents_match(source: fs::File, destination: fs::File) -> std::io::Result<bool> {
++    const BUFFER_SIZE: usize = 64 * 1024;
++    let mut source = BufReader::with_capacity(BUFFER_SIZE, source);
++    let mut destination = BufReader::with_capacity(BUFFER_SIZE, destination);
++    loop {
++        let left = source.fill_buf()?;
++        let right = destination.fill_buf()?;
++        let count = left.len().min(right.len());
++        if count == 0 {
++            return Ok(left.is_empty() && right.is_empty());
++        }
++        if left[..count] != right[..count] {
++            return Ok(false);
++        }
++        source.consume(count);
++        destination.consume(count);
++    }
+ }
+ 
+ #[cfg(test)]
+diff --git a/codex-rs/windows-sandbox-rs/src/helper_materialization/copy_tests.rs b/codex-rs/windows-sandbox-rs/src/helper_materialization/copy_tests.rs
+index 8a71d39..b2c995a 100644
+--- a/codex-rs/windows-sandbox-rs/src/helper_materialization/copy_tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/helper_materialization/copy_tests.rs
+@@ -56,3 +56,60 @@ fn copy_from_source_if_needed_reuses_fresh_destination() {
+         fs::read(&destination).expect("read destination")
+     );
+ }
++
++#[test]
++fn copy_replaces_cached_bytes_when_size_and_timestamps_match() {
++    let tmp = TempDir::new().expect("tempdir");
++    let source = tmp.path().join("source.exe");
++    let destination = tmp.path().join("cached.exe");
++    let first = vec![3u8; 160 * 1024];
++    let mut second = first.clone();
++    *second.last_mut().unwrap() = 8;
++    let stamp = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
++    for (path, bytes) in [(&source, &first), (&destination, &second)] {
++        fs::write(path, bytes).unwrap();
++        fs::OpenOptions::new()
++            .write(true)
++            .open(path)
++            .unwrap()
++            .set_modified(stamp)
++            .unwrap();
++    }
++
++    assert!(!destination_is_fresh(&source, &destination).unwrap());
++    assert_eq!(
++        copy_from_source_if_needed(&source, &destination).unwrap(),
++        CopyOutcome::ReCopied
++    );
++    assert_eq!(fs::read(&destination).unwrap(), first);
++    assert_eq!(
++        copy_from_source_if_needed(&source, &destination).unwrap(),
++        CopyOutcome::Reused
++    );
++}
++
++#[cfg(windows)]
++#[test]
++fn locked_stale_helper_is_preserved_until_replacement_can_succeed() {
++    use std::os::windows::fs::OpenOptionsExt;
++
++    let tmp = TempDir::new().expect("tempdir");
++    let source = tmp.path().join("source.exe");
++    let destination = tmp.path().join("cached.exe");
++    fs::write(&source, b"new-binary").unwrap();
++    fs::write(&destination, b"old-binary").unwrap();
++    // FILE_SHARE_READ lets the content comparison run, but denies deletion/replacement.
++    let held = fs::OpenOptions::new()
++        .read(true)
++        .share_mode(1)
++        .open(&destination)
++        .unwrap();
++    assert!(copy_from_source_if_needed(&source, &destination).is_err());
++    assert_eq!(fs::read(&destination).unwrap(), b"old-binary");
++    drop(held);
++    assert_eq!(
++        copy_from_source_if_needed(&source, &destination).unwrap(),
++        CopyOutcome::ReCopied
++    );
++    assert_eq!(fs::read(&destination).unwrap(), b"new-binary");
++}

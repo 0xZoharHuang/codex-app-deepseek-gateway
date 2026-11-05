@@ -29,10 +29,12 @@ P16_LOCK_SHA256 = "c294196f4b56f63578fb81a4d09b3830b0b7e14600fa2b0c4688893fb3db0
 P17_LOCK_SHA256 = "3a57c36fab0ea6c25b8f836702350b20eab93b1369e02e20dcf9e3a32dc7681f"
 P18_LOCK_SHA256 = "16033bf6d16dedf440b3d9355445a87f8098f340958c2cd7685028330a5281cb"
 P19_LOCK_SHA256 = "163f6e61d605adf7d7698835f33b99d48c5cb25f017b8231f5062bd0ffb0a543"
+P20_LOCK_SHA256 = "7b87ee474a85eacf31b206777ef152a84069ae5c5d03f7522b8f36fa13353735"
 REVIEWED_SOURCE_LOCKS = (("build-lock.O165-P16-source.json", P16_LOCK_SHA256),
                          ("build-lock.O165-P17-source.json", P17_LOCK_SHA256),
                          ("build-lock.O165-P18-source.json", P18_LOCK_SHA256),
-                         ("build-lock.O165-P19-source.json", P19_LOCK_SHA256))
+                         ("build-lock.O165-P19-source.json", P19_LOCK_SHA256),
+                         ("build-lock.O165-P20-source.json", P20_LOCK_SHA256))
 
 
 def binary_names(manifest):
@@ -154,7 +156,7 @@ def single_graph(lock, native_dir):
                 if sha(pinned) == digest and load(pinned) == lock:
                     reviewed.append(name)
         require(len(reviewed) == 1,
-                "Six-target source bundle must match an explicitly reviewed P16 lock or reviewed P17 lock or reviewed P18 lock or reviewed P19 lock")
+                "Six-target source bundle must match an explicitly reviewed P16 lock or reviewed P17 lock or reviewed P18 lock or reviewed P19 lock or reviewed P20 lock")
     base_patches = [
         "windows-home-namespace-0165.patch", "mcp-keyring-isolation-0165.patch",
         "guardian-thread-context-0165.patch", "windows-cwd-ancestor-metadata-0165.patch"]

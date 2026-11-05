@@ -506,7 +506,7 @@ def test_six_target_public_bundle_keeps_exact_inventory_and_explicit_legacy_mode
         assert set(pack.raw_outputs(value)) == pack.SOURCE_BINARIES
 
 
-@pytest.mark.parametrize("lock_name", ["build-lock.O165-P16-source.json", "build-lock.O165-P17-source.json", "build-lock.O165-P18-source.json", "build-lock.O165-P19-source.json"])
+@pytest.mark.parametrize("lock_name", ["build-lock.O165-P16-source.json", "build-lock.O165-P17-source.json", "build-lock.O165-P18-source.json", "build-lock.O165-P19-source.json", "build-lock.O165-P20-source.json"])
 def test_reviewed_source_public_projection_and_archive_keep_all_six_producers(tmp_path, lock_name):
     _, _, _, value, build = single_recipe(tmp_path)
     lock_path = ROOT/"native"/lock_name
@@ -625,4 +625,39 @@ def test_p19_equal_json_cannot_replace_exact_original_disk_pin(tmp_path, problem
     name = "build-lock.O165-P19-source.json" if problem == "different_bytes" else "unreviewed.json"
     (native/name).write_text(json.dumps(lock, separators=(",", ":")), encoding="utf-8")
     with pytest.raises(ValueError, match="reviewed P19 lock"):
+        pack.single_graph(lock, native)
+
+
+@pytest.mark.parametrize("problem", [None, "source", "missing_migration", "migration_sha", "missing_helper", "helper_sha", "profile", "extra_field"])
+def test_p20_source_graph_requires_exact_migration_lock_and_preserves_p19(problem):
+    previous_path = ROOT/"native/build-lock.O165-P19-source.json"
+    assert pack.sha(previous_path) == pack.P19_LOCK_SHA256
+    path = ROOT/"native/build-lock.O165-P20-source.json"
+    assert pack.sha(path) == pack.P20_LOCK_SHA256
+    lock = pack.load(path)
+    assert lock["patches"][:-2] == pack.load(previous_path)["patches"]
+    assert lock["patches"][-2]["file"] == "cadsg-native-loopback-reconciliation-0165.patch"
+    assert lock["patches"][-1]["file"] == "cadsg-native-helper-cache-bytes-0165.patch"
+    if problem == "source": lock["prepared_source_sha256"] = "0"*64
+    elif problem == "missing_migration": lock["patches"].pop(-2)
+    elif problem == "migration_sha": lock["patches"][-2]["sha256"] = "0"*64
+    elif problem == "missing_helper": lock["patches"].pop()
+    elif problem == "helper_sha": lock["patches"][-1]["sha256"] = "0"*64
+    elif problem == "profile": lock["release_environment"]["CARGO_PROFILE_RELEASE_LTO"] = "true"
+    elif problem == "extra_field": lock["unreviewed_extension"] = True
+    if problem:
+        with pytest.raises(ValueError, match="reviewed P20 lock"):
+            pack.single_graph(lock, ROOT/"native")
+    else:
+        assert pack.single_graph(lock, ROOT/"native")["producer_id"] == "O165"
+    assert pack.sha(previous_path) == pack.P19_LOCK_SHA256
+
+
+@pytest.mark.parametrize("problem", ["different_bytes", "different_name"])
+def test_p20_equal_json_cannot_replace_exact_original_disk_pin(tmp_path, problem):
+    lock = pack.load(ROOT/"native/build-lock.O165-P20-source.json")
+    native = tmp_path/"native"; native.mkdir()
+    name = "build-lock.O165-P20-source.json" if problem == "different_bytes" else "unreviewed.json"
+    (native/name).write_text(json.dumps(lock, separators=(",", ":")), encoding="utf-8")
+    with pytest.raises(ValueError, match="reviewed P20 lock"):
         pack.single_graph(lock, native)
