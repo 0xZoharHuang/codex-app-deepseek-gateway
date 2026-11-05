@@ -18,7 +18,7 @@
 +
 +    #[test]
 +    fn legacy_matching_network_markers_still_require_p20_migration() {
-+        let mut marker = SetupMarker {
++        let mut marker = super::SetupMarker {
 +            version: 5,
 +            offline_username: "fixture-offline".to_owned(),
 +            online_username: "fixture-online".to_owned(),
@@ -32,11 +32,11 @@
 +            assert!(!marker.version_matches());
 +            assert!(
 +                marker
-+                    .request_mismatch_reason(SandboxNetworkIdentity::Offline, &settings)
++                    .request_mismatch_reason(super::SandboxNetworkIdentity::Offline, &settings)
 +                    .is_none()
 +            );
 +        }
-+        marker.version = SETUP_VERSION;
++        marker.version = super::SETUP_VERSION;
 +        assert!(marker.version_matches());
 +    }
 +}
@@ -85,7 +85,7 @@
              ),
 --- /dev/null
 +++ b/codex-rs/windows-sandbox-rs/src/wfp/legacy_loopback_migration/tests.rs
-@@ -0,0 +1,337 @@
+@@ -0,0 +1,339 @@
 +use super::*;
 +use crate::to_wide;
 +use std::ffi::OsStr;
@@ -420,7 +420,9 @@
 +    layer.flags = 0;
 +    assert!(validate_sublayer(&layer, &namespace).is_err());
 +    layer.flags = FWPM_SUBLAYER_FLAG_PERSISTENT;
-+    provider.data1 ^= 1;
++    unsafe {
++        (*layer.providerKey).data1 ^= 1;
++    }
 +    assert!(validate_sublayer(&layer, &namespace).is_err());
 +}
 --- /dev/null
