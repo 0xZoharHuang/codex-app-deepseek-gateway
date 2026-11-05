@@ -4,9 +4,9 @@
 
 标准 builder 可选 --jobs 1 或 --jobs 2，使用官方 Cargo --jobs 参数。固定 PROFILE / release_environment 中 CARGO_BUILD_JOBS=2 是锁定的最大并发值；显式 CLI override 优先，实际 argv 和 locked_max_build_jobs / effective_build_jobs / build_jobs_override 会同时写入构建回执。打包器严格核对这些字段与实际命令，并在分发 provenance 记录有效资源设置。无 override 的旧回执沿用原校验。此资源限制保留代码生成参数、源指纹、原生四目标和 owner/cache 的检查。
 
-## 0.2.0 / P19 的原生输入
+## 0.2.0 / P20 的原生输入
 
-构建和打包均传入 `native/build-lock.O165-P19-source.json`。保留该锁中的源码、工具链、V8 输入与 release profile。六个程序包括 CLI、Code Mode host、command runner、setup helper、managed-deny probe 和 sandbox service。分发格式为 `cadsg-native-source-bundle`，固定 App 使用 Legacy 路径，不需要安装项目服务注册或新的证书信任。
+构建和打包均传入 `native/build-lock.O165-P20-source.json`。保留该锁中的源码、工具链、V8 输入与 release profile。六个程序包括 CLI、Code Mode host、command runner、setup helper、managed-deny probe 和 sandbox service。分发格式为 `cadsg-native-source-bundle`，固定 App 使用 Legacy 路径，不需要安装项目服务注册或新的证书信任。
 
 ## 历史 P9 源码提案
 

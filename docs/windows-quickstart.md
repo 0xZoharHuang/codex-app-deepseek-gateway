@@ -16,8 +16,8 @@ $gatewayZip = Read-Host '已下载网关 zip 的完整路径'
 $gatewayZipSha = Read-Host '从可信 SHA256SUMS.json 复制该网关 zip 的 SHA256'
 $gatewaySha = Read-Host '从同一索引复制包内 release.json 的 SHA256'
 $nativeArchive = Read-Host '已下载原生 tar.gz 的完整路径'
-$nativeArchiveSha = Read-Host '从 v0.2.0 外部校验索引复制 P19 原生 tar.gz 的 SHA256'
-$rawNativeSha = Read-Host '从同一索引复制 P19 原生 manifest.json 的 SHA256'
+$nativeArchiveSha = Read-Host '从 v0.2.0 外部校验索引复制 P20 原生 tar.gz 的 SHA256'
+$rawNativeSha = Read-Host '从同一索引复制 P20 原生 manifest.json 的 SHA256'
 $nativeMemberCount = [int](Read-Host '从同一发行页的原生包库存回执复制普通文件条目数')
 if ((Get-FileHash -LiteralPath $gatewayZip -Algorithm SHA256).Hash -ne $gatewayZipSha) { throw '网关归档 SHA 不符' }
 if ((Get-FileHash -LiteralPath $nativeArchive -Algorithm SHA256).Hash -ne $nativeArchiveSha) { throw '原生归档 SHA 不符' }
@@ -60,7 +60,7 @@ Install 校验所有锁定 wheel，离线创建独立 venv，**不激活、不�
 正常退出占用本项目 profile 的 App，停止本项目网关。不要全局结束 Codex 或其他用户进程。
 
 ```powershell
-$nativeInput = Join-Path $state ('native-runtimes\o165-p19-' + $nativeArchiveSha.Substring(0,12))
+$nativeInput = Join-Path $state ('native-runtimes\o165-p20-' + $nativeArchiveSha.Substring(0,12))
 # 标准库 data filter；只解压已核定的固定发行归档，输出必须是全新目录。
 $extract = @'
 from pathlib import Path, PurePosixPath
@@ -90,7 +90,7 @@ $prepared = $reply | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw 'bind 失败' }
 ```
 
-prepare 在永久版本目录中校验 P19 的六个同源程序，并核对本机已安装的官方 App 和插件资源。生成的 `app-runtime-manifest.json` 包含本机路径，仅供当前用户绑定。多个版本可以并排保留，升级或回滚时使用各自的清单和 SHA。
+prepare 在永久版本目录中校验 P20 的六个同源程序，并核对本机已安装的官方 App 和插件资源。生成的 `app-runtime-manifest.json` 包含本机路径，仅供当前用户绑定。多个版本可以并排保留，升级或回滚时使用各自的清单和 SHA。
 
 ## 4. 从选定 runtime 生成目录并配置
 
@@ -98,7 +98,7 @@ prepare 在永久版本目录中校验 P19 的六个同源程序，并核对本�
 
 ```powershell
 $native = Join-Path $nativeInput 'codex.exe'
-$metadata = Join-Path $state ('catalog-build\o165-p19-' + $rawNativeSha.Substring(0,12))
+$metadata = Join-Path $state ('catalog-build\o165-p20-' + $rawNativeSha.Substring(0,12))
 $makeCatalog = @'
 from pathlib import Path
 import hashlib, json, os, subprocess, sys

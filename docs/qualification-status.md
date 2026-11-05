@@ -6,7 +6,7 @@
 
 ## 0.2.0 的来源与验收范围
 
-0.2.0 的 Windows 原生包使用 `native/build-lock.O165-P19-source.json`，SHA256 为 `163f6e61d605adf7d7698835f33b99d48c5cb25f017b8231f5062bd0ffb0a543`。网关协议依赖固定 CDS 0.6.10，提交 `6d6ccd32c92d06fc52ecd72712140f24496c30a2`。正式资产的实际来源、安装与 App 验收结果，以对应发行页和版本验收记录核对。
+0.2.0 的 Windows 原生包使用 `native/build-lock.O165-P20-source.json`，SHA256 为 `7b87ee474a85eacf31b206777ef152a84069ae5c5d03f7522b8f36fa13353735`。网关协议依赖固定 CDS 0.6.10，提交 `6d6ccd32c92d06fc52ecd72712140f24496c30a2`。正式资产的实际来源、安装与 App 验收结果，以对应发行页和版本验收记录核对。
 
 沿用固定版本的 37 项合同。R17（server queue）、R35（额外 UAC/secure desktop）、R36（IAB/CUA）是条件项。R25 的原版 Windows `restore_worktree` 保留同版本负向对照。P7 的历史效果按具体组件与配置承接。本轮核验涵盖：
 
