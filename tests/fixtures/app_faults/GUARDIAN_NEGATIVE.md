@@ -127,6 +127,8 @@ note, production bridge conversion, loopback synthetic responses, and strict
 positive/negative assertions. It makes zero real model requests, reads no WinCred,
 starts no native/App, and never executes the injected deletion. It asserts source
 hashes unchanged and removes only its newly created directory after success.
+The Guardian fixture validates the SHA-256 of the adjacent `fault_server.py` before use. This checkout pins `a6bd2756523109b9ca40bf57d1c7e60b04086e0ed09894f40dd4feb0f25e7308`. Its two added wire failure cases are exercised by the fault suite. The preceding Guardian run used `fc829866537883fa42711a912f5364574aff751407a3441cc8cb7a2eeea602ad` and remains bound to that source.
+
 Earlier frozen runs retain their original sources. QA protocol revision 2 adds a shared, explicitly synthetic plaintext reasoning item before the scripted primary call; no real model reasoning or verdict is fabricated. Call identity, action arguments, one-shot consumption and the original fault/approval controls remain unchanged.
 
 Use the existing authenticated stop action. Confirm the recorded exact PID and
