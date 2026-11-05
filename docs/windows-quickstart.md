@@ -206,3 +206,5 @@ Rollback 按原始/已应用/当前内容恢复登记的配置字段，保留后
 正常 app-configure 自动登记检查点。仅低层 configure-app 得到未登记 checkpoint 时，使用 `-Action RegisterCheckpoint -Checkpoint <实际checkpoint.json> -InstallRoot $managed`；不要手造检查点。临时操作者设置若不在托管字段内，应保留单独逐字段 CAS 记录，恢复时仅还原自己实际改动且当前仍等于自己的值。
 
 Uninstall 先用原生规则清理本项目自有 namespace，再由独立 Python 两阶段清理文件，默认保留工程、会话、凭据、数据 home 与恢复输入。未知 owner、活任务、冲突或权限不足会停止，不切 full access/改防护绕过。`uninstalled_cleanup_pending` 按同一回执重试收尾；原生清理未知时先检查，必要时才显式 `-RetryNativeCleanup`，不能把未知当完成。
+
+工程需要 Python 本机回环时，可按[命名权限与原生 Windows 设置](windows-local-python-profile.md)配置并从实际 App 验证。
