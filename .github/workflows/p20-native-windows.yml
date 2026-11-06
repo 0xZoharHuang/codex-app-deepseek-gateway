@@ -1,0 +1,65 @@
+name: P20 Windows native candidate
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/p20-hosted-ci-*']
+    paths: ['.github/workflows/p20-native-windows.yml', 'scripts/ci/**', 'scripts/build_native.py', 'scripts/package_native_release.py', 'native/**']
+permissions:
+  contents: read
+concurrency:
+  group: p20-native-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  native:
+    if: ${{ !github.event.repository.private && startsWith(github.ref, 'refs/heads/codex/p20-hosted-ci-') }}
+    runs-on: windows-2022
+    # Cargo 120m, native-unit compile 30m, assembly 30m; setup/transfer are separate.
+    timeout-minutes: 200
+    env:
+      CI_P20_ROOT: C:\cagp20-${{ github.run_id }}-${{ github.run_attempt }}
+      CI_REPOSITORY_VISIBILITY: public
+      OTEL_SDK_DISABLED: 'true'
+      VSCMD_SKIP_SENDTELEMETRY: '1'
+    steps:
+      - name: Checkout candidate source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Reclaim only disposable hosted-runner tools
+        shell: pwsh
+        run: ./scripts/ci/p20-hosted-tools.ps1 -Mode Space
+      - name: Python for build control only
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.13'
+          architecture: x64
+      - name: Install pinned controller dependency
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check --no-input --no-deps --only-binary=:all: --require-hashes -r scripts/ci/requirements-windows.txt
+      - name: Select exact Rust and native MSVC SDK environment
+        shell: pwsh
+        run: ./scripts/ci/p20-hosted-tools.ps1 -Mode Toolchain
+      - name: Verify public inputs and normal P20 plan
+        shell: pwsh
+        run: python -I -B -u scripts/ci/p20-windows.py prepare --root "$env:CI_P20_ROOT"
+      - name: Normal single Cargo invocation for all six native targets
+        shell: pwsh
+        run: python -I -B -u scripts/ci/p20-windows.py build --root "$env:CI_P20_ROOT"
+      - name: Compile and run the exact eighteen component tests
+        shell: pwsh
+        run: python -I -B -u scripts/ci/p20-windows.py unit --root "$env:CI_P20_ROOT"
+      - name: Normal clean-source native assembly
+        shell: pwsh
+        run: python -I -B -u scripts/ci/p20-windows.py package --root "$env:CI_P20_ROOT"
+      - name: Upload scoped candidate and original evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: p20-native-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.CI_P20_ROOT }}/delivery/**
+            ${{ env.CI_P20_ROOT }}/evidence/**
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 0

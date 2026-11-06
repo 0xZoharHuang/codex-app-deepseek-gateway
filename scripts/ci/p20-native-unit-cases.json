@@ -1,0 +1,20 @@
+[
+  "wfp::legacy_loopback_migration::tests::historical_golden_key_matches_independent_old_generator",
+  "wfp::legacy_loopback_migration::tests::legal_old_ipv4_ipv6_inbound_udp_and_proxy_complement_ranges_are_recognized",
+  "wfp::legacy_loopback_migration::tests::another_user_or_extra_descriptor_grant_is_never_retired",
+  "wfp::legacy_loopback_migration::tests::namespace_provider_and_dedicated_sublayer_collisions_are_rejected",
+  "wfp::legacy_loopback_migration::tests::modified_key_or_port_range_is_not_a_historical_rule",
+  "wfp::legacy_loopback_migration::tests::unknown_disabled_nonblock_and_newer_rule_shapes_are_preserved_by_rejection",
+  "wfp::legacy_loopback_migration::tests::malformed_range_and_unknown_layer_never_authorize_deletion",
+  "wfp::legacy_loopback_migration::tests::only_complete_atomic_historical_collections_are_retired",
+  "wfp::legacy_loopback_migration::tests::runtime_sublayer_weight_does_not_replace_exact_ownership_checks",
+  "setup::tests::legacy_matching_network_markers_still_require_p20_migration",
+  "wfp::loopback_policy::tests::empty_proxy_set_blocks_every_tcp_port",
+  "wfp::loopback_policy::tests::ports_zero_duplicates_and_extremes_preserve_exact_complement",
+  "wfp::loopback_policy::tests::each_port_is_either_explicitly_allowed_or_blocked_once",
+  "wfp::loopback_policy::tests::explicitly_allowing_all_ports_leaves_no_tcp_block",
+  "wfp::loopback_policy::tests::local_binding_removes_all_loopback_restrictions",
+  "wfp::loopback_policy::tests::proxy_tcp_exceptions_never_allow_udp_and_keys_do_not_alias",
+  "helper_materialization::copy::tests::copy_replaces_cached_bytes_when_size_and_timestamps_match",
+  "helper_materialization::copy::tests::locked_stale_helper_is_preserved_until_replacement_can_succeed"
+]
