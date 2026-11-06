@@ -1,0 +1,41 @@
+# Native patches are hash-pinned data; preserve bytes and unified-diff context lines.
+native/*.patch -text whitespace=-blank-at-eol
+native/build-lock.json text eol=lf
+
+# Byte-attested gateway payload inputs.
+# Preserve manifest bytes independent of core.autocrlf; byte changes require normal release staging.
+src/codex_app_deepseek/__init__.py -text
+src/codex_app_deepseek/app_config.py -text
+src/codex_app_deepseek/app_delivery.py -text
+src/codex_app_deepseek/bridge.py -text
+src/codex_app_deepseek/catalog.py -text
+src/codex_app_deepseek/cli.py -text
+src/codex_app_deepseek/credentials.py -text
+src/codex_app_deepseek/firecrawl_backend.py -text
+src/codex_app_deepseek/gateway_policy.py -text
+src/codex_app_deepseek/image_call_reconciliation.py -text
+src/codex_app_deepseek/image_maintenance.py -text
+src/codex_app_deepseek/image_transport.py -text
+src/codex_app_deepseek/isolated_app.py -text
+src/codex_app_deepseek/lifecycle.py -text
+src/codex_app_deepseek/native_cleanup.py -text
+src/codex_app_deepseek/paths.py -text
+src/codex_app_deepseek/protocol_state.py -text
+src/codex_app_deepseek/upstream_evidence.py -text
+src/codex_app_deepseek/web_backend.py -text
+native/app-launch-baseline.json -text
+scripts/launch_isolated_app.ps1 -text
+src/codex_app_deepseek/assets/app-launch-baseline.json -text
+src/codex_app_deepseek/assets/launch_isolated_app.ps1 -text
+src/codex_app_deepseek/atomic_io.py -text
+src/codex_app_deepseek/weather_backend.py -text
+
+# Byte-preserved build lock witnesses and historical SDK reader receipts.
+native/build-lock.O165-P17-source.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+native/build-lock.O165-P18-source.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+native/build-lock.O165-P19-source.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+native/runtime-msix-proposal/manifest-reader-validation.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+native/runtime-msix-proposal/manifest-validation-only/initial-manifest-reader-validation.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+# The finalizer diff itself has a checksum-bound trailing context line.
+native/cadsg-native-service-finalizer-0165.patch -text whitespace=-blank-at-eol,-blank-at-eof
+src/codex_app_deepseek/runtime_package.py -text

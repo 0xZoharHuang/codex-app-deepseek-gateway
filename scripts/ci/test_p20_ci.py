@@ -1,6 +1,6 @@
 """Offline CI safety/configuration checks; never build or reclaim hosted tools."""
 from pathlib import Path
-import importlib.util, os, re, subprocess, sys, tempfile, unittest
+import importlib.util, os, re, shutil, subprocess, sys, tempfile, unittest
 SCRIPT=Path(__file__).with_name("p20-windows.py")
 spec=importlib.util.spec_from_file_location("p20_ci_test_target",SCRIPT)
 ci=importlib.util.module_from_spec(spec);spec.loader.exec_module(ci)
@@ -47,6 +47,63 @@ class Safety(unittest.TestCase):
         self.assertEqual(result["CARGO_HOME"],"keep-cargo")
         self.assertEqual(result["RUSTY_V8_ARCHIVE"],"keep-v8")
         self.assertFalse(any(k.startswith(("ACTIONS_","GITHUB_","GH_","OPENAI_","OPENROUTER_","ANTHROPIC_"))for k in result))
+    def test_real_git_autocrlf_checkout_preserves_pinned_blob_bytes(self):
+        git=shutil.which("git.exe")or shutil.which("git")
+        if git is None and os.name=="nt":
+            candidate=Path(os.environ.get("ProgramFiles",r"C:\Program Files"))/"Git/cmd/git.exe"
+            if candidate.is_file():git=str(candidate)
+        self.assertIsNotNone(git,"Real Git is required for byte roundtrip admission")
+        with tempfile.TemporaryDirectory(prefix="p20-git-byte-roundtrip-")as temporary:
+            temp=Path(temporary);empty=temp/"empty";empty.mkdir()
+            global_config=temp/"empty.gitconfig";global_config.write_bytes(b"")
+            env=ci.clean_environment()
+            for key in list(env):
+                if key.startswith("GIT_"):env.pop(key)
+            env.update(GIT_CONFIG_NOSYSTEM="1",GIT_CONFIG_GLOBAL=str(global_config),
+                       GIT_ATTR_NOSYSTEM="1",XDG_CONFIG_HOME=str(empty))
+            def run(root,*args,data=None):
+                result=subprocess.run([git,"-c",f"core.hooksPath={empty}","-C",str(root),*args],
+                                      input=data,capture_output=True,env=env)
+                self.assertEqual(result.returncode,0,result.stderr.decode("utf8",errors="replace"))
+                return result.stdout
+            names=run(ci.REPO,"ls-files","-z","--","native","scripts/build_native.py",
+                      "scripts/package_native_release.py","scripts/ci").decode().split("\0")
+            names=[n for n in names if n and(n.endswith(".patch")or
+                   re.fullmatch(r"native/build-lock\..*-source\.json",n)or
+                   n in("scripts/build_native.py","scripts/package_native_release.py")or
+                   n.startswith("scripts/ci/"))]
+            self.assertIn("native/build-lock.O165-P20-source.json",names)
+            source=run(ci.REPO,"cat-file","--batch",
+                       data="".join("HEAD:"+n+"\n"for n in names).encode())
+            blobs={};cursor=0
+            for name in names:
+                end=source.index(b"\n",cursor);header=source[cursor:end].split()
+                self.assertEqual(header[1],b"blob")
+                size=int(header[2]);cursor=end+1
+                blobs[name]=source[cursor:cursor+size];cursor+=size+1
+            def checkout(label,attributes):
+                repo=temp/label;repo.mkdir()
+                run(repo,"init","--quiet","--object-format=sha1",f"--template={empty}")
+                run(repo,"config","core.autocrlf","true")
+                run(repo,"config","core.safecrlf","false")
+                inputs={".gitattributes":attributes,**blobs}
+                for name,data in inputs.items():
+                    path=repo/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(data)
+                object_names=run(repo,"hash-object","-w","--no-filters","--stdin-paths",
+                                 data="".join(n+"\n"for n in inputs).encode()).decode().splitlines()
+                self.assertEqual(len(object_names),len(inputs))
+                entries="".join("100644 "+oid+"\t"+n+"\n"for n,oid in zip(inputs,object_names))
+                run(repo,"update-index","--add","--index-info",data=entries.encode())
+                output=temp/(label+"-checkout");output.mkdir()
+                run(repo,"checkout-index","--all","--force","--prefix="+output.as_posix()+"/")
+                return [name for name,data in blobs.items()if(output/name).read_bytes()!=data]
+            historical=(ci.REPO/"scripts/ci/pre-p20-byte-pins.gitattributes").read_bytes()
+            old_differences=checkout("historical",historical)
+            self.assertIn("native/build-lock.O165-P20-source.json",old_differences)
+            self.assertIn("scripts/build_native.py",old_differences)
+            self.assertIn("scripts/package_native_release.py",old_differences)
+            self.assertTrue(any(x.startswith("scripts/ci/")for x in old_differences))
+            self.assertEqual(checkout("fixed",(ci.REPO/".gitattributes").read_bytes()),[])
     def test_normal_builder_and_packager_not_changed(self):
         self.assertEqual(ci.sha(ci.REPO/"scripts/build_native.py"),"f6426bc41f57304f4c252267bac5d97749912e20b4033b60a6a8a9613e18d0d4")
         self.assertEqual(ci.sha(ci.REPO/"scripts/package_native_release.py"),"3ea29a1e23a66fc3aded1c24d4723853a0e238f15871cd84c544ef13797e399e")

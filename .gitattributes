@@ -39,3 +39,9 @@ native/runtime-msix-proposal/manifest-validation-only/initial-manifest-reader-va
 # The finalizer diff itself has a checksum-bound trailing context line.
 native/cadsg-native-service-finalizer-0165.patch -text whitespace=-blank-at-eol,-blank-at-eof
 src/codex_app_deepseek/runtime_package.py -text
+
+# Checksum-bound native/CI inputs must survive every checkout byte-for-byte.
+native/build-lock.*-source.json -text
+scripts/build_native.py -text
+scripts/package_native_release.py -text
+scripts/ci/* -text

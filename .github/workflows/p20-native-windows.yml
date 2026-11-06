@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches: ['codex/p20-hosted-ci-*']
-    paths: ['.github/workflows/p20-native-windows.yml', 'scripts/ci/**', 'scripts/build_native.py', 'scripts/package_native_release.py', 'native/**']
+    paths: ['.gitattributes', '.github/workflows/p20-native-windows.yml', 'scripts/ci/**', 'scripts/build_native.py', 'scripts/package_native_release.py', 'native/**']
 permissions:
   contents: read
 concurrency:
@@ -33,6 +33,9 @@ jobs:
         with:
           python-version: '3.13'
           architecture: x64
+      - name: Check CI safety and real Git byte roundtrip
+        shell: pwsh
+        run: python -I -B -m unittest discover -s scripts/ci -p test_p20_ci.py -v
       - name: Install pinned controller dependency
         shell: pwsh
         run: |
