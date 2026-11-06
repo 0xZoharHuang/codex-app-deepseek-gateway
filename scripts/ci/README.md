@@ -30,7 +30,7 @@ acceptance. Units cannot mutate the already copied production output bytes.
 Only explicit Android and cached Java/Go/Ruby/PyPy tool families may be reclaimed,
 behind GitHub-hosted/public/x64/run-ID guards. VS, SDK, Rust, Git, Python, Node,
 OS, security products and services are kept. This cannot run on shared or
-self-hosted computers. Initial free disk must reach24GiB: measured local target
+self-hosted computers. Actual free space and optional candidates are recorded before cleanup. If already at least24GiB, cleanup is skipped; otherwise unsafe/reparse families are skipped with a reason and other allowed families may be tried. Final free disk must still reach24GiB: measured local target
 was12.22GiB, Cargo+Rustup5.04GiB, so advertised14GB minimum alone is insufficient.
 
 ## Controller-only provenance

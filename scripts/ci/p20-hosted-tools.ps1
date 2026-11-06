@@ -18,34 +18,92 @@ New-Item -ItemType Directory -Path "$root\evidence" -Force | Out-Null
 
 if ($Mode -eq "Space") {
     $before = (Get-PSDrive -Name $env:SystemDrive.TrimEnd(':')).Free
-    # Explicit disposable tool families only. Preserve VS/SDK/Rust/Git/Python/
-    # Node, all security products, services and OS paths.
+    # Record actual capacity and explicit optional candidates before inspection
+    # or deletion. The documented hosted minimum is not the actual disk size.
     $paths = @("$env:SystemDrive\Android")
+    $space = [ordered]@{
+        kind="disposable-hosted-runner-only";before_bytes=$before;after_bytes=$before;
+        required_bytes=24GB;candidates=$paths;
+        candidate_families=@("Android","Java_*","Go","Ruby","PyPy");
+        decisions=@();removed=@();shared_pc_modified=$false;
+        status="capacity-recorded-before-cleanup"
+    }
+    function Save-RunnerSpace {
+        $space.after_bytes = (Get-PSDrive -Name $env:SystemDrive.TrimEnd(':')).Free
+        $space | ConvertTo-Json -Depth 6 |
+            Set-Content -Encoding utf8NoBOM "$root\evidence\runner-space.json"
+    }
+    Save-RunnerSpace
+    if ($space.after_bytes -ge 24GB) {
+        $space.status = "admitted-without-cleanup"
+        Save-RunnerSpace
+        if ($space.after_bytes -ge 24GB) { exit 0 }
+    }
     if ($env:RUNNER_TOOL_CACHE) {
-        $toolRoot = [IO.Path]::GetFullPath($env:RUNNER_TOOL_CACHE).TrimEnd('\')
-        foreach ($entry in (Get-ChildItem -LiteralPath $toolRoot -Directory)) {
-            if ($entry.Name -match '^Java_[A-Za-z0-9_-]+$' -or
-                $entry.Name -cin @("Go","Ruby","PyPy")) { $paths += $entry.FullName }
+        try {
+            $toolRoot = [IO.Path]::GetFullPath($env:RUNNER_TOOL_CACHE).TrimEnd('\')
+            foreach ($entry in (Get-ChildItem -LiteralPath $toolRoot -Directory -ErrorAction Stop)) {
+                if ($entry.Name -match '^Java_[A-Za-z0-9_-]+$' -or
+                    $entry.Name -cin @("Go","Ruby","PyPy")) { $paths += $entry.FullName }
+            }
+        } catch {
+            $space.decisions += @{path=$env:RUNNER_TOOL_CACHE;action="skip-enumeration";
+                                  reason=$_.Exception.GetType().FullName}
         }
     }
-    $deleted = @()
+    $space.candidates = $paths
+    Save-RunnerSpace
+    # VS/SDK/Rust/Git/Python/Node, OS, security products and services are not candidates.
     foreach ($path in $paths) {
-        if (-not (Test-Path -LiteralPath $path)) { continue }
-        $item = Get-Item -LiteralPath $path -Force
-        if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-            throw "Refusing redirected/non-directory tool: $path"
+        if ($space.after_bytes -ge 24GB) { break }
+        if (-not (Test-Path -LiteralPath $path)) {
+            $space.decisions += @{path=$path;action="skip";reason="absent"}
+            Save-RunnerSpace
+            continue
         }
-        if (Get-ChildItem -LiteralPath $path -Force -Recurse -ErrorAction Stop |
-            Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint } |
-            Select-Object -First 1) { throw "Refusing tool tree containing a reparse point: $path" }
-        Remove-Item -LiteralPath $path -Recurse -Force
-        $deleted += $path
+        try {
+            $item = Get-Item -LiteralPath $path -Force
+            if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                $space.decisions += @{path=$path;action="skip";reason="redirected-or-not-directory"}
+                Save-RunnerSpace
+                continue
+            }
+            # Enumerate one directory at a time. Never push a reparse directory,
+            # so neither inspection nor recursive deletion crosses a link.
+            $pending = [Collections.Generic.Stack[IO.DirectoryInfo]]::new()
+            $pending.Push($item)
+            $reparse = $null
+            while ($pending.Count -gt 0 -and -not $reparse) {
+                $directory = $pending.Pop()
+                foreach ($child in (Get-ChildItem -LiteralPath $directory.FullName -Force -ErrorAction Stop)) {
+                    if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                        $reparse = $child.FullName
+                        break
+                    }
+                    if ($child.PSIsContainer) { $pending.Push($child) }
+                }
+            }
+            if ($reparse) {
+                $space.decisions += @{path=$path;action="skip";reason="contains-reparse";first_reparse=$reparse}
+                Save-RunnerSpace
+                continue
+            }
+            Remove-Item -LiteralPath $path -Recurse -Force
+            $space.removed += $path
+            $space.decisions += @{path=$path;action="removed";reason="plain-allowlisted-tool-family"}
+        } catch {
+            # Optional tool families are not a prerequisite. Preserve the
+            # original inspection/deletion error and try other allowed families.
+            $space.decisions += @{path=$path;action="skip-after-error";
+                                  reason=$_.Exception.GetType().FullName}
+        }
+        Save-RunnerSpace
     }
-    $after = (Get-PSDrive -Name $env:SystemDrive.TrimEnd(':')).Free
-    @{kind="disposable-hosted-runner-only";before_bytes=$before;after_bytes=$after;
-      removed=$deleted;shared_pc_modified=$false} |
-        ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8NoBOM "$root\evidence\runner-space.json"
-    if ($after -lt 24GB) { throw "Need 24 GiB free for source, Cargo, target, candidate and assembly." }
+    $space.status = if ($space.after_bytes -ge 24GB) { "admitted" } else { "insufficient-space" }
+    Save-RunnerSpace
+    if ($space.after_bytes -lt 24GB) {
+        throw "Need 24 GiB free for source, Cargo, target, candidate and assembly."
+    }
     exit 0
 }
 
