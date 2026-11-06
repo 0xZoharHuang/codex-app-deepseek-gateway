@@ -36,8 +36,40 @@ class Safety(unittest.TestCase):
         text=(ci.REPO/".github/workflows/p20-native-windows.yml").read_text()
         self.assertIn("runs-on: windows-2022",text);self.assertIn("contents: read",text)
         self.assertNotIn("secrets.",text);self.assertNotIn("id-token:",text)
-        uses=re.findall(r"uses:\s+(\S+)",text);self.assertEqual(len(uses),3)
-        self.assertTrue(all(re.fullmatch(r"actions/[a-z-]+@[0-9a-f]{40}",x)for x in uses))
+        uses=re.findall(r"uses:\s+(\S+)",text);self.assertEqual(len(uses),5)
+        self.assertTrue(all(re.fullmatch(r"actions/(?:[a-z-]+|cache/(?:restore|save))@[0-9a-f]{40}",x)for x in uses))
+    def test_parallelism_and_stable_performance_cache(self):
+        self.assertEqual(ci.build_jobs({}),2)
+        self.assertEqual(ci.build_jobs({"CI_P20_BUILD_JOBS":"1"}),1)
+        for value in ("0","3","auto",""):
+            with self.subTest(value=value),self.assertRaises(ValueError):
+                ci.build_jobs({"CI_P20_BUILD_JOBS":value})
+        first=ci.cache_paths(Path("C:/cagp20-123-1"))
+        self.assertEqual(first,ci.cache_paths(Path("C:/cagp20-987-2")))
+        self.assertEqual(first[1],first[0]/"target")
+        text=(ci.REPO/".github/workflows/p20-native-windows.yml").read_text()
+        self.assertIn("actions/cache/restore@",text);self.assertIn("actions/cache/save@",text)
+        self.assertIn("always() && !cancelled()",text)
+        self.assertIn("CI_P20_BUILD_JOBS: '2'",text)
+    def test_normal_raw_schema_is_binaries_and_not_prepared_outputs(self):
+        import hashlib,copy
+        with tempfile.TemporaryDirectory()as directory:
+            root=Path(directory);(root/"native-producer").mkdir()
+            rows=[]
+            for name in sorted(ci.BINS):
+                raw=("synthetic-"+name).encode();(root/"native-producer"/name).write_bytes(raw)
+                rows.append({"file":name,"sha256":hashlib.sha256(raw).hexdigest()})
+            good={"source_sha256":ci.SOURCE,"build_lock_sha256":ci.LOCK,
+                  "status":"built-not-app-qualified","binaries":rows}
+            ci.verify_normal_outputs(root,good)
+            for change in ("prepared","missing","hash","source"):
+                bad=copy.deepcopy(good)
+                if change=="prepared":bad["outputs"]=bad.pop("binaries")
+                elif change=="missing":bad["binaries"].pop()
+                elif change=="hash":bad["binaries"][0]["sha256"]="0"*64
+                else:bad["source_sha256"]="0"*64
+                with self.subTest(change=change),self.assertRaises((ValueError,KeyError)):
+                    ci.verify_normal_outputs(root,bad)
     def test_third_party_build_and_unit_environment_excludes_action_and_model_credentials(self):
         supplied={"PATH":"keep","CARGO_HOME":"keep-cargo","RUSTY_V8_ARCHIVE":"keep-v8",
                   "ACTIONS_RUNTIME_TOKEN":"dummy","GITHUB_TOKEN":"dummy","GH_TOKEN":"dummy",

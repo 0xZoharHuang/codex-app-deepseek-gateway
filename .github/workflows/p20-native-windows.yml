@@ -18,6 +18,7 @@ jobs:
     env:
       CI_P20_ROOT: C:\cagp20-${{ github.run_id }}-${{ github.run_attempt }}
       CI_REPOSITORY_VISIBILITY: public
+      CI_P20_BUILD_JOBS: '2'
       OTEL_SDK_DISABLED: 'true'
       VSCMD_SKIP_SENDTELEMETRY: '1'
     steps:
@@ -43,6 +44,17 @@ jobs:
       - name: Select exact Rust and native MSVC SDK environment
         shell: pwsh
         run: ./scripts/ci/p20-hosted-tools.ps1 -Mode Toolchain
+      - name: Restore native dependency and target build cache
+        id: p20-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            C:/cagp20-native-cache-v1/cargo/registry
+            C:/cagp20-native-cache-v1/cargo/git
+            C:/cagp20-native-cache-v1/target
+          key: p20-native-v1-${{ runner.os }}-rust1.99.1-msvc${{ env.VCToolsVersion }}-sdk${{ env.UCRTVersion }}-${{ hashFiles('native/build-lock.O165-P20-source.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            p20-native-v1-${{ runner.os }}-rust1.99.1-msvc${{ env.VCToolsVersion }}-sdk${{ env.UCRTVersion }}-${{ hashFiles('native/build-lock.O165-P20-source.json') }}-
       - name: Verify public inputs and normal P20 plan
         shell: pwsh
         run: python -I -B -u scripts/ci/p20-windows.py prepare --root "$env:CI_P20_ROOT"
@@ -55,6 +67,15 @@ jobs:
       - name: Normal clean-source native assembly
         shell: pwsh
         run: python -I -B -u scripts/ci/p20-windows.py package --root "$env:CI_P20_ROOT"
+      - name: Save build intermediates even after producer failure
+        if: ${{ always() && !cancelled() && steps.p20-cache.outcome == 'success' }}
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            C:/cagp20-native-cache-v1/cargo/registry
+            C:/cagp20-native-cache-v1/cargo/git
+            C:/cagp20-native-cache-v1/target
+          key: ${{ steps.p20-cache.outputs.cache-primary-key }}
       - name: Upload scoped candidate and original evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0

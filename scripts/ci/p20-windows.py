@@ -110,8 +110,12 @@ def checksum_lines(data):
 
 def prepare(root):
     lock, builder, cases = plan()
-    for name in ("inputs", "cache", "cache/cargo", "target", "delivery"):
+    for name in ("inputs", "delivery"):
         (root / name).mkdir(exist_ok=False)
+    cache, target = cache_paths(root)
+    for path in (cache, cache / "cargo", target):
+        require(path.resolve() == path.absolute() and not path.is_symlink(), "Build cache redirected")
+        path.mkdir(parents=True, exist_ok=True)
     require(shutil.disk_usage(root).free >= 24 * 1024**3, "Twenty-four GiB disk admission required")
     commit = lock["upstream_commit"]
     archive = root / "inputs/upstream.tar.gz"
@@ -163,6 +167,8 @@ def prepare(root):
         "normal_packager_sha256": sha(REPO / "scripts/package_native_release.py"),
         "CDS_observer_only_commit": CDS_CI, "observer_runtime_imported": False,
         "rustc": rust, "cargo": cargo_version,
+        "performance_cache": {"root": str(cache), "target": str(target), "authoritative_build_evidence": False},
+        "build_jobs": build_jobs(),
         "initial_memory": psutil.virtual_memory()._asdict(), "unit_cases": cases,
         "App_GUI_qualified": False, "stable_publication": False})
 
@@ -213,31 +219,49 @@ def clean_environment(environment=None):
     result["VSCMD_SKIP_SENDTELEMETRY"] = "1"
     return result
 
+
+def cache_paths(root):
+    # Source, build-owner records, final outputs and evidence stay fresh per run.
+    cache = Path(root.anchor) / "cagp20-native-cache-v1"
+    return cache, cache / "target"
+
+def build_jobs(environment=None):
+    value = (os.environ if environment is None else environment).get("CI_P20_BUILD_JOBS", "2")
+    require(value in {"1", "2"}, "Only one or two native build jobs are allowed")
+    return int(value)
+
+def verify_normal_outputs(root, manifest):
+    require(manifest["source_sha256"] == SOURCE and manifest["build_lock_sha256"] == LOCK
+            and manifest["status"] == "built-not-app-qualified",
+            "Normal producer source or status differs")
+    rows = manifest["binaries"]
+    require(len(rows) == 6 and {row["file"] for row in rows} == BINS,
+            "All six raw same-source binaries required")
+    for row in rows:
+        require(sha(root / "native-producer" / row["file"]) == row["sha256"],
+                "Normal native bytes differ")
+
+
 def build(root):
     lock, builder, cases = plan()
     require((root / "evidence/inputs.json").is_file(), "Verified inputs required")
     require(not (root / "work").exists() and not (root / "native-producer").exists(),
             "A fresh owned build is required; never overwrite a previous candidate")
     toolchain = Path(os.environ["CI_RUST_TOOLCHAIN_BIN"])
+    cache, target = cache_paths(root); jobs = build_jobs()
     command = [sys.executable, "-I", "-B", str(REPO / "scripts/build_native.py"),
                "--archive", str(root / "inputs/upstream.tar.gz"),
                "--work-dir", str(root / "work"), "--toolchain-bin", str(toolchain),
-               "--cache-dir", str(root / "cache"), "--target-dir", str(root / "target"),
+               "--cache-dir", str(cache), "--target-dir", str(target),
                "--build-lock", str(REPO / "native/build-lock.O165-P20-source.json"),
-               "--jobs", "1", "--rusty-v8-dir", str(root / "inputs/rusty-v8"),
+               "--jobs", str(jobs), "--rusty-v8-dir", str(root / "inputs/rusty-v8"),
                "--output", str(root / "native-producer")]
     observe(command, root, REPO, clean_environment(), "normal-six-build", 7200)
     report = load(root / "work/build-report.json")
     require(report["status"] == "passed" and report["build_lock_sha256"] == LOCK
-            and report["effective_build_jobs"] == 1, "Normal producer did not pass")
+            and report["effective_build_jobs"] == jobs, "Normal producer did not pass")
     manifest = load(root / "native-producer/manifest.json")
-    require(manifest["source_sha256"] == SOURCE and manifest["build_lock_sha256"] == LOCK
-            and len(manifest["outputs"]) == 6
-            and {x["name"] for x in manifest["outputs"]} == BINS,
-            "All six normal same-source outputs required")
-    for entry in manifest["outputs"]:
-        require(sha(root / "native-producer" / entry["name"]) == entry["sha256"],
-                "Normal native bytes differ")
+    verify_normal_outputs(root, manifest)
     for name in ("build-report.json", "source-manifest.json", "build-owner.json"):
         shutil.copyfile(root / "work" / name, root / "evidence" / name)
     save(root / "evidence/normal-source-binding.json", {
@@ -249,12 +273,13 @@ def unit(root):
     lock, builder, cases = plan()
     require(load(root / "evidence/normal-six-build.json")["passed"], "Normal six-target producer required")
     toolchain = Path(os.environ["CI_RUST_TOOLCHAIN_BIN"])
+    cache, target = cache_paths(root); jobs = build_jobs()
     environment = clean_environment(builder.build_environment(
-        root / "work", toolchain, root / "cache", target_dir=root / "target"))
-    environment["CARGO_BUILD_JOBS"] = "1"
+        root / "work", toolchain, cache, target_dir=target))
+    environment["CARGO_BUILD_JOBS"] = str(jobs)
     environment.update(builder.verified_rusty_v8_inputs(
         root / "work/source", root / "inputs/rusty-v8", lock["target"])["environment"])
-    command = [str(toolchain / "cargo.exe"), "test", "--locked", "--release", "--jobs", "1",
+    command = [str(toolchain / "cargo.exe"), "test", "--locked", "--release", "--jobs", str(jobs),
                "-p", "codex-windows-sandbox", "--lib", "--no-run",
                "--message-format=json-render-diagnostics"]
     observe(command, root, root / "work/source/codex-rs", environment, "native-unit-compile", 1800)
@@ -273,7 +298,7 @@ def unit(root):
             finished.append(message.get("success"))
     require(len(artifacts) == 1 and finished == [True], "Unique genuine native libtest artifact required")
     executable = Path(artifacts[0]["executable"])
-    require(executable.is_relative_to(root / "target") and executable.is_file(), "Unit artifact outside target")
+    require(executable.is_relative_to(target) and executable.is_file(), "Unit artifact outside target")
     sealed = root / "delivery/unit/codex-windows-sandbox-p20-libtest.exe"
     sealed.parent.mkdir(parents=True)
     shutil.copyfile(executable, sealed)
@@ -311,7 +336,7 @@ def package(root):
                "--source-root", str(root / "work/source"),
                "--native-manifest", str(manifest), "--native-manifest-sha256", sha(manifest),
                "--build-lock", str(REPO / "native/build-lock.O165-P20-source.json"),
-               "--cargo", str(toolchain / "cargo.exe"), "--cargo-home", str(root / "cache/cargo"),
+               "--cargo", str(toolchain / "cargo.exe"), "--cargo-home", str(cache_paths(root)[0] / "cargo"),
                "--git", shutil.which("git.exe"), "--output", str(root / "assembled"),
                "--evidence-dir", str(root / "evidence/normal-assembly")]
     observe(command, root, REPO, clean_environment(), "normal-package", 1800)
