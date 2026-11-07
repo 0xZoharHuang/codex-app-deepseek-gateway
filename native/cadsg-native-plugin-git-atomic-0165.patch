@@ -1,0 +1,1058 @@
+diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
+index f35b2cdbb33c9577ef58a1d19a9d034d735781c4..6f02665cefba2c25389fe89ed68588f9e37bea6a 100644
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -3137,6 +3137,7 @@ dependencies = [
+  "codex-utils-path",
+  "codex-utils-path-uri",
+  "codex-utils-plugins",
++ "codex-utils-pty",
+  "codex-utils-process",
+  "dirs",
+  "flate2",
+diff --git a/codex-rs/core-plugins/Cargo.toml b/codex-rs/core-plugins/Cargo.toml
+index 3025c3a62b67f370cff4b55164d7c65e2c5ed850..ec2199f797f76da46997788431875bb12aac5f93 100644
+--- a/codex-rs/core-plugins/Cargo.toml
++++ b/codex-rs/core-plugins/Cargo.toml
+@@ -58,6 +58,9 @@ url = { workspace = true }
+ uuid = { workspace = true, features = ["v4"] }
+ zip = { workspace = true }
+ 
++[target.'cfg(windows)'.dependencies]
++codex-utils-pty = { workspace = true }
++
+ [dev-dependencies]
+ codex-exec-server-test-support = { workspace = true }
+ codex-utils-cargo-bin = { workspace = true }
+diff --git a/codex-rs/core-plugins/src/git_lifetime_windows_tests.rs b/codex-rs/core-plugins/src/git_lifetime_windows_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..6bf2b5dad904ec1c197278b8f798ba139063acf7
+--- /dev/null
++++ b/codex-rs/core-plugins/src/git_lifetime_windows_tests.rs
+@@ -0,0 +1,378 @@
++//! Exercises the real plugin Git runner with a child that retains inherited pipes.
++use super::run_git_command_with_timeout;
++use std::fs;
++use std::io::Write;
++use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
++use std::path::{Path, PathBuf};
++use std::process::{Command, Stdio};
++use std::time::{Duration, Instant};
++
++const PHASE: &str = "CODEX_TEST_PLUGIN_GIT_LIFETIME_PHASE";
++const ROOT: &str = "CODEX_TEST_PLUGIN_GIT_LIFETIME_ROOT";
++
++#[repr(C)]
++#[derive(Default)]
++struct FileTime {
++    low: u32,
++    high: u32,
++}
++
++#[link(name = "kernel32")]
++unsafe extern "system" {
++    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
++    fn WaitForSingleObject(handle: *mut std::ffi::c_void, milliseconds: u32) -> u32;
++    fn CreateEventW(
++        attributes: *mut std::ffi::c_void,
++        manual: i32,
++        initial: i32,
++        name: *const u16,
++    ) -> *mut std::ffi::c_void;
++    fn SetEvent(event: *mut std::ffi::c_void) -> i32;
++    fn SetHandleInformation(handle: *mut std::ffi::c_void, mask: u32, flags: u32) -> i32;
++    fn TerminateProcess(handle: *mut std::ffi::c_void, exit_code: u32) -> i32;
++    fn GetCurrentProcess() -> *mut std::ffi::c_void;
++    fn GetProcessTimes(
++        handle: *mut std::ffi::c_void,
++        created: *mut FileTime,
++        exited: *mut FileTime,
++        kernel: *mut FileTime,
++        user: *mut FileTime,
++    ) -> i32;
++}
++
++fn creation_time(handle: *mut std::ffi::c_void) -> u64 {
++    let (mut created, mut exited, mut kernel, mut user) = (
++        FileTime::default(),
++        FileTime::default(),
++        FileTime::default(),
++        FileTime::default(),
++    );
++    assert_ne!(
++        unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) },
++        0
++    );
++    (u64::from(created.high) << 32) | u64::from(created.low)
++}
++
++fn write_leaf_identity(root: &Path) {
++    let birth = creation_time(unsafe { GetCurrentProcess() });
++    fs::write(
++        root.join("leaf.tmp"),
++        format!("{}:{birth}", std::process::id()),
++    )
++    .expect("leaf identity");
++    fs::rename(root.join("leaf.tmp"), root.join("leaf.pid")).expect("publish leaf identity");
++}
++
++struct LeafHandle(OwnedHandle);
++impl LeafHandle {
++    fn exited(&self) -> bool {
++        unsafe { WaitForSingleObject(self.0.as_raw_handle(), 2000) == 0 }
++    }
++}
++impl Drop for LeafHandle {
++    fn drop(&mut self) {
++        if unsafe { WaitForSingleObject(self.0.as_raw_handle(), 0) } != 0 {
++            // Preserve failure while cleaning only the fixture process captured before ack.
++            unsafe { TerminateProcess(self.0.as_raw_handle(), 1) };
++        }
++    }
++}
++
++fn wait_path(path: &Path) {
++    let deadline = Instant::now() + Duration::from_secs(10);
++    while !path.exists() {
++        assert!(Instant::now() < deadline, "fixture handshake timed out");
++        std::thread::sleep(Duration::from_millis(10));
++    }
++}
++
++fn command(name: &str, root: &Path, phase: &str) -> Command {
++    let mut command = Command::new(std::env::current_exe().expect("current test executable"));
++    command
++        .args(["--exact", name, "--nocapture"])
++        .env(PHASE, phase)
++        .env(ROOT, root);
++    command
++}
++
++fn fixture(name: &str) -> bool {
++    let Ok(phase) = std::env::var(PHASE) else {
++        return false;
++    };
++    let root = PathBuf::from(std::env::var_os(ROOT).expect("fixture root"));
++    if phase == "leaf" {
++        write_leaf_identity(&root);
++        wait_path(&root.join("leaf.ack"));
++        std::thread::sleep(Duration::from_secs(60));
++        return true;
++    }
++    if phase == "nonzero" {
++        println!("PLUGIN_STDOUT");
++        eprintln!("PLUGIN_STDERR");
++        std::io::stdout().flush().expect("flush stdout");
++        std::io::stderr().flush().expect("flush stderr");
++        std::process::exit(7);
++    }
++    let _leaf = command(name, &root, "leaf")
++        .stdin(Stdio::null())
++        .stdout(Stdio::inherit())
++        .stderr(Stdio::inherit())
++        .spawn()
++        .expect("spawn fixture leaf");
++    wait_path(&root.join("leaf.ack"));
++    println!("PLUGIN_STDOUT");
++    eprintln!("PLUGIN_STDERR");
++    std::io::stdout().flush().expect("flush stdout");
++    std::io::stderr().flush().expect("flush stderr");
++    if phase == "timeout" {
++        std::thread::sleep(Duration::from_secs(60));
++    }
++    true
++}
++
++fn observe_leaf(root: &Path) -> LeafHandle {
++    wait_path(&root.join("leaf.pid"));
++    // The leaf cannot exit before this ack, so capture its kernel handle before the root exits.
++    let deadline = Instant::now() + Duration::from_secs(5);
++    let (pid, birth) = loop {
++        if let Ok(text) = fs::read_to_string(root.join("leaf.pid"))
++            && let Some((pid, birth)) = text.split_once(':')
++            && let (Ok(pid), Ok(birth)) = (pid.parse::<u32>(), birth.parse::<u64>())
++        {
++            break (pid, birth);
++        }
++        assert!(
++            Instant::now() < deadline,
++            "invalid or incomplete fixture identity"
++        );
++        std::thread::sleep(Duration::from_millis(1));
++    };
++    let raw = unsafe { OpenProcess(0x0010_1001, 0, pid) }; // SYNCHRONIZE | QUERY_LIMITED_INFORMATION | TERMINATE
++    assert!(
++        !raw.is_null(),
++        "open exact fixture process: {}",
++        std::io::Error::last_os_error()
++    );
++    let owned = unsafe { OwnedHandle::from_raw_handle(raw) };
++    // Do not construct the cleanup guard until the captured kernel identity is verified.
++    assert_eq!(
++        creation_time(owned.as_raw_handle()),
++        birth,
++        "fixture PID was reused"
++    );
++    assert_eq!(
++        unsafe { WaitForSingleObject(owned.as_raw_handle(), 0) },
++        258,
++        "fixture exited before ack"
++    );
++    let handle = LeafHandle(owned);
++    fs::write(root.join("leaf.ack"), b"observed").expect("ack fixture identity");
++    handle
++}
++
++#[test]
++fn root_exit_reaps_descendants_before_collecting_output() {
++    let full_name = concat!(
++        module_path!(),
++        "::root_exit_reaps_descendants_before_collecting_output"
++    );
++    let name = full_name
++        .split_once("::")
++        .expect("crate-qualified test module")
++        .1;
++    if fixture(name) {
++        return;
++    }
++    let root = tempfile::tempdir().expect("fixture root");
++    std::thread::scope(|scope| {
++        let observer = scope.spawn(|| observe_leaf(root.path()));
++        let started = Instant::now();
++        let output = run_git_command_with_timeout(
++            &mut command(name, root.path(), "success"),
++            "owned plugin test",
++            Duration::from_secs(2),
++        )
++        .expect("successful root");
++        let leaf = observer.join().expect("leaf observer");
++        assert!(started.elapsed() < Duration::from_secs(5));
++        assert!(output.status.success());
++        assert!(String::from_utf8_lossy(&output.stdout).contains("PLUGIN_STDOUT"));
++        assert!(String::from_utf8_lossy(&output.stderr).contains("PLUGIN_STDERR"));
++        assert!(leaf.exited(), "root exit left a descendant");
++    });
++}
++
++#[test]
++fn timeout_reaps_descendants_before_collecting_output() {
++    let full_name = concat!(
++        module_path!(),
++        "::timeout_reaps_descendants_before_collecting_output"
++    );
++    let name = full_name
++        .split_once("::")
++        .expect("crate-qualified test module")
++        .1;
++    if fixture(name) {
++        return;
++    }
++    let root = tempfile::tempdir().expect("fixture root");
++    std::thread::scope(|scope| {
++        let observer = scope.spawn(|| observe_leaf(root.path()));
++        let started = Instant::now();
++        let error = run_git_command_with_timeout(
++            &mut command(name, root.path(), "timeout"),
++            "owned plugin test",
++            Duration::from_secs(2),
++        )
++        .expect_err("timeout must be an error");
++        let leaf = observer.join().expect("leaf observer");
++        assert!(started.elapsed() < Duration::from_secs(5));
++        assert!(error.contains("timed out after 2s"));
++        assert!(error.contains("PLUGIN_STDERR"));
++        assert!(leaf.exited(), "timeout left a descendant");
++    });
++}
++
++#[test]
++fn nonzero_exit_preserves_status_and_both_output_streams() {
++    let full_name = concat!(
++        module_path!(),
++        "::nonzero_exit_preserves_status_and_both_output_streams"
++    );
++    let name = full_name
++        .split_once("::")
++        .expect("crate-qualified test module")
++        .1;
++    if fixture(name) {
++        return;
++    }
++    let root = tempfile::tempdir().expect("fixture root");
++    let output = run_git_command_with_timeout(
++        &mut command(name, root.path(), "nonzero"),
++        "owned plugin test",
++        Duration::from_secs(2),
++    )
++    .expect("capture nonzero exit");
++    assert_eq!(output.status.code(), Some(7));
++    assert!(String::from_utf8_lossy(&output.stdout).contains("PLUGIN_STDOUT"));
++    assert!(String::from_utf8_lossy(&output.stderr).contains("PLUGIN_STDERR"));
++}
++
++#[test]
++fn spawn_failure_remains_an_error() {
++    let root = tempfile::tempdir().expect("fixture root");
++    let error = run_git_command_with_timeout(
++        &mut Command::new(root.path().join("not-present.exe")),
++        "owned plugin test",
++        Duration::from_secs(2),
++    )
++    .expect_err("missing program");
++    assert!(error.contains("failed to run owned plugin test"));
++}
++
++#[test]
++fn unrelated_inheritable_handle_is_excluded_from_git_child() {
++    const EVENT_ENV: &str = "CODEX_TEST_PLUGIN_GIT_INHERITABLE_EVENT";
++    if let Some(raw) = std::env::var_os(EVENT_ENV) {
++        let raw = raw.to_str().unwrap().parse::<usize>().unwrap();
++        // If the child has this exact inherited event, it can signal the parent.
++        // A coincidentally recycled local handle cannot signal the parent's event.
++        unsafe { SetEvent(raw as *mut std::ffi::c_void) };
++        return;
++    }
++    let name = concat!(
++        module_path!(),
++        "::unrelated_inheritable_handle_is_excluded_from_git_child"
++    )
++    .split_once("::")
++    .unwrap()
++    .1;
++    // SAFETY: Successful CreateEventW returns a uniquely owned non-inheritable event.
++    let raw = unsafe { CreateEventW(std::ptr::null_mut(), 0, 0, std::ptr::null()) };
++    assert!(!raw.is_null());
++    let event = unsafe { OwnedHandle::from_raw_handle(raw) };
++    assert_ne!(
++        unsafe { SetHandleInformation(event.as_raw_handle(), 1, 1) },
++        0
++    );
++    let mut command = Command::new(std::env::current_exe().unwrap());
++    command
++        .args(["--exact", name, "--nocapture"])
++        .env(EVENT_ENV, (event.as_raw_handle() as usize).to_string());
++    let output = run_git_command_with_timeout(
++        &mut command,
++        "Git handle isolation fixture",
++        Duration::from_secs(3),
++    )
++    .unwrap();
++    assert!(output.status.success());
++    assert_eq!(
++        unsafe { WaitForSingleObject(event.as_raw_handle(), 0) },
++        258
++    );
++    // Positive control proves the fixture detects broad stdio-handle inheritance.
++    assert!(command.output().unwrap().status.success());
++    assert_eq!(unsafe { WaitForSingleObject(event.as_raw_handle(), 0) }, 0);
++}
++
++#[test]
++fn relative_git_preserves_explicit_path_argv_and_child_cwd() {
++    let full_name = concat!(
++        module_path!(),
++        "::relative_git_preserves_explicit_path_argv_and_child_cwd"
++    );
++    let name = full_name.split_once("::").expect("crate-qualified test").1;
++    if std::env::var(PHASE).as_deref() == Ok("resolve") {
++        assert_eq!(
++            std::env::args_os().next().as_deref(),
++            Some(std::ffi::OsStr::new("git"))
++        );
++        let dir = PathBuf::from(std::env::var_os(ROOT).expect("expected child cwd"));
++        assert_eq!(
++            fs::canonicalize(std::env::current_dir().expect("child cwd")).expect("canonical cwd"),
++            fs::canonicalize(dir).expect("canonical expected cwd")
++        );
++        println!("PLUGIN_RELATIVE_GIT_MATCHED");
++        return;
++    }
++    let root = tempfile::tempdir().expect("fixture root");
++    let bin = root.path().join("bin");
++    let cwd = root.path().join("working");
++    fs::create_dir(&bin).expect("explicit PATH directory");
++    fs::create_dir(&cwd).expect("child cwd");
++    let test = std::env::current_exe().expect("actual libtest path");
++    let git = bin.join("git.exe");
++    fs::copy(&test, &git).expect("fixture git executable");
++    let output = run_git_command_with_timeout(
++        Command::new("git")
++            .args(["--exact", name, "--nocapture"])
++            .env("pAtH", &bin)
++            .env(PHASE, "resolve")
++            .env(ROOT, &cwd)
++            .current_dir(&cwd),
++        "owned relative git test",
++        Duration::from_secs(2),
++    )
++    .expect("explicit child PATH overrides normal fallback");
++    assert!(output.status.success());
++    assert!(String::from_utf8_lossy(&output.stdout).contains("PLUGIN_RELATIVE_GIT_MATCHED"));
++
++    let cwd_only_name = format!(
++        "cadsg-{}-cwd-only.exe",
++        root.path()
++            .file_name()
++            .expect("unique fixture directory")
++            .to_string_lossy()
++    );
++    fs::rename(git, cwd.join(&cwd_only_name)).expect("relocate fixture executable");
++    let error = run_git_command_with_timeout(
++        Command::new(&cwd_only_name)
++            .current_dir(&cwd)
++            .env_remove("PATH"),
++        "owned absent executable test",
++        Duration::from_secs(2),
++    )
++    .expect_err("child cwd must not implicitly enter executable lookup");
++    assert!(error.contains("program not found"));
++}
+diff --git a/codex-rs/core-plugins/src/git_policy.rs b/codex-rs/core-plugins/src/git_policy.rs
+index 35feafd0bd29082f40d112726174a3b029e47a1b..ffc8418ef31c038339ff38337db768bd966b04dd 100644
+--- a/codex-rs/core-plugins/src/git_policy.rs
++++ b/codex-rs/core-plugins/src/git_policy.rs
+@@ -1,6 +1,8 @@
+ use codex_utils_absolute_path::AbsolutePathBuf;
++use std::io;
+ use std::path::Path;
+ use std::process::Command;
++use std::process::Output;
+ use tempfile::TempDir;
+ 
+ // These variables can redirect Git to an untrusted repository or inject command-scoped settings.
+@@ -83,3 +85,13 @@ pub(crate) fn configure_trusted_git_repository(
+     command.env("GIT_DIR", repository.path());
+     Ok(repository)
+ }
++
++/// Capture plugin Git output without adding a deadline to callers that had none.
++pub(crate) fn git_command_output(command: &mut Command) -> io::Result<Output> {
++    #[cfg(windows)]
++    {
++        codex_utils_pty::JobObject::create_without_breakaway()?.output_std_atomic(command, None)
++    }
++    #[cfg(not(windows))]
++    command.output()
++}
+diff --git a/codex-rs/core-plugins/src/loader.rs b/codex-rs/core-plugins/src/loader.rs
+index 83e691a99f9503b1a1522dab2db90eb54f6bfd23..56732cf9282b3001ce8fca0a8a05a8f49203222e 100644
+--- a/codex-rs/core-plugins/src/loader.rs
++++ b/codex-rs/core-plugins/src/loader.rs
+@@ -1922,8 +1922,7 @@ fn run_git_output(
+         None
+     };
+ 
+-    let output = command
+-        .output()
++    let output = crate::git_policy::git_command_output(&mut command)
+         .map_err(|err| format!("failed to run git {}: {err}", args.join(" ")))?;
+     if output.status.success() {
+         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+diff --git a/codex-rs/core-plugins/src/marketplace_add/install.rs b/codex-rs/core-plugins/src/marketplace_add/install.rs
+index 5be2bfbc6f16113e4c3fdab5cdc59922106b1252..35fd4bfee9977c8b3b192df4fdb87c1b03ad6d1d 100644
+--- a/codex-rs/core-plugins/src/marketplace_add/install.rs
++++ b/codex-rs/core-plugins/src/marketplace_add/install.rs
+@@ -114,7 +114,7 @@ fn run_git(args: &[&str], cwd: Option<&Path>) -> Result<(), MarketplaceAddError>
+         command.current_dir(cwd);
+     }
+ 
+-    let output = command.output().map_err(|err| {
++    let output = crate::git_policy::git_command_output(&mut command).map_err(|err| {
+         MarketplaceAddError::Internal(format!("failed to run git {}: {err}", args.join(" ")))
+     })?;
+     if output.status.success() {
+diff --git a/codex-rs/core-plugins/src/marketplace_upgrade/git.rs b/codex-rs/core-plugins/src/marketplace_upgrade/git.rs
+index c35c4444d91d139804283c61c8df69f419dc5300..0c5736ca92d0229d7da534634bef4e19a0239c36 100644
+--- a/codex-rs/core-plugins/src/marketplace_upgrade/git.rs
++++ b/codex-rs/core-plugins/src/marketplace_upgrade/git.rs
+@@ -3,6 +3,7 @@ use std::path::Path;
+ use std::path::PathBuf;
+ use std::process::Command;
+ use std::process::Output;
++#[cfg(not(windows))]
+ use std::process::Stdio;
+ use std::time::Duration;
+ 
+@@ -180,6 +181,25 @@ fn strip_windows_verbatim_path_prefix(path: &str) -> Option<String> {
+     Some(stripped)
+ }
+ 
++#[cfg(windows)]
++fn run_git_command_with_timeout(
++    command: &mut Command,
++    context: &str,
++    timeout: Duration,
++) -> Result<Output, String> {
++    let job = codex_utils_pty::JobObject::create_without_breakaway()
++        .map_err(|err| format!("failed to create {context} process job: {err}"))?;
++    job.output_std_atomic(command, Some(timeout))
++        .map_err(|err| {
++            if err.kind() == std::io::ErrorKind::TimedOut {
++                format!("{context} {err}")
++            } else {
++                format!("failed to run {context}: {err}")
++            }
++        })
++}
++
++#[cfg(not(windows))]
+ fn run_git_command_with_timeout(
+     command: &mut Command,
+     context: &str,
+@@ -307,3 +327,7 @@ mod tests {
+             .map(|(_, value)| value)
+     }
+ }
++
++#[cfg(all(test, windows))]
++#[path = "../git_lifetime_windows_tests.rs"]
++mod git_lifetime_windows_tests;
+diff --git a/codex-rs/core-plugins/src/startup_sync.rs b/codex-rs/core-plugins/src/startup_sync.rs
+index ee91e3efe45c13c2c89ab804f369c6c2e70dba79..18b1dfbdadf527674cb06cf93b24f3afe237a5fe 100644
+--- a/codex-rs/core-plugins/src/startup_sync.rs
++++ b/codex-rs/core-plugins/src/startup_sync.rs
+@@ -3,6 +3,7 @@ use std::path::Path;
+ use std::path::PathBuf;
+ use std::process::Command;
+ use std::process::Output;
++#[cfg(not(windows))]
+ use std::process::Stdio;
+ use std::time::Duration;
+ 
+@@ -638,18 +639,18 @@ fn git_ls_remote_head_sha(codex_home: &Path, git_binary: &Path) -> Result<String
+ }
+ 
+ fn git_head_sha(repo_path: &Path, git_binary: &Path) -> Result<String, String> {
+-    let output = git_command(git_binary)?
++    let mut command = git_command(git_binary)?;
++    command
+         .arg("-C")
+         .arg(repo_path)
+         .arg("rev-parse")
+-        .arg("HEAD")
+-        .output()
+-        .map_err(|err| {
+-            format!(
+-                "failed to run git rev-parse HEAD in {}: {err}",
+-                repo_path.display()
+-            )
+-        })?;
++        .arg("HEAD");
++    let output = crate::git_policy::git_command_output(&mut command).map_err(|err| {
++        format!(
++            "failed to run git rev-parse HEAD in {}: {err}",
++            repo_path.display()
++        )
++    })?;
+     ensure_git_success(&output, "git rev-parse HEAD")?;
+ 
+     let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+@@ -680,6 +681,25 @@ fn git_command(git_binary: &Path) -> Result<Command, String> {
+     Ok(command)
+ }
+ 
++#[cfg(windows)]
++fn run_git_command_with_timeout(
++    command: &mut Command,
++    context: &str,
++    timeout: Duration,
++) -> Result<Output, String> {
++    let job = codex_utils_pty::JobObject::create_without_breakaway()
++        .map_err(|err| format!("failed to create {context} process job: {err}"))?;
++    job.output_std_atomic(command, Some(timeout))
++        .map_err(|err| {
++            if err.kind() == std::io::ErrorKind::TimedOut {
++                format!("{context} {err}")
++            } else {
++                format!("failed to run {context}: {err}")
++            }
++        })
++}
++
++#[cfg(not(windows))]
+ fn run_git_command_with_timeout(
+     command: &mut Command,
+     context: &str,
+@@ -1123,3 +1143,7 @@ fn extract_zipball_to_dir(bytes: &[u8], destination: &Path) -> Result<(), String
+ #[cfg(test)]
+ #[path = "startup_sync_tests.rs"]
+ mod tests;
++
++#[cfg(all(test, windows))]
++#[path = "git_lifetime_windows_tests.rs"]
++mod git_lifetime_windows_tests;
+diff --git a/codex-rs/utils/pty/Cargo.toml b/codex-rs/utils/pty/Cargo.toml
+index f7cabb697538c8135a4f38c98fc3d142f7e13b57..fda05b9721d2bd758a6752cef96e22b503608cd5 100644
+--- a/codex-rs/utils/pty/Cargo.toml
++++ b/codex-rs/utils/pty/Cargo.toml
+@@ -29,6 +29,7 @@ winapi = { version = "0.3.9", features = [
+     "jobapi2",
+     "libloaderapi",
+     "minwinbase",
++    "namedpipeapi",
+     "processthreadsapi",
+     "synchapi",
+     "winbase",
+diff --git a/codex-rs/utils/pty/src/win/background_output.rs b/codex-rs/utils/pty/src/win/background_output.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..74fc02e039c78f92374bf61ea3d4d902f391537c
+--- /dev/null
++++ b/codex-rs/utils/pty/src/win/background_output.rs
+@@ -0,0 +1,390 @@
++//! Windows output capture for a non-interactive native executable.
++
++use super::JobObject;
++use super::procthreadattr::ProcThreadAttributeList;
++use super::psuedocon::append_quoted;
++use std::cmp::Ordering;
++use std::ffi::OsStr;
++use std::ffi::OsString;
++use std::fs::OpenOptions;
++use std::io;
++use std::io::PipeReader;
++use std::io::Read;
++use std::os::windows::ffi::OsStrExt;
++use std::os::windows::ffi::OsStringExt;
++use std::os::windows::io::AsRawHandle;
++use std::os::windows::io::FromRawHandle;
++use std::os::windows::io::OwnedHandle;
++use std::os::windows::process::ExitStatusExt;
++use std::path::Path;
++use std::path::PathBuf;
++use std::process::Command;
++use std::process::ExitStatus;
++use std::process::Output;
++use std::ptr;
++use std::time::Duration;
++use std::time::Instant;
++use winapi::shared::winerror::ERROR_BROKEN_PIPE;
++use winapi::um::handleapi::DuplicateHandle;
++use winapi::um::namedpipeapi::PeekNamedPipe;
++use winapi::um::processthreadsapi::CreateProcessW;
++use winapi::um::processthreadsapi::GetCurrentProcess;
++use winapi::um::processthreadsapi::GetExitCodeProcess;
++use winapi::um::processthreadsapi::PROCESS_INFORMATION;
++use winapi::um::synchapi::WaitForSingleObject;
++use winapi::um::winbase::CREATE_NO_WINDOW;
++use winapi::um::winbase::CREATE_UNICODE_ENVIRONMENT;
++use winapi::um::winbase::EXTENDED_STARTUPINFO_PRESENT;
++use winapi::um::winbase::STARTF_USESTDHANDLES;
++use winapi::um::winbase::STARTUPINFOEXW;
++use winapi::um::winbase::WAIT_OBJECT_0;
++use winapi::um::winnt::DUPLICATE_SAME_ACCESS;
++
++#[link(name = "kernel32")]
++unsafe extern "system" {
++    fn CompareStringOrdinal(
++        a: *const u16,
++        a_len: i32,
++        b: *const u16,
++        b_len: i32,
++        ignore_case: i32,
++    ) -> i32;
++    fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
++    fn GetWindowsDirectoryW(buffer: *mut u16, size: u32) -> u32;
++    fn GetFileAttributesW(path: *const u16) -> u32;
++}
++
++fn wide(value: &OsStr) -> io::Result<Vec<u16>> {
++    let units: Vec<u16> = value.encode_wide().collect();
++    if units.contains(&0) {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidInput,
++            "NUL in process launch data",
++        ));
++    }
++    Ok(units)
++}
++
++fn system_directory(get: unsafe extern "system" fn(*mut u16, u32) -> u32) -> Option<PathBuf> {
++    let mut units = vec![0; 260];
++    loop {
++        // SAFETY: The buffer is writable for the supplied capacity.
++        let size = unsafe { get(units.as_mut_ptr(), units.len() as u32) } as usize;
++        if size == 0 || size > 32768 {
++            return None;
++        }
++        if size < units.len() {
++            return Some(PathBuf::from(OsString::from_wide(&units[..size])));
++        }
++        units.resize(size.saturating_add(1), 0);
++    }
++}
++
++fn lookup_candidate(directory: &Path, image: &OsStr) -> Option<Vec<u16>> {
++    // Rust resolves explicit relative PATH entries against the parent's cwd.
++    let absolute = std::path::absolute(directory.join(image)).ok()?;
++    let mut units = wide(absolute.as_os_str()).ok()?;
++    let verbatim: Vec<u16> = r"\\?\".encode_utf16().collect();
++    let device: Vec<u16> = r"\\.\".encode_utf16().collect();
++    let unc: Vec<u16> = r"\\".encode_utf16().collect();
++    if units.len() >= 260 && !units.starts_with(&verbatim) && !units.starts_with(&device) {
++        if units.starts_with(&unc) {
++            units.splice(..unc.len(), r"\\?\UNC\".encode_utf16());
++        } else {
++            units.splice(..0, verbatim);
++        }
++    }
++    units.push(0);
++    // SAFETY: The absolute UTF-16 path is NUL terminated. Like Rust's std lookup,
++    // select the first attributes success without resolving reparse points or
++    // trying another image if the chosen one fails to launch.
++    (unsafe { GetFileAttributesW(units.as_ptr()) } != u32::MAX).then_some(units)
++}
++
++fn search_path(paths: &OsStr, image: &OsStr) -> Option<Vec<u16>> {
++    std::env::split_paths(paths)
++        .filter(|path| !path.as_os_str().is_empty())
++        .find_map(|directory| lookup_candidate(&directory, image))
++}
++
++fn executable(command: &Command) -> io::Result<Vec<u16>> {
++    let program = command.get_program();
++    let path = Path::new(program);
++    let is_exe = path
++        .extension()
++        .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"));
++    if path.is_absolute() && is_exe {
++        let mut units = wide(program)?;
++        units.push(0);
++        return Ok(units);
++    }
++    // These callers use only native images. In particular, never apply shell
++    // or PATHEXT lookup rules to the marketplace's bare `git` program name.
++    if path.file_name() != Some(program)
++        || path.components().count() != 1
++        || (!is_exe && program.as_encoded_bytes().contains(&b'.'))
++    {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidInput,
++            "expected a native Windows executable",
++        ));
++    }
++    wide(program)?;
++    let mut image = program.to_os_string();
++    if !is_exe {
++        image.push(".exe");
++    }
++    let child_path = command
++        .get_envs()
++        .find_map(|(key, value)| key.eq_ignore_ascii_case("PATH").then_some(value).flatten());
++    // Match Rust std Windows search order for a bare native executable.
++    child_path
++        .and_then(|paths| search_path(paths, &image))
++        .or_else(|| {
++            std::env::current_exe()
++                .ok()
++                .and_then(|path| lookup_candidate(path.parent()?, &image))
++        })
++        .or_else(|| {
++            system_directory(GetSystemDirectoryW).and_then(|path| lookup_candidate(&path, &image))
++        })
++        .or_else(|| {
++            system_directory(GetWindowsDirectoryW).and_then(|path| lookup_candidate(&path, &image))
++        })
++        .or_else(|| std::env::var_os("PATH").and_then(|paths| search_path(&paths, &image)))
++        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "program not found"))
++}
++
++fn windows_key_cmp(a: &[u16], b: &[u16]) -> Ordering {
++    // SAFETY: Each valid slice remains allocated during the Windows comparison.
++    let result =
++        unsafe { CompareStringOrdinal(a.as_ptr(), a.len() as i32, b.as_ptr(), b.len() as i32, 1) };
++    result.cmp(&2)
++}
++
++fn environment(command: &Command) -> io::Result<Vec<u16>> {
++    let mut entries: Vec<(Vec<u16>, Vec<u16>)> = std::env::vars_os()
++        .map(|(key, value)| Ok((wide(&key)?, wide(&value)?)))
++        .collect::<io::Result<_>>()?;
++    for (key, value) in command.get_envs() {
++        let key = wide(key)?;
++        let old = entries
++            .iter()
++            .position(|(name, _)| windows_key_cmp(name, &key).is_eq());
++        match (old, value) {
++            (Some(index), Some(value)) => entries[index].1 = wide(value)?,
++            (Some(index), None) => {
++                entries.swap_remove(index);
++            }
++            (None, Some(value)) => entries.push((key, wide(value)?)),
++            (None, None) => {}
++        }
++    }
++    entries.sort_by(|(a, _), (b, _)| windows_key_cmp(a, b));
++    let mut block = Vec::new();
++    for (name, value) in entries {
++        block.extend(name);
++        block.push(b'=' as u16);
++        block.extend(value);
++        block.push(0);
++    }
++    if block.is_empty() {
++        block.push(0);
++    }
++    block.push(0);
++    Ok(block)
++}
++
++fn working_directory(path: &Path) -> io::Result<Vec<u16>> {
++    let mut units = wide(path.as_os_str())?;
++    let verbatim: Vec<u16> = r"\\?\".encode_utf16().collect();
++    let unc: Vec<u16> = r"\\?\UNC\".encode_utf16().collect();
++    // CreateProcessW does not accept verbatim cwd syntax. Preserve only the
++    // equivalent absolute UNC or drive path, as std::process::Command does.
++    if units.starts_with(&unc) {
++        units.splice(..unc.len(), [b'\\' as u16, b'\\' as u16]);
++    } else if units.starts_with(&verbatim) && units.get(5..7) == Some(&[b':' as u16, b'\\' as u16])
++    {
++        units.drain(..verbatim.len());
++    }
++    units.push(0);
++    Ok(units)
++}
++
++fn inheritable(handle: &impl AsRawHandle) -> io::Result<OwnedHandle> {
++    let mut duplicate = ptr::null_mut();
++    // SAFETY: Duplicate a valid owned stdio handle in the same process.
++    let ok = unsafe {
++        let process = GetCurrentProcess();
++        DuplicateHandle(
++            process,
++            handle.as_raw_handle().cast(),
++            process,
++            &mut duplicate,
++            0,
++            1,
++            DUPLICATE_SAME_ACCESS,
++        )
++    };
++    if ok == 0 {
++        return Err(io::Error::last_os_error());
++    }
++    // SAFETY: The duplicate is a distinct, owned handle.
++    Ok(unsafe { OwnedHandle::from_raw_handle(duplicate.cast()) })
++}
++
++fn pipe_bytes(reader: &PipeReader) -> io::Result<u32> {
++    let mut available = 0;
++    // SAFETY: This only queries our live read end and does not consume data.
++    let ok = unsafe {
++        PeekNamedPipe(
++            reader.as_raw_handle().cast(),
++            ptr::null_mut(),
++            0,
++            ptr::null_mut(),
++            &mut available,
++            ptr::null_mut(),
++        )
++    };
++    if ok == 0 {
++        let error = io::Error::last_os_error();
++        if error.raw_os_error() != Some(ERROR_BROKEN_PIPE as i32) {
++            return Err(error);
++        }
++    }
++    Ok(available)
++}
++
++fn drain(reader: &mut PipeReader, output: &mut Vec<u8>, limit: u32) -> io::Result<()> {
++    // Exactly one reader owns this end, so bytes reported by PeekNamedPipe are
++    // immediately readable. Do not wait for EOF on these private Git pipes.
++    let count = pipe_bytes(reader)?.min(limit);
++    reader.take(u64::from(count)).read_to_end(output)?;
++    Ok(())
++}
++
++impl JobObject {
++    /// Run a native Windows executable with null stdin and captured output.
++    /// The command inherits the ambient environment with `get_envs()` edits applied;
++    /// callers must not use `env_clear`, raw arguments, or custom stdio/creation flags.
++    pub fn output_std_atomic(
++        &self,
++        command: &Command,
++        timeout: Option<Duration>,
++    ) -> io::Result<Output> {
++        let program = command.get_program();
++        let application = executable(command)?;
++        let mut line = Vec::new();
++        append_quoted(program, &mut line);
++        for arg in command.get_args() {
++            wide(arg)?;
++            line.push(b' ' as u16);
++            append_quoted(arg, &mut line);
++        }
++        line.push(0);
++        let cwd = command
++            .get_current_dir()
++            .map(working_directory)
++            .transpose()?;
++        let mut environment = environment(command)?;
++        let mut stdout = Vec::new();
++        let mut stderr = Vec::new();
++        let (mut stdout_reader, stdout_writer) = io::pipe()?;
++        let (mut stderr_reader, stderr_writer) = io::pipe()?;
++        let child = {
++            let null = OpenOptions::new().read(true).open(r"\\.\NUL")?;
++            let stdin = inheritable(&null)?;
++            let stdout = inheritable(&stdout_writer)?;
++            let stderr = inheritable(&stderr_writer)?;
++            let mut attributes =
++                ProcThreadAttributeList::with_capacity(2).map_err(io::Error::other)?;
++            attributes
++                .set_job(self.as_raw_handle().cast())
++                .map_err(io::Error::other)?;
++            attributes
++                .set_handle_list(vec![
++                    stdin.as_raw_handle().cast(),
++                    stdout.as_raw_handle().cast(),
++                    stderr.as_raw_handle().cast(),
++                ])
++                .map_err(io::Error::other)?;
++            // SAFETY: Zero-initialized Win32 structs get their required fields below.
++            let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
++            let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
++            startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
++            startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
++            startup.StartupInfo.hStdInput = stdin.as_raw_handle().cast();
++            startup.StartupInfo.hStdOutput = stdout.as_raw_handle().cast();
++            startup.StartupInfo.hStdError = stderr.as_raw_handle().cast();
++            startup.lpAttributeList = attributes.as_mut_ptr();
++            // SAFETY: The buffers and owned handles outlive the call. Windows
++            // attaches the job during creation and inherits only the three handles.
++            let ok = unsafe {
++                CreateProcessW(
++                    application.as_ptr(),
++                    line.as_mut_ptr(),
++                    ptr::null_mut(),
++                    ptr::null_mut(),
++                    1,
++                    CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
++                    environment.as_mut_ptr().cast(),
++                    cwd.as_ref().map_or(ptr::null(), Vec::as_ptr),
++                    &mut startup.StartupInfo,
++                    &mut process,
++                )
++            };
++            if ok == 0 {
++                return Err(io::Error::last_os_error());
++            }
++            // SAFETY: A successful spawn returns two uniquely owned handles.
++            let _thread = unsafe { OwnedHandle::from_raw_handle(process.hThread.cast()) };
++            unsafe { OwnedHandle::from_raw_handle(process.hProcess.cast()) }
++        };
++        drop((stdout_writer, stderr_writer));
++        let start = Instant::now();
++        let process = child.as_raw_handle().cast();
++        loop {
++            drain(&mut stdout_reader, &mut stdout, 64 * 1024)?;
++            drain(&mut stderr_reader, &mut stderr, 64 * 1024)?;
++            let wait_ms = timeout.map_or(10, |limit| {
++                limit.saturating_sub(start.elapsed()).as_millis().min(10) as u32
++            });
++            // SAFETY: The child process handle remains owned for the whole wait.
++            let wait = unsafe { WaitForSingleObject(process, wait_ms) };
++            if wait == WAIT_OBJECT_0 {
++                let mut code = 0;
++                // SAFETY: This is the same signaled process handle and valid output storage.
++                if unsafe { GetExitCodeProcess(process, &mut code) } == 0 {
++                    return Err(io::Error::last_os_error());
++                }
++                self.terminate()?;
++                drain(&mut stdout_reader, &mut stdout, u32::MAX)?;
++                drain(&mut stderr_reader, &mut stderr, u32::MAX)?;
++                return Ok(Output {
++                    status: ExitStatus::from_raw(code),
++                    stdout,
++                    stderr,
++                });
++            }
++            if wait != 0x102 {
++                return Err(io::Error::last_os_error());
++            }
++            if let Some(timeout) = timeout
++                && start.elapsed() >= timeout
++            {
++                self.terminate()?;
++                drain(&mut stderr_reader, &mut stderr, u32::MAX)?;
++                let message = String::from_utf8_lossy(&stderr);
++                let suffix = if message.trim().is_empty() {
++                    String::new()
++                } else {
++                    format!(": {}", message.trim())
++                };
++                return Err(io::Error::new(
++                    io::ErrorKind::TimedOut,
++                    format!("timed out after {}s{suffix}", timeout.as_secs()),
++                ));
++            }
++        }
++    }
++}
+diff --git a/codex-rs/utils/pty/src/win/mod.rs b/codex-rs/utils/pty/src/win/mod.rs
+index 05063cf66a69f9b0855e54a537ce7d53947e5424..766d878e88f9c0df5bb233b8e8ccb23f5cb47b29 100644
+--- a/codex-rs/utils/pty/src/win/mod.rs
++++ b/codex-rs/utils/pty/src/win/mod.rs
+@@ -41,6 +41,7 @@ use winapi::um::processthreadsapi::*;
+ use winapi::um::synchapi::WaitForSingleObject;
+ use winapi::um::winbase::INFINITE;
+ 
++mod background_output;
+ pub(crate) mod conpty;
+ mod job;
+ mod procthreadattr;
+diff --git a/codex-rs/utils/pty/src/win/procthreadattr.rs b/codex-rs/utils/pty/src/win/procthreadattr.rs
+index 6b4726afccc327d037c7260715f29a5b68c9f7c9..ac34f82f5f439b9cd9b3a244edcf2303df1fb2c3 100644
+--- a/codex-rs/utils/pty/src/win/procthreadattr.rs
++++ b/codex-rs/utils/pty/src/win/procthreadattr.rs
+@@ -29,11 +29,13 @@ use winapi::shared::minwindef::DWORD;
+ use winapi::um::processthreadsapi::*;
+ use winapi::um::winnt::HANDLE;
+ 
++const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x00020002;
+ const PROC_THREAD_ATTRIBUTE_JOB_LIST: usize = 0x0002000D;
+ const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x00020016;
+ 
+ pub struct ProcThreadAttributeList {
+     data: Vec<u8>,
++    handle_list: Vec<HANDLE>,
+     job_list: Vec<HANDLE>,
+ }
+ 
+@@ -62,6 +64,7 @@ impl ProcThreadAttributeList {
+         );
+         Ok(Self {
+             data,
++            handle_list: Vec::new(),
+             job_list: Vec::new(),
+         })
+     }
+@@ -81,6 +84,14 @@ impl ProcThreadAttributeList {
+         }
+     }
+ 
++    pub fn set_handle_list(&mut self, handles: Vec<HANDLE>) -> Result<(), Error> {
++        self.handle_list = handles;
++        let value = self.handle_list.as_mut_ptr().cast();
++        let size = mem::size_of_val(self.handle_list.as_slice());
++        // SAFETY: The owned handle list storage outlives the attribute list.
++        unsafe { self.update(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, value, size) }
++    }
++
+     pub fn set_job(&mut self, job: HANDLE) -> Result<(), Error> {
+         // Atomic job attachment is intentionally required for native ConPTY
+         // spawns. If Windows cannot honor the job list (for example, because a
+diff --git a/codex-rs/utils/pty/src/win/psuedocon.rs b/codex-rs/utils/pty/src/win/psuedocon.rs
+index 1b83478ca66ef0433bcd3d2d7afd2f0e2a03f145..ab2bc15eee25e35968e402e06288239c9606e6af 100644
+--- a/codex-rs/utils/pty/src/win/psuedocon.rs
++++ b/codex-rs/utils/pty/src/win/psuedocon.rs
+@@ -327,7 +327,7 @@ fn search_path(cmd: &CommandBuilder, exe: &OsStr) -> OsString {
+     exe.to_os_string()
+ }
+ 
+-fn append_quoted(arg: &OsStr, cmdline: &mut Vec<u16>) {
++pub(super) fn append_quoted(arg: &OsStr, cmdline: &mut Vec<u16>) {
+     if !arg.is_empty()
+         && !arg.encode_wide().any(|c| {
+             c == ' ' as u16

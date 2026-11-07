@@ -6,6 +6,23 @@ from pathlib import Path, PurePosixPath
 REPO = Path(__file__).resolve().parents[2]
 LOCK = "3736e573e634180a1443b0c3e2cdbbf3d28304cf17d76fd3752aab344356b44c"
 SOURCE = "37efcaa4a32880ecb16f3420f4efb6a39e9c82fb407a169ec67e0d74991763da"
+CANDIDATE = "P20"
+SOURCE_FILES = 9529
+P21_LOCK = "1a80f6e1e4fdb2f5b255a416f70350b5fd764493322bc463137381900374cdab"
+P21_SOURCE = "5b39fc728fcb025715fc5b6467c406b7190e7fbabd8b1342f86cc754b4458c1c"
+P21_SOURCE_FILES = 9531
+P20_WARM_CACHE_KEY = "p20-native-v1-Windows-rust1.99.1-msvc14.44.35207-sdk10.0.26100.0-2259036772c5d8d77d636305ab4f7f12795632b3dfa469d0df5e4a2ade51bbd7-42337939507-1"
+P20_WARM_WORK = Path(r"C:\cagp20-42337939507-1\work")
+P20_CACHED_OUTPUTS = {'codex.exe': (411710464, '6fe7756b2350feec002d84b4c14c223da7c8a7e4be13e96532b6401d7bf2356e'), 'codex-command-runner.exe': (10913280, 'debd0a1718d7bb218eaeb65ff6d0f09d432afee56a1008d0a00e7a880731f9ef'), 'codex-windows-sandbox-setup.exe': (19553792, '766a7cc44a4ef0f23eff78614cd2741520df810641a7a481cf4088860e20b8f1'), 'codex-windows-managed-deny-probe.exe': (251392, '3629969201ecb56a97c084ccd1aeda76f95ca4e294b8dabf6a68859cbd742536'), 'codex-windows-sandbox-service.exe': (68414976, 'ea4b103f4dd1789c5172a27f3fc2911b56fb248f72f28ecb8afd7fb9f35a1e7b'), 'codex-code-mode-host.exe': (79894016, 'e9cf0e71fe2ef785324a732435997253a9f6ac577be87a6f850fa5d789332154')}
+P21_GIT_CASES = (
+    "root_exit_reaps_descendants_before_collecting_output",
+    "timeout_reaps_descendants_before_collecting_output",
+    "nonzero_exit_preserves_status_and_both_output_streams",
+    "spawn_failure_remains_an_error",
+    "unrelated_inheritable_handle_is_excluded_from_git_child",
+    "relative_git_preserves_explicit_path_argv_and_child_cwd",
+)
+
 CDS_CI = "17917162b707574ce86765149ab8b06acbdc3c96"
 OBSERVER_FILES = {
     "ci/qualify_native.py": "13a771b041aaadcdd7d37ba129bf9e82f2dff73b57abfbbc5f0812ac17c62deb",
@@ -46,11 +63,11 @@ def load_module(name, path):
     return module
 
 def plan():
-    lock_path = REPO / "native/build-lock.O165-P20-source.json"
-    require(sha(lock_path) == LOCK, "Exact P20 lock bytes required")
+    lock_path = native_lock_path()
+    require(sha(lock_path) == LOCK, "Exact candidate lock bytes required")
     lock = load(lock_path)
-    require(lock["prepared_source_sha256"] == SOURCE and lock["prepared_source_files"] == 9529,
-            "Exact reviewed P20 source required")
+    require(lock["prepared_source_sha256"] == SOURCE and lock["prepared_source_files"] == SOURCE_FILES,
+            "Exact reviewed candidate source required")
     require(lock["rust_version"] == "1.99.1" and set(lock["binaries"]) == BINS
             and len(lock["binaries"]) == 6 and lock["package_mode"] == "cadsg-native-msix",
             "Pinned toolchain and six-target source bundle required")
@@ -290,57 +307,106 @@ def verify_normal_outputs(root, manifest):
                 "Normal native bytes differ")
 
 
+def native_lock_path():
+    return REPO / f"native/build-lock.O165-{CANDIDATE}-source.json"
+
+
+def work_path(root):
+    return P20_WARM_WORK if CANDIDATE == "P21" else root / "work"
+
+
+def verify_p21_cache(root):
+    require(os.environ.get("CI_P20_CACHE_HIT") == "true"
+            and os.environ.get("CI_P20_CACHE_KEY") == P20_WARM_CACHE_KEY,
+            "Exact original P20 cache restore required; no fallback or cold build")
+    require(os.environ.get("VCToolsVersion") == "14.44.35207"
+            and os.environ.get("UCRTVersion") == "10.0.26100.0",
+            "Restored cache requires the exact original MSVC and SDK")
+    require(Path(root.anchor) == Path(P20_WARM_WORK.anchor)
+            and not P20_WARM_WORK.parent.exists(),
+            "Original absolute work root must be absent on the fresh runner")
+    _, target = cache_paths(root)
+    require(not target.is_symlink() and not target.is_junction()
+            and target.resolve(strict=True) == target,
+            "Restored target path is not the original physical cache")
+    outputs = {}
+    for name, (size, expected) in P20_CACHED_OUTPUTS.items():
+        p = target / "release" / name
+        require(p.is_file() and not p.is_symlink() and p.stat().st_size == size
+                and sha(p) == expected, f"Original cached P20 output differs: {name}")
+        outputs[name] = expected
+    save(root / "evidence/exact-p20-cache-admission.json", {
+        "original_hosted_run": 42337939507, "original_attempt": 1,
+        "cache_key": P20_WARM_CACHE_KEY, "original_source_path": str(P20_WARM_WORK / "source"),
+        "old_output_sha256": outputs, "cache_is_build_input_only": True})
+
+
 def build(root):
     lock, builder, cases = plan()
     require((root / "evidence/inputs.json").is_file(), "Verified inputs required")
-    require(not (root / "work").exists() and not (root / "native-producer").exists(),
+    work = work_path(root)
+    require(not work.exists() and not (root / "native-producer").exists(),
             "A fresh owned build is required; never overwrite a previous candidate")
+    if CANDIDATE == "P21":
+        verify_p21_cache(root)
     toolchain = Path(os.environ["CI_RUST_TOOLCHAIN_BIN"])
     cache, target = cache_paths(root); jobs = build_jobs()
     command = [sys.executable, "-I", "-B", str(REPO / "scripts/build_native.py"),
                "--archive", str(root / "inputs/upstream.tar.gz"),
-               "--work-dir", str(root / "work"), "--toolchain-bin", str(toolchain),
+               "--work-dir", str(work), "--toolchain-bin", str(toolchain),
                "--cache-dir", str(cache), "--target-dir", str(target),
-               "--build-lock", str(REPO / "native/build-lock.O165-P20-source.json"),
+               "--build-lock", str(native_lock_path()),
                "--jobs", str(jobs), "--rusty-v8-dir", str(root / "inputs/rusty-v8"),
                "--output", str(root / "native-producer")]
     observe(command, root, REPO, clean_environment(), "normal-six-build", 7200)
-    report = load(root / "work/build-report.json")
+    report = load(work / "build-report.json")
     require(report["status"] == "passed" and report["build_lock_sha256"] == LOCK
             and report["effective_build_jobs"] == jobs, "Normal producer did not pass")
     manifest = load(root / "native-producer/manifest.json")
     verify_normal_outputs(root, manifest)
+    if CANDIDATE == "P21":
+        require(next(r["sha256"] for r in manifest["binaries"] if r["file"] == "codex.exe")
+                != P20_CACHED_OUTPUTS["codex.exe"][1], "P21 executable must differ from old P20")
     shutil.copyfile(root / "native-producer/manifest.json", root / "evidence/normal-raw-manifest.json")
     for name in ("build-report.json", "source-manifest.json", "build-owner.json"):
-        shutil.copyfile(root / "work" / name, root / "evidence" / name)
+        shutil.copyfile(work / name, root / "evidence" / name)
     save(root / "evidence/normal-source-binding.json", {
         "normal_manifest_sha256": sha(root / "native-producer/manifest.json"),
         "source_sha256": SOURCE, "lock_sha256": LOCK, "native_build_executed": True,
         "App_GUI_qualified": False})
 
-def unit(root):
+def unit(root, *, plugin_git=False):
     lock, builder, cases = plan()
     require(load(root / "evidence/normal-six-build.json")["passed"], "Normal six-target producer required")
     toolchain = Path(os.environ["CI_RUST_TOOLCHAIN_BIN"])
     cache, target = cache_paths(root); jobs = build_jobs()
+    work = work_path(root)
+    source = work / "source"
     environment = clean_environment(builder.build_environment(
-        root / "work", toolchain, cache, target_dir=target))
+        work, toolchain, cache, target_dir=target))
     environment["CARGO_BUILD_JOBS"] = str(jobs)
     environment.update(builder.verified_rusty_v8_inputs(
-        root / "work/source", root / "inputs/rusty-v8", lock["target"])["environment"])
+        source, root / "inputs/rusty-v8", lock["target"])["environment"])
+    package_name = "codex-core-plugins" if plugin_git else "codex-windows-sandbox"
+    target_name = package_name.replace("-", "_")
+    compile_name = "native-git-unit-compile" if plugin_git else "native-unit-compile"
+    if plugin_git:
+        cases = [f"{module}::git_lifetime_windows_tests::{case}"
+                 for module in ("startup_sync", "marketplace_upgrade::git")
+                 for case in P21_GIT_CASES]
     command = [str(toolchain / "cargo.exe"), "test", "--locked", "--release", "--jobs", str(jobs),
-               "-p", "codex-windows-sandbox", "--lib", "--no-run",
+               "-p", package_name, "--lib", "--no-run",
                "--message-format=json-render-diagnostics"]
-    observe(command, root, root / "work/source/codex-rs", environment, "native-unit-compile", 1800)
+    observe(command, root, source / "codex-rs", environment, compile_name, 1800)
     artifacts, finished = [], []
-    for line in (root / "evidence/native-unit-compile.log").read_text(
+    for line in (root / "evidence" / f"{compile_name}.log").read_text(
             encoding="utf8", errors="replace").splitlines():
         try:
             message = json.loads(line)
         except json.JSONDecodeError:
             continue
         if message.get("reason") == "compiler-artifact" and message.get("executable") and \
-                message.get("target", {}).get("name") == "codex_windows_sandbox" and \
+                message.get("target", {}).get("name") == target_name and \
                 message.get("profile", {}).get("test") is True:
             artifacts.append(message)
         if message.get("reason") == "build-finished":
@@ -348,41 +414,64 @@ def unit(root):
     require(len(artifacts) == 1 and finished == [True], "Unique genuine native libtest artifact required")
     executable = Path(artifacts[0]["executable"])
     require(executable.is_relative_to(target) and executable.is_file(), "Unit artifact outside target")
-    sealed = root / "delivery/unit/codex-windows-sandbox-p20-libtest.exe"
-    sealed.parent.mkdir(parents=True)
+    sealed = root / "delivery/unit" / f"{package_name}-{CANDIDATE.lower()}-libtest.exe"
+    sealed.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(executable, sealed)
     require(sha(sealed) == sha(executable), "Sealed native test copy differs")
     observed = []
     for index, case in enumerate(cases):
-        name = f"native-case-{index:02}"
+        name = f"native-git-case-{index:02}" if plugin_git else f"native-case-{index:02}"
         observe([str(sealed), "--exact", case, "--show-output", "--test-threads=1"],
-                root, root / "work/source/codex-rs", environment, name, 180)
+                root, source / "codex-rs", environment, name, 180)
         text = (root / f"evidence/{name}.log").read_text(encoding="utf8", errors="replace")
         require(len(re.findall(r"(?m)^test " + re.escape(case) + r" \.\.\. ok$", text)) == 1
                 and len(re.findall(r"(?m)^test result: ok\. 1 passed; 0 failed; 0 ignored;", text)) == 1,
                 "Exact native test must actually execute once; no filtered-out pass")
         observed.append({"name": case, "log_sha256": sha(root / f"evidence/{name}.log")})
-    require(builder.source_state(root / "work/source")["sha256"] == SOURCE,
+    require(builder.source_state(source)["sha256"] == SOURCE,
             "Native source changed during unit qualification")
     manifest = load(root / "native-producer/manifest.json")
     verify_normal_outputs(root, manifest)
-    save(root / "evidence/native-unit18.json", {
-        "status": "P20_NATIVE_COMPONENT18_PASSED_NOT_APP_QUALIFIED",
+    receipt = "native-git-unit12.json" if plugin_git else "native-unit18.json"
+    status = "P21_NATIVE_GIT12_PASSED_NOT_APP_QUALIFIED" if plugin_git else "P20_NATIVE_COMPONENT18_PASSED_NOT_APP_QUALIFIED"
+    save(root / "evidence" / receipt, {
+        "status": status,
         "cases": observed, "source_sha256": SOURCE, "lock_sha256": LOCK,
         "executable": {"path": str(sealed), "sha256": sha(sealed),
                        "profile": artifacts[0]["profile"]}, "App_GUI_qualified": False})
 
+def git_unit(root):
+    require(CANDIDATE == "P21", "Focused Git cases are specific to P21")
+    unit(root, plugin_git=True)
+
+
 def package(root):
-    plan()
+    lock, builder, _ = plan()
+    source = work_path(root) / "source"
+    if CANDIDATE == "P21":
+        git_result = load(root / "evidence/native-git-unit12.json")
+        require(git_result["status"] == "P21_NATIVE_GIT12_PASSED_NOT_APP_QUALIFIED"
+                and git_result["source_sha256"] == SOURCE and git_result["lock_sha256"] == LOCK
+                and len(git_result["cases"]) == 12, "Exact new Git lifetime cases required")
     require(load(root / "evidence/normal-six-build.json")["passed"]
             and load(root / "evidence/native-unit18.json")["status"] ==
             "P20_NATIVE_COMPONENT18_PASSED_NOT_APP_QUALIFIED", "Build and exact unit gates required")
     toolchain = Path(os.environ["CI_RUST_TOOLCHAIN_BIN"])
     manifest = root / "native-producer/manifest.json"
+    if CANDIDATE == "P21":
+        # Cargo metadata may require locked sources that compilation did not fetch.
+        # Reuse the original resumed assembler's target-specific source prefetch.
+        env = clean_environment()
+        env.update(CARGO_HOME=str(cache_paths(root)[0] / "cargo"), CARGO_NET_OFFLINE="false")
+        before = builder.source_state(source)
+        observe([str(toolchain / "cargo.exe"), "fetch", "--locked", "--target", lock["target"]],
+                root, source / "codex-rs", env, "stage-locked-windows-metadata", 180)
+        require(builder.source_state(source) == before and before["sha256"] == SOURCE,
+                "Locked dependency prefetch changed prepared source")
     command = [sys.executable, "-I", "-B", str(REPO / "scripts/package_native_release.py"),
-               "--source-root", str(root / "work/source"),
+               "--source-root", str(source),
                "--native-manifest", str(manifest), "--native-manifest-sha256", sha(manifest),
-               "--build-lock", str(REPO / "native/build-lock.O165-P20-source.json"),
+               "--build-lock", str(native_lock_path()),
                "--cargo", str(toolchain / "cargo.exe"), "--cargo-home", str(cache_paths(root)[0] / "cargo"),
                "--git", shutil.which("git.exe"), "--output", str(root / "assembled"),
                "--evidence-dir", str(root / "evidence/normal-assembly")]
@@ -396,25 +485,37 @@ def package(root):
     shutil.copyfile(archive, root / "delivery" / archive.name)
     shutil.copyfile(root / "assembled/manifest.json", root / "delivery/manifest.json")
     save(root / "delivery/candidate.json", {
-        "status": "P20_NORMAL_SIX_AND_COMPONENT18_ASSEMBLED_NOT_APP_QUALIFIED",
+        "status": ("P21_NORMAL_SIX_AND_COMPONENT30_ASSEMBLED_NOT_APP_QUALIFIED"
+                   if CANDIDATE == "P21" else "P20_NORMAL_SIX_AND_COMPONENT18_ASSEMBLED_NOT_APP_QUALIFIED"),
         "source_sha256": SOURCE, "lock_sha256": LOCK,
         "archive": archive.name, "archive_sha256": sha(archive),
         "raw_manifest_sha256": sha(root / "delivery/manifest.json"),
         "normal_build_receipt_sha256": sha(root / "evidence/normal-six-build.json"),
         "normal_assembly_receipt_sha256": sha(root / "evidence/normal-assembly/assembly-result.json"),
         "native_unit18_sha256": sha(root / "evidence/native-unit18.json"),
+        **({"native_git_unit12_sha256": sha(root / "evidence/native-git-unit12.json")}
+           if CANDIDATE == "P21" else {}),
         "App_GUI_qualified": False, "public_stable_release": False,
         "required_next": "Windows Limited Session3 helper/network migration and real official App acceptance"})
 
 def main():
+    global CANDIDATE, LOCK, SOURCE, SOURCE_FILES
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("check-only", "prepare", "build", "unit", "package"))
+    parser.add_argument("mode", choices=("check-only", "prepare", "build", "unit", "git_unit", "package"))
     parser.add_argument("--root", type=Path)
+    parser.add_argument("--candidate", choices=("P20", "P21"), default="P20")
     args = parser.parse_args()
+    if args.candidate == "P21":
+        CANDIDATE, LOCK, SOURCE, SOURCE_FILES = "P21", P21_LOCK, P21_SOURCE, P21_SOURCE_FILES
+        if args.mode != "check-only":
+            require(os.environ.get("GITHUB_REF") == "refs/heads/codex/p20-hosted-ci-r570"
+                    and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch",
+                    "P21 manual gate on the existing disposable cache branch required")
     if args.mode == "check-only":
         lock, _, cases = plan()
         print(json.dumps({"source": SOURCE, "lock": LOCK, "binaries": lock["binaries"],
-                          "cases": len(cases), "host_changes": False, "native_execution": False}))
+                          "cases": len(cases), "host_changes": False, "native_execution": False,
+                          **({"git_cases": 2 * len(P21_GIT_CASES)} if CANDIDATE == "P21" else {})}))
         return 0
     root = hosted_root(args.root)
     try:

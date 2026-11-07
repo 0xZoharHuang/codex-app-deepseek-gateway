@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "upstream_commit": "720fec862a608ae1e5878d1eecb04fb93192e93c",
+  "archive_sha256": "37f7f01a5e404b5015b47decececba7a3f0b9526bc951d0624bd57008a972a14",
+  "native_version": "0.165.0-alpha.1.2",
+  "rust_version": "1.99.1",
+  "target": "x86_64-pc-windows-msvc",
+  "patches": [
+    {
+      "file": "windows-home-namespace-0165.patch",
+      "sha256": "1e436f88e4201e6e33bba7d509e43265071c321006efd360215a260bf643d83b"
+    },
+    {
+      "file": "mcp-keyring-isolation-0165.patch",
+      "sha256": "0cfe1ae48ab50ef8d930298c42cd7ee6d2de4277750cceacca7e5d2c2d0c8efc"
+    },
+    {
+      "file": "guardian-thread-context-0165.patch",
+      "sha256": "6f434a95d3e0dd34c501539c0b8b562ac8bb2efc2973edf42a3d659cf1eaca60"
+    },
+    {
+      "file": "windows-cwd-ancestor-metadata-0165.patch",
+      "sha256": "9544c5b02e0e4e3546ba24fa1931b4e9592c5cf84d9ce0e7009b57868ac3c002"
+    },
+    {
+      "file": "packaged-tectonic-materialization-0165.patch",
+      "sha256": "e9585d91f7aa3db567c067a628040be8b4de2e594533e2af224a369731085fd7"
+    },
+    {
+      "file": "guardian-provider-transport-0165.patch",
+      "sha256": "2d7504fcbfc86918c72eef7629760d590914b78c7bf705042e05f62749bacefe"
+    },
+    {
+      "file": "migration-checksum-eol-0165.patch",
+      "sha256": "707b87fceec61b5028a1566490dc5d2c6dca420b704be4e8193a1b33e9e479ec"
+    },
+    {
+      "file": "cadsg-request-capacity-port-0165.patch",
+      "sha256": "0804fb004cbb8bcba5fcf1e29e542ee29c002c49ce3f05818eb7dbde76d3e564"
+    },
+    {
+      "file": "cadsg-request-capacity-cancel-0165.patch",
+      "sha256": "63beeb01233e21431513fcdb063e7565423790e731febfce12b249bb2e3ee225"
+    },
+    {
+      "file": "windows-host-boundaries-0165.patch",
+      "sha256": "c92180906b471db6c39ecbd057cb928b1071153c1fe57c02bb69cf6ffb0656df"
+    },
+    {
+      "file": "cadsg-capacity-p35-projection-reset-0165.patch",
+      "sha256": "420eaaefb578ea811e1b58d9fe7ecbf8404340e39357b306f4e496393d602cca"
+    },
+    {
+      "file": "windows-interactive-runner-bootstrap-0165.patch",
+      "sha256": "7913a0e4027e0e98296528afa4be1a0588690db11c11d02567532ba50a0259ae"
+    },
+    {
+      "file": "cadsg-native-service-restoration-0165.patch",
+      "sha256": "301fd81afcfd332e07230800c7ea8b0f93069eecfb503db1f68735a8b1b437ed"
+    },
+    {
+      "file": "cadsg-native-service-admission-cleanup-0165.patch",
+      "sha256": "e222e3ef93fbeb2881d76085f8263aca4dc8b036e7c57db725ff45f4dae7f86d"
+    },
+    {
+      "file": "cadsg-native-service-finalizer-0165.patch",
+      "sha256": "94be9dbe861cd97f834d86bc362e5aed1bfe9e5008ac7c206d9eab6387de1197"
+    },
+    {
+      "file": "cadsg-native-test-compacted-box-0165.patch",
+      "sha256": "4500d2007fed48429ace41398d52b329facf632c5bd363b51cf0f90c09cd11ea"
+    },
+    {
+      "file": "cadsg-native-cwd-metadata-synchronize-0165.patch",
+      "sha256": "eedb84e6fb5954bb921231a5b61ea25df00ea9c2dbdc9bb04ebba26da74353a2"
+    },
+    {
+      "file": "cadsg-native-opaque-metadata-deny-0165.patch",
+      "sha256": "87262b27e9141e80069d5282c62bb72a436c391b8653d4043c4ca4314b2101a5"
+    },
+    {
+      "file": "cadsg-native-conditional-fixture-inheritance-0165.patch",
+      "sha256": "bd0af03997164836db77cbdad815f1ae88f0b66f51bd8196893b4295b1030aa7"
+    },
+    {
+      "file": "cadsg-official-local-compaction-trace-context-0165.patch",
+      "sha256": "10335ab4267b46084fc8a5737950c9d59128803d0869e75d3dd6f9c76ee4ad88"
+    },
+    {
+      "file": "cadsg-native-loopback-reconciliation-0165.patch",
+      "sha256": "057fd17f93f9519ec2050f15655474e134736a62bf6c1a45672a8e59359d7a9a"
+    },
+    {
+      "file": "cadsg-native-helper-cache-bytes-0165.patch",
+      "sha256": "533588fcd8052f688c2df04d11f33d4b6e78cea57854f7862006d5b99c8a3584"
+    },
+    {
+      "file": "cadsg-native-plugin-git-atomic-0165.patch",
+      "sha256": "d5c420f0d19a05a614654e5aa0cf59e19c43d59c83a2c35a74d94ea9292c4b7d"
+    }
+  ],
+  "prepared_source_sha256": "5b39fc728fcb025715fc5b6467c406b7190e7fbabd8b1342f86cc754b4458c1c",
+  "prepared_source_files": 9531,
+  "cargo_lock_sha256": "cb4cbc725358eea7020285ee908e57bb4e551d301fc34b4147d3cd411d4d4a85",
+  "release_environment": {
+    "CARGO_BUILD_JOBS": "2",
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_PROFILE_RELEASE_INCREMENTAL": "false",
+    "CARGO_PROFILE_RELEASE_DEBUG": "0",
+    "CARGO_PROFILE_RELEASE_STRIP": "symbols",
+    "CARGO_PROFILE_RELEASE_LTO": "false",
+    "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16"
+  },
+  "binaries": [
+    "codex.exe",
+    "codex-command-runner.exe",
+    "codex-windows-sandbox-setup.exe",
+    "codex-windows-managed-deny-probe.exe",
+    "codex-windows-sandbox-service.exe",
+    "codex-code-mode-host.exe"
+  ],
+  "candidate_revision": "O165",
+  "package_mode": "cadsg-native-msix"
+}
