@@ -1,0 +1,75 @@
+name: Reassemble exact qualified P20 Windows binaries
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/p20-hosted-ci-r570']
+    paths: ['.github/workflows/p20-native-package-resume.yml', 'scripts/p20_resume_packaging.py']
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: p20-resume-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  package:
+    if: ${{ !github.event.repository.private && github.ref == 'refs/heads/codex/p20-hosted-ci-r570' }}
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      CI_P20_ROOT: C:\cagp20-${{ github.run_id }}-${{ github.run_attempt }}
+      CI_REPOSITORY_VISIBILITY: public
+      CI_P20_BUILD_JOBS: '2'
+      OTEL_SDK_DISABLED: 'true'
+      VSCMD_SKIP_SENDTELEMETRY: '1'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Check disposable runner space
+        shell: pwsh
+        run: ./scripts/ci/p20-hosted-tools.ps1 -Mode Space
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.13'
+          architecture: x64
+      - name: Check CI safety and pin controller dependencies
+        shell: pwsh
+        run: |
+          python -I -B -m unittest discover -s scripts/ci -p test_p20_ci.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install --disable-pip-version-check --no-input --no-deps --only-binary=:all: --require-hashes -r scripts/ci/requirements-windows.txt
+      - name: Select exact Rust and native MSVC SDK environment
+        shell: pwsh
+        run: ./scripts/ci/p20-hosted-tools.ps1 -Mode Toolchain
+      - name: Restore the exact original producer cache
+        id: original-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            C:/cagp20-native-cache-v1/cargo/registry
+            C:/cagp20-native-cache-v1/cargo/git
+            C:/cagp20-native-cache-v1/target
+          key: p20-native-v1-Windows-rust1.99.1-msvc14.44.35207-sdk10.0.26100.0-2259036772c5d8d77d636305ab4f7f12795632b3dfa469d0df5e4a2ade51bbd7-42337939507-1
+          fail-on-cache-miss: true
+      - name: Verify and retain the original build/test evidence
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -I -B -u scripts/p20_resume_packaging.py download "$env:CI_P20_ROOT"
+      - name: Verify native identities and run normal clean-source assembly
+        shell: pwsh
+        env:
+          CI_P20_CACHE_HIT: ${{ steps.original-cache.outputs.cache-hit }}
+          CI_P20_CACHE_KEY: ${{ steps.original-cache.outputs.cache-matched-key }}
+        run: python -I -B -u scripts/p20_resume_packaging.py resume "$env:CI_P20_ROOT"
+      - name: Upload scoped output and original evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: p20-native-resume-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.CI_P20_ROOT }}/delivery/**
+            ${{ env.CI_P20_ROOT }}/evidence/**
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 0
