@@ -70,6 +70,32 @@ class Safety(unittest.TestCase):
                 else:bad["source_sha256"]="0"*64
                 with self.subTest(change=change),self.assertRaises((ValueError,KeyError)):
                     ci.verify_normal_outputs(root,bad)
+    def test_only_exact_retired_msvc_telemetry_is_classified(self):
+        import copy
+        with tempfile.TemporaryDirectory() as d:
+            folder=Path(d)
+            files={n:folder/n for n in ("cl.exe","link.exe","vctip.exe")}
+            for path in files.values(): path.write_bytes(b"synthetic fixture")
+            toolchain={"compiler":str(files["cl.exe"]),"linker":str(files["link.exe"])}
+            parent={"pid":10,"birth":"windows:100","stable":True,"exe":str(files["cl.exe"])}
+            tip={"pid":20,"birth":"windows:200","birth_after":"windows:200","stable":True,
+                 "ownership":"stable_direct_parent_edge","parent_pid":10,"ppid":10,
+                 "parent_birth":"windows:100","exe":str(files["vctip.exe"]),"argv":[str(files["vctip.exe"])]}
+            good={"returncode":0,"timed_out":False,"remaining_before_cleanup":[tip],"forced_cleanup":[tip],
+                  "observed":[parent,tip],"remaining_after_cleanup":[],"unknown_live":[]}
+            self.assertEqual(ci.classify_compiler_telemetry_cleanup(good,toolchain)["birth"],tip["birth"])
+            for changes in ({"timed_out":True},{"returncode":1},{"unknown_live":[20]},
+                            {"remaining_after_cleanup":[tip]},{"forced_cleanup":[]},{"observation_errors":["error"]},
+                            {"cleanup_errors":["error"]},{"wrapper_resource_guard":{"floor":4}},
+                            {"remaining_before_cleanup":[tip,tip]},{"observed":[tip]}):
+                with self.subTest(changes=changes):
+                    self.assertIsNone(ci.classify_compiler_telemetry_cleanup({**good,**changes},toolchain))
+            for key,value in (("parent_birth","windows:99"),("birth_after","windows:201"),
+                              ("exe",str(folder/"other/vctip.exe")),("argv",[str(files["vctip.exe"]),"foreign"])):
+                bad=copy.deepcopy(good)
+                bad["remaining_before_cleanup"][0][key]=value
+                with self.subTest(key=key):
+                    self.assertIsNone(ci.classify_compiler_telemetry_cleanup(bad,toolchain))
     def test_third_party_build_and_unit_environment_excludes_action_and_model_credentials(self):
         supplied={"PATH":"keep","CARGO_HOME":"keep-cargo","RUSTY_V8_ARCHIVE":"keep-v8",
                   "ACTIONS_RUNTIME_TOKEN":"dummy","GITHUB_TOKEN":"dummy","GH_TOKEN":"dummy",

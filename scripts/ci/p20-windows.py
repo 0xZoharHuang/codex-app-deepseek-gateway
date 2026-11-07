@@ -172,6 +172,50 @@ def prepare(root):
         "initial_memory": psutil.virtual_memory()._asdict(), "unit_cases": cases,
         "App_GUI_qualified": False, "stable_publication": False})
 
+def classify_compiler_telemetry_cleanup(result, toolchain):
+    """Accept one already-retired MSVC telemetry child by observed identity."""
+    if (type(result.get("returncode")) is not int or result["returncode"] != 0
+            or result.get("timed_out") is not False
+            or any(result.get(key) for key in ("error", "error_type", "resource_guard",
+                "wrapper_resource_guard", "remaining_after_cleanup", "unknown_live",
+                "cleanup_errors", "observation_errors"))):
+        return None
+    compiler = Path(toolchain["compiler"]).resolve()
+    linker = Path(toolchain["linker"]).resolve()
+    if (compiler.name.casefold() != "cl.exe" or linker.name.casefold() != "link.exe"
+            or compiler.parent != linker.parent):
+        return None
+    telemetry = compiler.with_name("vctip.exe")
+    if not telemetry.is_file() or telemetry.resolve() != telemetry:
+        return None
+    # Microsoft's BuildXL identifies this exact tool as a surviving telemetry
+    # child without meaningful build outputs. Still require observed ancestry
+    # and successful exact-lifetime cleanup, never accept an unknown survivor.
+    remaining = result.get("remaining_before_cleanup")
+    cleanup = result.get("forced_cleanup")
+    if not isinstance(remaining, list) or len(remaining) != 1 or remaining != cleanup:
+        return None
+    row = remaining[0]
+    if (not row.get("stable") or row.get("ownership") != "stable_direct_parent_edge"
+            or not re.fullmatch(r"windows:[0-9]+", row.get("birth") or "")
+            or row.get("birth_after") != row["birth"] or row.get("ppid") != row.get("parent_pid")
+            or not isinstance(row.get("argv"), list) or len(row["argv"]) != 1
+            or not isinstance(row.get("exe"), str) or not row["exe"]
+            or Path(row["exe"]).resolve() != telemetry or Path(row["argv"][0]).resolve() != telemetry):
+        return None
+    observed = result.get("observed", [])
+    parents = [parent for parent in observed if parent.get("pid") == row["parent_pid"]
+               and parent.get("birth") == row.get("parent_birth")]
+    if len(parents) != 1 or not parents[0].get("stable") or row not in observed:
+        return None
+    if Path(parents[0].get("exe") or "").resolve() not in {compiler, linker}:
+        return None
+    return {"kind": "observed_MSVC_VCTIP_telemetry_cleanup_only",
+            "pid": row["pid"], "birth": row["birth"], "image": str(telemetry),
+            "image_sha256": sha(telemetry), "compiler_parent_pid": row["parent_pid"],
+            "compiler_parent_birth": row["parent_birth"], "remaining_after_cleanup": []}
+
+
 def observe(command, root, cwd, environment, name, timeout):
     """Delegate process ownership/retirement to the pinned existing CI helper."""
     import psutil
@@ -203,7 +247,11 @@ def observe(command, root, cwd, environment, name, timeout):
     result.setdefault("minimum_available_memory_bytes", minimum)
     result.update(command=command, fixed_timeout_seconds=timeout,
                   log_sha256=sha(log_path), build_controller_only=True)
-    result["passed"] = bool(result["observer_passed"] and
+    telemetry = None
+    if not result["observer_passed"] and name in {"normal-six-build", "native-unit-compile"}:
+        telemetry = classify_compiler_telemetry_cleanup(result, load(root / "evidence/toolchain.json"))
+    result["qualified_compiler_telemetry_cleanup"] = telemetry
+    result["passed"] = bool((result["observer_passed"] or telemetry is not None) and
                             result.get("resource_guard") is None and guard is None)
     save(root / f"evidence/{name}.json", result)
     require(result["passed"], f"{name} failed; preserve its original lifecycle evidence")
@@ -262,6 +310,7 @@ def build(root):
             and report["effective_build_jobs"] == jobs, "Normal producer did not pass")
     manifest = load(root / "native-producer/manifest.json")
     verify_normal_outputs(root, manifest)
+    shutil.copyfile(root / "native-producer/manifest.json", root / "evidence/normal-raw-manifest.json")
     for name in ("build-report.json", "source-manifest.json", "build-owner.json"):
         shutil.copyfile(root / "work" / name, root / "evidence" / name)
     save(root / "evidence/normal-source-binding.json", {
@@ -316,9 +365,7 @@ def unit(root):
     require(builder.source_state(root / "work/source")["sha256"] == SOURCE,
             "Native source changed during unit qualification")
     manifest = load(root / "native-producer/manifest.json")
-    for entry in manifest["outputs"]:
-        require(sha(root / "native-producer" / entry["name"]) == entry["sha256"],
-                "Native units modified a production output")
+    verify_normal_outputs(root, manifest)
     save(root / "evidence/native-unit18.json", {
         "status": "P20_NATIVE_COMPONENT18_PASSED_NOT_APP_QUALIFIED",
         "cases": observed, "source_sha256": SOURCE, "lock_sha256": LOCK,
