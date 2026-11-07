@@ -1,9 +1,6 @@
-name: Reassemble exact qualified P20 Windows binaries
+name: Finish exact cached P21 Git tests and native assembly
 on:
   workflow_dispatch:
-  push:
-    branches: ['codex/p20-hosted-ci-r570']
-    paths: ['.github/workflows/p20-native-package-resume.yml', 'scripts/p20_resume_packaging.py']
 permissions:
   contents: read
   actions: read
@@ -14,7 +11,7 @@ jobs:
   package:
     if: ${{ !github.event.repository.private && github.ref == 'refs/heads/codex/p20-hosted-ci-r570' }}
     runs-on: windows-2022
-    timeout-minutes: 45
+    timeout-minutes: 75
     env:
       CI_P20_ROOT: C:\cagp20-${{ github.run_id }}-${{ github.run_attempt }}
       CI_REPOSITORY_VISIBILITY: public
@@ -49,14 +46,14 @@ jobs:
             C:/cagp20-native-cache-v1/cargo/registry
             C:/cagp20-native-cache-v1/cargo/git
             C:/cagp20-native-cache-v1/target
-          key: p20-native-v1-Windows-rust1.99.1-msvc14.44.35207-sdk10.0.26100.0-2259036772c5d8d77d636305ab4f7f12795632b3dfa469d0df5e4a2ade51bbd7-42337939507-1
+          key: p21-native-v1-Windows-c784d939e4c5afbf5357c56313e14792d6e2939a4728fe77d80494d475a4b453-42361797405-1
           fail-on-cache-miss: true
       - name: Verify and retain the original build/test evidence
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: python -I -B -u scripts/p20_resume_packaging.py download "$env:CI_P20_ROOT"
-      - name: Verify native identities and run normal clean-source assembly
+      - name: Recheck six binaries, run twelve actual Git tests and assemble
         shell: pwsh
         env:
           CI_P20_CACHE_HIT: ${{ steps.original-cache.outputs.cache-hit }}
@@ -66,7 +63,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: p20-native-resume-${{ github.run_id }}-${{ github.run_attempt }}
+          name: p21-native-resume-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ env.CI_P20_ROOT }}/delivery/**
             ${{ env.CI_P20_ROOT }}/evidence/**

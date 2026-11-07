@@ -1,16 +1,14 @@
-"""Reassemble the exact six already qualified P20 executables on a hosted runner."""
+"""Continue P21 Git tests and packaging with the six original hosted binaries."""
 from pathlib import Path
 import hashlib, json, os, re, shutil, subprocess, sys, zipfile
 
 REPO = Path(__file__).resolve().parents[1]
-ORIGIN_COMMIT = "3df1208bfa98c29a73b719001bff72d1e216ff64"
-ORIGIN_RUN = 42337939507
-ORIGIN_ARTIFACT = 13563585381
-ORIGIN_SHA = "51afeb0745dd2d3fc169ebf6a040cf233139e25e18ee76d9aa9b1c9aa610f378"
-CACHE_KEY = (
-    "p20-native-v1-Windows-rust1.99.1-msvc14.44.35207-sdk10.0.26100.0-"
-    "2259036772c5d8d77d636305ab4f7f12795632b3dfa469d0df5e4a2ade51bbd7-42337939507-1"
-)
+ORIGIN_COMMIT = "73dba33e75c720193d9f64f31bfa0ceb89e4272b"
+ORIGIN_RUN = 42361797405
+ORIGIN_ARTIFACT = 13572737204
+ORIGIN_SHA = "3302e03f07cb9e6f8c642b4433f68105f9b1eb2af1ae2f2c0ffd9882b735403d"
+ORIGIN_SIZE = 22443680
+CACHE_KEY = "p21-native-v1-Windows-c784d939e4c5afbf5357c56313e14792d6e2939a4728fe77d80494d475a4b453-42361797405-1"
 REPOSITORY = "0xZoharHuang/codex-app-deepseek-gateway"
 
 
@@ -20,6 +18,8 @@ def load_ci():
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    module.CANDIDATE, module.LOCK = "P21", module.P21_LOCK
+    module.SOURCE, module.SOURCE_FILES = module.P21_SOURCE, module.P21_SOURCE_FILES
     return module
 
 
@@ -71,14 +71,34 @@ def read_origin(ci, archive):
                 and text.count(f"test {row['name']} ... ok\n") == 1
                 and text.count("test result: ok. 1 passed; 0 failed; 0 ignored;") == 1,
                 "Original exact native test proof differs")
-    libtest = "delivery/unit/codex-windows-sandbox-p20-libtest.exe"
+    libtest = "delivery/unit/codex-windows-sandbox-p21-libtest.exe"
     with archive.open(libtest) as f:
         require(hashlib.file_digest(f, "sha256").hexdigest() == unit["executable"]["sha256"],
                 "Original qualified libtest bytes differ")
-    old = archive.read("evidence/normal-assembly/cargo-metadata.stderr")
-    require(b"failed to download " in old and b"asn1-rs v0.6.2" in old and b"--offline" in old,
-            "Original packaging failure evidence differs")
-    return raw, libtest
+    failed = json.loads(archive.read("evidence/git_unit-failure.json"))
+    require(failed["error"] == "native-git-unit-compile failed; preserve its original lifecycle evidence",
+            "Original Git test observer failure differs")
+    compile_log = archive.read("evidence/native-git-unit-compile.log")
+    original = json.loads(archive.read("evidence/native-git-unit-compile.json"))
+    require(original["passed"] is False and original["returncode"] == 0
+            and original["timed_out"] is False and original["log_sha256"] == sha(compile_log),
+            "Original Git test compile disposition differs")
+    artifacts, finished = [], []
+    for line in compile_log.decode("utf8", errors="replace").splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if row.get("reason") == "compiler-artifact" and row.get("executable") and \
+                row.get("target", {}).get("name") == "codex_core_plugins" and \
+                row.get("profile", {}).get("test") is True:
+            artifacts.append(row)
+        if row.get("reason") == "build-finished":
+            finished.append(row.get("success"))
+    require(len(artifacts) == 1 and finished == [True]
+            and artifacts[0]["profile"]["opt_level"] == "3",
+            "Original optimized Git libtest did not compile")
+    return raw, libtest, original
 
 
 def download(ci, root, path):
@@ -87,21 +107,33 @@ def download(ci, root, path):
     with path.open("xb") as out:
         result = subprocess.run(["gh", "api", f"repos/{REPOSITORY}/actions/artifacts/{ORIGIN_ARTIFACT}/zip"],
                                 stdout=out, stderr=subprocess.PIPE, timeout=120)
-    require(result.returncode == 0 and ci.sha(path) == ORIGIN_SHA, "Original Actions artifact download differs")
+    require(result.returncode == 0 and path.stat().st_size == ORIGIN_SIZE and ci.sha(path) == ORIGIN_SHA,
+            "Original Actions artifact download differs")
 
 
 def resume(ci, root, path):
     require(os.environ.get("CI_P20_CACHE_HIT") == "true"
             and os.environ.get("CI_P20_CACHE_KEY") == CACHE_KEY, "Exact original cache restore required")
-    require(ci.sha(path) == ORIGIN_SHA, "Original Actions artifact SHA differs")
+    require(path.stat().st_size == ORIGIN_SIZE and ci.sha(path) == ORIGIN_SHA,
+            "Original Actions artifact SHA differs")
+    require(os.environ.get("VCToolsVersion") == "14.44.35207"
+            and os.environ.get("UCRTVersion") == "10.0.26100.0",
+            "Exact original MSVC and SDK required")
+    work = ci.work_path(root)
+    require(Path(root.anchor) == Path(work.anchor) and not work.parent.exists(),
+            "Original absolute work root must be absent on a fresh runner")
     ci.prepare(root)
     lock, builder, _ = ci.plan()
     cache, target = ci.cache_paths(root)
     with zipfile.ZipFile(path) as archive:
-        raw, libtest = read_origin(ci, archive)
+        raw, libtest, failed_compile = read_origin(ci, archive)
+        telemetry = ci.classify_compiler_telemetry_cleanup(failed_compile, ci.load(root / "evidence/toolchain.json"))
+        require(telemetry is not None, "Original failure was not solely exact retired MSVC telemetry")
         manifest = json.loads(raw)
-        require(manifest["target"] == str(target) and manifest["cargo_home"] == str(cache / "cargo"),
-                "Restored target differs from original producer")
+        require(manifest["target"] == str(target) and manifest["cargo_home"] == str(cache / "cargo")
+                and manifest["source"] == str(work / "source")
+                and target.resolve(strict=True) == target and not target.is_junction(),
+                "Restored physical target and original source path required")
         producer = root / "native-producer"
         producer.mkdir()
         rows = manifest["binaries"]
@@ -115,46 +147,47 @@ def resume(ci, root, path):
         (producer / "manifest.json").write_bytes(raw)
         ci.verify_normal_outputs(root, manifest)
         for name in ("normal-six-build.json", "normal-six-build.log", "build-report.json",
-                     "normal-source-binding.json", "normal-raw-manifest.json", "native-unit18.json"):
+                     "normal-source-binding.json", "normal-raw-manifest.json", "native-unit18.json",
+                     "exact-p20-cache-admission.json"):
             extract_exact(archive, "evidence/" + name, root / "evidence" / name)
         for i in range(18):
             for suffix in (".log", ".json"):
                 name = f"native-case-{i:02}" + suffix
                 extract_exact(archive, "evidence/" + name, root / "evidence" / name)
         for name, member in [("original-inputs.json", "evidence/inputs.json"),
-                             ("original-package-failure.json", "evidence/package-failure.json"),
-                             ("original-cargo-metadata.stderr", "evidence/normal-assembly/cargo-metadata.stderr")]:
+                             ("original-git-unit-failure.json", "evidence/git_unit-failure.json"),
+                             ("original-native-git-unit-compile.json", "evidence/native-git-unit-compile.json"),
+                             ("original-native-git-unit-compile.log", "evidence/native-git-unit-compile.log")]:
             extract_exact(archive, member, root / "evidence" / name)
         unit_dir = root / "delivery/unit"
         unit_dir.mkdir()
         extract_exact(archive, libtest, unit_dir / Path(libtest).name)
-    source = root / "work/source"
-    source.parent.mkdir()
+    source = work / "source"
     builder.prepare_source(root / "inputs/upstream.tar.gz", source, lock, shutil.which("git.exe"))
     before = builder.source_state(source)
     require(before["sha256"] == ci.SOURCE and before["count"] == lock["prepared_source_files"],
             "Resumed prepared source differs")
-    cargo = Path(os.environ["CI_RUST_TOOLCHAIN_BIN"]) / "cargo.exe"
-    env = {k: v for k, v in ci.clean_environment().items()
-           if not any(word in k.upper() for word in ("TOKEN", "PASSWORD", "SECRET"))}
-    env.update(CARGO_HOME=str(cache / "cargo"), CARGO_NET_OFFLINE="false")
-    ci.observe([str(cargo), "fetch", "--locked", "--target", lock["target"],
-                "--manifest-path", str(source / "codex-rs/Cargo.toml")],
-               root, source, env, "stage-locked-windows-metadata", 600)
-    require(builder.source_state(source) == before, "Locked dependency fetch changed prepared source")
+    # Fresh Cargo recognition from the exact warm cache. The old compiled
+    # libtest had no separately sealed hash because its observer rejected.
+    ci.git_unit(root)
+    require(builder.source_state(source) == before, "Git tests changed prepared source")
     ci.verify_normal_outputs(root, manifest)
     ci.package(root)
     ci.verify_normal_outputs(root, manifest)
-    chain = {"status": "EXACT_HOSTED_P20_PRODUCER_REASSEMBLED",
+    chain = {"status": "EXACT_HOSTED_P21_PRODUCER_GIT_TESTED_AND_REASSEMBLED",
              "original_commit": ORIGIN_COMMIT, "original_run": ORIGIN_RUN,
              "original_artifact_id": ORIGIN_ARTIFACT, "original_artifact_sha256": ORIGIN_SHA,
              "exact_cache_key": CACHE_KEY, "source_sha256": ci.SOURCE, "lock_sha256": ci.LOCK,
              "original_raw_manifest_sha256": sha(raw),
              "restored_six": {row["file"]: row["sha256"] for row in rows},
              "original_native_unit18_sha256": ci.sha(root / "evidence/native-unit18.json"),
+             "original_rejected_git_compile_sha256": ci.sha(root / "evidence/original-native-git-unit-compile.json"),
+             "original_exact_msvc_telemetry_cleanup": telemetry,
+             "fresh_native_git_unit12_sha256": ci.sha(root / "evidence/native-git-unit12.json"),
              "metadata_fetch_observation_sha256": ci.sha(root / "evidence/stage-locked-windows-metadata.json"),
              "clean_assembly_candidate_sha256": ci.sha(root / "delivery/candidate.json"),
-             "native_rebuild_performed": False, "original_unit_tests_reexecuted": False,
+             "native_six_rebuilt": False, "original_unit_tests_reexecuted": False,
+             "fresh_warm_git_libtest_recognized_and_executed": True,
              "App_GUI_qualified": False}
     ci.save(root / "delivery/assembly-resume-chain.json", chain)
 
@@ -163,8 +196,9 @@ def main():
     require(len(sys.argv) == 3 and sys.argv[1] in {"download", "resume"}, "Expected phase and hosted root")
     ci = load_ci()
     root = ci.hosted_root(Path(sys.argv[2]))
-    require(os.environ.get("GITHUB_REF") == "refs/heads/codex/p20-hosted-ci-r570",
-            "Original exact cache branch required")
+    require(os.environ.get("GITHUB_REF") == "refs/heads/codex/p20-hosted-ci-r570"
+            and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch",
+            "Manual continuation on the original exact cache branch required")
     path = root / "original-producer-artifact.zip"
     if sys.argv[1] == "download":
         download(ci, root, path)

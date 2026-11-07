@@ -265,7 +265,7 @@ def observe(command, root, cwd, environment, name, timeout):
     result.update(command=command, fixed_timeout_seconds=timeout,
                   log_sha256=sha(log_path), build_controller_only=True)
     telemetry = None
-    if not result["observer_passed"] and name in {"normal-six-build", "native-unit-compile"}:
+    if not result["observer_passed"] and name in {"normal-six-build", "native-unit-compile", "native-git-unit-compile"}:
         telemetry = classify_compiler_telemetry_cleanup(result, load(root / "evidence/toolchain.json"))
     result["qualified_compiler_telemetry_cleanup"] = telemetry
     result["passed"] = bool((result["observer_passed"] or telemetry is not None) and
