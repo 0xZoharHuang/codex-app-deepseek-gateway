@@ -42,6 +42,7 @@ src/codex_app_deepseek/runtime_package.py -text
 
 # Checksum-bound native/CI inputs must survive every checkout byte-for-byte.
 native/build-lock.*-source.json -text
+native/licenses/spdx/*.txt -text
 scripts/build_native.py -text
 scripts/package_native_release.py -text
 scripts/ci/* -text

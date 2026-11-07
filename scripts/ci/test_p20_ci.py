@@ -1,6 +1,6 @@
 """Offline CI safety/configuration checks; never build or reclaim hosted tools."""
 from pathlib import Path
-import importlib.util, os, re, shutil, subprocess, sys, tempfile, unittest
+import hashlib, importlib.util, json, os, re, shutil, subprocess, sys, tempfile, unittest
 SCRIPT=Path(__file__).with_name("p20-windows.py")
 spec=importlib.util.spec_from_file_location("p20_ci_test_target",SCRIPT)
 ci=importlib.util.module_from_spec(spec);spec.loader.exec_module(ci)
@@ -130,6 +130,13 @@ class Safety(unittest.TestCase):
                    re.fullmatch(r"native/build-lock\..*-source\.json",n)or
                    n in("scripts/build_native.py","scripts/package_native_release.py")or
                    n.startswith("scripts/ci/"))]
+            license_data=json.loads((ci.REPO/"native/license-data.json").read_bytes())
+            spdx={f"native/licenses/spdx/{row['id']}.txt":row["sha256"]
+                  for row in license_data["texts"]}
+            self.assertTrue(spdx)
+            self.assertEqual(set(spdx),{p.relative_to(ci.REPO).as_posix()
+                                       for p in (ci.REPO/"native/licenses/spdx").glob("*.txt")})
+            names.extend(sorted(spdx))
             self.assertIn("native/build-lock.O165-P20-source.json",names)
             source=run(ci.REPO,"cat-file","--batch",
                        data="".join("HEAD:"+n+"\n"for n in names).encode())
@@ -139,6 +146,8 @@ class Safety(unittest.TestCase):
                 self.assertEqual(header[1],b"blob")
                 size=int(header[2]);cursor=end+1
                 blobs[name]=source[cursor:cursor+size];cursor+=size+1
+            for name, expected in spdx.items():
+                self.assertEqual(hashlib.sha256(blobs[name]).hexdigest(),expected,name)
             def checkout(label,attributes):
                 repo=temp/label;repo.mkdir()
                 run(repo,"init","--quiet","--object-format=sha1",f"--template={empty}")
@@ -161,6 +170,7 @@ class Safety(unittest.TestCase):
             self.assertIn("scripts/build_native.py",old_differences)
             self.assertIn("scripts/package_native_release.py",old_differences)
             self.assertTrue(any(x.startswith("scripts/ci/")for x in old_differences))
+            self.assertTrue(set(spdx).issubset(old_differences))
             self.assertEqual(checkout("fixed",(ci.REPO/".gitattributes").read_bytes()),[])
     def test_normal_builder_and_packager_not_changed(self):
         self.assertEqual(ci.sha(ci.REPO/"scripts/build_native.py"),"f6426bc41f57304f4c252267bac5d97749912e20b4033b60a6a8a9613e18d0d4")
