@@ -1,4 +1,4 @@
-name: Finish exact cached P21 Git tests and native assembly
+name: Assemble exact P21 after completed native tests
 on:
   workflow_dispatch:
 permissions:
@@ -11,7 +11,7 @@ jobs:
   package:
     if: ${{ !github.event.repository.private && github.ref == 'refs/heads/codex/p20-hosted-ci-r570' }}
     runs-on: windows-2022
-    timeout-minutes: 75
+    timeout-minutes: 45
     env:
       CI_P20_ROOT: C:\cagp20-${{ github.run_id }}-${{ github.run_attempt }}
       CI_REPOSITORY_VISIBILITY: public
@@ -53,7 +53,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python -I -B -u scripts/p20_resume_packaging.py download "$env:CI_P20_ROOT"
-      - name: Recheck six binaries, run twelve actual Git tests and assemble
+      - name: Verify original six and all thirty passed receipts, then only assemble
         shell: pwsh
         env:
           CI_P20_CACHE_HIT: ${{ steps.original-cache.outputs.cache-hit }}

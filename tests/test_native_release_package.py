@@ -506,7 +506,7 @@ def test_six_target_public_bundle_keeps_exact_inventory_and_explicit_legacy_mode
         assert set(pack.raw_outputs(value)) == pack.SOURCE_BINARIES
 
 
-@pytest.mark.parametrize("lock_name", ["build-lock.O165-P16-source.json", "build-lock.O165-P17-source.json", "build-lock.O165-P18-source.json", "build-lock.O165-P19-source.json", "build-lock.O165-P20-source.json"])
+@pytest.mark.parametrize("lock_name", ["build-lock.O165-P16-source.json", "build-lock.O165-P17-source.json", "build-lock.O165-P18-source.json", "build-lock.O165-P19-source.json", "build-lock.O165-P20-source.json", "build-lock.O165-P21-source.json"])
 def test_reviewed_source_public_projection_and_archive_keep_all_six_producers(tmp_path, lock_name):
     _, _, _, value, build = single_recipe(tmp_path)
     lock_path = ROOT/"native"/lock_name
@@ -661,3 +661,31 @@ def test_p20_equal_json_cannot_replace_exact_original_disk_pin(tmp_path, problem
     (native/name).write_text(json.dumps(lock, separators=(",", ":")), encoding="utf-8")
     with pytest.raises(ValueError, match="reviewed P20 lock"):
         pack.single_graph(lock, native)
+
+
+@pytest.mark.parametrize("problem", [None, "source", "missing_git_overlay", "different_bytes", "different_name"])
+def test_p21_source_graph_admits_only_exact_git_overlay_lock(tmp_path, problem):
+    old = ROOT/"native/build-lock.O165-P20-source.json"
+    path = ROOT/"native/build-lock.O165-P21-source.json"
+    assert pack.sha(old) == pack.P20_LOCK_SHA256
+    assert pack.sha(path) == pack.P21_LOCK_SHA256
+    lock = pack.load(path)
+    assert lock["patches"][:-1] == pack.load(old)["patches"]
+    assert lock["patches"][-1]["file"] == "cadsg-native-plugin-git-atomic-0165.patch"
+    native = ROOT/"native"
+    if problem == "source":
+        lock["prepared_source_sha256"] = "0"*64
+    elif problem == "missing_git_overlay":
+        lock["patches"].pop()
+    elif problem in ("different_bytes", "different_name"):
+        native = tmp_path/"native"
+        native.mkdir()
+        if problem == "different_bytes":
+            (native/path.name).write_text(json.dumps(lock, separators=(",", ":")), encoding="utf-8")
+        else:
+            (native/"unreviewed.json").write_bytes(path.read_bytes())
+    if problem:
+        with pytest.raises(ValueError, match="reviewed P21 lock"):
+            pack.single_graph(lock, native)
+    else:
+        assert pack.single_graph(lock, native)["producer_id"] == "O165"

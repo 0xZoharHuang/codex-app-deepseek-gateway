@@ -172,7 +172,7 @@ class Safety(unittest.TestCase):
             self.assertTrue(any(x.startswith("scripts/ci/")for x in old_differences))
             self.assertTrue(set(spdx).issubset(old_differences))
             self.assertEqual(checkout("fixed",(ci.REPO/".gitattributes").read_bytes()),[])
-    def test_normal_builder_and_packager_not_changed(self):
+    def test_normal_builder_and_reviewed_packager_bytes(self):
         self.assertEqual(ci.sha(ci.REPO/"scripts/build_native.py"),"f6426bc41f57304f4c252267bac5d97749912e20b4033b60a6a8a9613e18d0d4")
-        self.assertEqual(ci.sha(ci.REPO/"scripts/package_native_release.py"),"3ea29a1e23a66fc3aded1c24d4723853a0e238f15871cd84c544ef13797e399e")
+        self.assertEqual(ci.sha(ci.REPO/"scripts/package_native_release.py"),"e821b0e1a9672e737ad27863663c174a1c975735d06589839aaad7f1d8512dc5")
 if __name__=="__main__":unittest.main()
