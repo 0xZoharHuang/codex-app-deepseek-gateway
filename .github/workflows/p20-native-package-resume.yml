@@ -1,72 +1,108 @@
-name: Assemble exact P21 after completed native tests
+name: P167 early unqualified draft assembly
 on:
   workflow_dispatch:
+    inputs:
+      candidate:
+        description: Exact P167 Windows native candidate
+        required: true
+        type: choice
+        options: [P167]
+        default: P167
+      lock_sha256:
+        description: Exact reviewed O167 native build-lock SHA256
+        required: true
+        type: string
+      draft_release_id:
+        description: Exact unpublished EARLY_UNQUALIFIED draft release ID
+        required: true
+        type: string
 permissions:
-  contents: read
+  contents: write
   actions: read
 concurrency:
-  group: p20-resume-${{ github.ref }}
+  group: p167-early-draft-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  package:
-    if: ${{ !github.event.repository.private && github.ref == 'refs/heads/codex/p20-hosted-ci-r570' }}
+  native:
+    if: ${{ !github.event.repository.private && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/p167-hosted-ci-r626' && inputs.candidate == 'P167' }}
     runs-on: windows-2022
-    timeout-minutes: 45
+    timeout-minutes: 75
     env:
-      CI_P20_ROOT: C:\cagp20-${{ github.run_id }}-${{ github.run_attempt }}
+      CI_P20_ROOT: C:\cagp167-${{ github.run_id }}-${{ github.run_attempt }}
       CI_REPOSITORY_VISIBILITY: public
       CI_P20_BUILD_JOBS: '2'
+      CI_P167_RESUME: '1'
+      CI_P167_TEST_RESUME: '1'
+      CI_P167_EARLY_DRAFT: '1'
+      CI_P167_APPROVED_LOCK_SHA256: ${{ inputs.lock_sha256 }}
       OTEL_SDK_DISABLED: 'true'
       VSCMD_SKIP_SENDTELEMETRY: '1'
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Checkout exact candidate without persisted credentials
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - name: Check disposable runner space
-        shell: pwsh
-        run: ./scripts/ci/p20-hosted-tools.ps1 -Mode Space
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - name: Python for build control only
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.13'
           architecture: x64
-      - name: Check CI safety and pin controller dependencies
+      - name: Verify reviewed lock, assembly admission, and exact gates
         shell: pwsh
         run: |
-          python -I -B -m unittest discover -s scripts/ci -p test_p20_ci.py -v
+          python -I -B -u scripts/ci/p20-windows.py check-only --candidate P167
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pip install --disable-pip-version-check --no-input --no-deps --only-binary=:all: --require-hashes -r scripts/ci/requirements-windows.txt
-      - name: Select exact Rust and native MSVC SDK environment
+          $hash = (Get-FileHash -Algorithm SHA256 native/build-lock.O167-P167-source.json).Hash.ToLowerInvariant()
+          if ($hash -cne $env:CI_P167_APPROVED_LOCK_SHA256) { throw 'Dispatch lock SHA differs from reviewed native lock.' }
+          python -I -B -m unittest discover -s scripts/ci -p test_p167_early_draft.py -v
+      - name: Check disposable runner space
         shell: pwsh
-        run: ./scripts/ci/p20-hosted-tools.ps1 -Mode Toolchain
-      - name: Restore the exact original producer cache
+        run: ./scripts/ci/p20-hosted-tools.ps1 -Mode Space -Candidate P167
+      - name: Install pinned controller dependency
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check --no-input --no-deps --only-binary=:all: --require-hashes -r scripts/ci/requirements-windows.txt
+      - name: Select exact Rust and native MSVC SDK
+        shell: pwsh
+        run: ./scripts/ci/p20-hosted-tools.ps1 -Mode Toolchain -Candidate P167
+      - name: Verify official source, V8 chain, and process observer inputs
+        shell: pwsh
+        run: python -I -B -u scripts/ci/p20-windows.py prepare --candidate P167 --root "$env:CI_P20_ROOT"
+      - name: Restore exact completed P167 producer and test intermediates
         id: original-cache
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
-            C:/cagp20-native-cache-v1/cargo/registry
-            C:/cagp20-native-cache-v1/cargo/git
-            C:/cagp20-native-cache-v1/target
-          key: p21-native-v1-Windows-c784d939e4c5afbf5357c56313e14792d6e2939a4728fe77d80494d475a4b453-42361797405-1
+            C:/c167/cargo/registry
+            C:/c167/cargo/git
+            C:/c167/target
+          key: p167-native-v1-Windows-rust1.95.0-msvc14.44.35207-sdk10.0.26100.0-24dab591cfe8c61f3960f109f1a67c7d3e57d9dc371fe8ed09042d35cc695c6d-42511450429-1
           fail-on-cache-miss: true
-      - name: Verify and retain the original build/test evidence
+      - name: Verify original completed six sandbox and Git evidence
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python -I -B -u scripts/p20_resume_packaging.py download "$env:CI_P20_ROOT"
-      - name: Verify original six and all thirty passed receipts, then only assemble
+        run: python -I -B -u scripts/ci/p20-windows.py resume_inputs --candidate P167 --root "$env:CI_P20_ROOT"
+      - name: Verify locked Cargo and nested V8 dependency checkout before compilation
+        id: locked-fetch
         shell: pwsh
         env:
-          CI_P20_CACHE_HIT: ${{ steps.original-cache.outputs.cache-hit }}
-          CI_P20_CACHE_KEY: ${{ steps.original-cache.outputs.cache-matched-key }}
-        run: python -I -B -u scripts/p20_resume_packaging.py resume "$env:CI_P20_ROOT"
-      - name: Upload scoped output and original evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: p21-native-resume-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ env.CI_P20_ROOT }}/delivery/**
-            ${{ env.CI_P20_ROOT }}/evidence/**
-          if-no-files-found: warn
-          retention-days: 14
-          compression-level: 0
+          CI_P167_CACHE_HIT: ${{ steps.original-cache.outputs.cache-hit }}
+          CI_P167_CACHE_KEY: ${{ steps.original-cache.outputs.cache-matched-key }}
+        run: python -I -B -u scripts/ci/p20-windows.py locked_fetch --candidate P167 --root "$env:CI_P20_ROOT"
+      - name: Restore verified six outputs and original sandbox18 and Git12 receipts
+        id: restore-producer
+        shell: pwsh
+        env:
+          CI_P167_CACHE_HIT: ${{ steps.original-cache.outputs.cache-hit }}
+          CI_P167_CACHE_KEY: ${{ steps.original-cache.outputs.cache-matched-key }}
+        run: python -I -B -u scripts/ci/p20-windows.py restore_producer --candidate P167 --root "$env:CI_P20_ROOT"
+      - name: Assemble EARLY_UNQUALIFIED with the normal offline packager
+        shell: pwsh
+        run: python -I -B -u scripts/ci/p167-early-draft.py assemble --root "$env:CI_P20_ROOT"
+      - name: Upload exact EARLY_UNQUALIFIED bytes to the authorized unpublished draft
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          P167_DRAFT_RELEASE_ID: ${{ inputs.draft_release_id }}
+        run: python -I -B -u scripts/ci/p167-early-draft.py upload --root "$env:CI_P20_ROOT" --release "$env:P167_DRAFT_RELEASE_ID"
