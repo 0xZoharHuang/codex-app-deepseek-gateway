@@ -420,7 +420,15 @@ def native_lock_path():
 
 
 def work_path(root):
-    return P20_WARM_WORK if CANDIDATE == "P21" else root / "work"
+    if CANDIDATE == "P21":
+        return P20_WARM_WORK
+    if CANDIDATE == "P167" and os.environ.get("CI_P167_RESUME") == "1":
+        return resume_controller().original_work(root)
+    return root / "work"
+
+
+def resume_controller():
+    return load_module("cadsg_p167_resume", REPO / "scripts/ci/p167-resume.py")
 
 
 def verify_p21_cache(root):
@@ -492,14 +500,23 @@ def p167_checkout_proof(cargo_home, git, environment):
             "cargo_ready_marker_present": True}
 
 
+def resume_inputs(root):
+    require(CANDIDATE == "P167", "Exact hosted resume is P167 only")
+    resume_controller().download(root)
+
+
 def locked_fetch(root):
     require(CANDIDATE == "P167", "Locked pre-build dependency checkout is P167 only")
     lock, builder, _ = plan()
     require((root / "evidence/inputs.json").is_file(), "Verified public inputs required")
     cache, target = cache_paths(root)
     cargo_home = cache / "cargo"
-    require(cargo_home.is_dir() and not any(cargo_home.iterdir()) and target.is_dir()
-            and not any(target.iterdir()), "P167 fetch needs the fresh, empty producer cache")
+    restored = None
+    if os.environ.get("CI_P167_RESUME") == "1":
+        restored = resume_controller().admit_cache(root, lock, SOURCE, LOCK, cache, target)
+    else:
+        require(cargo_home.is_dir() and not any(cargo_home.iterdir()) and target.is_dir()
+                and not any(target.iterdir()), "P167 fetch needs the fresh, empty producer cache")
     config = p167_git_config(root)
     config.parent.mkdir(parents=True)
     with config.open("xb") as stream:
@@ -528,13 +545,17 @@ def locked_fetch(root):
     environment = p167_environment(root, builder.build_environment(
         source.parent, toolchain, cache, target_dir=metadata_target))
     environment.update(CARGO_BUILD_BUILD_DIR=str(metadata_target),
-                       CARGO_NET_OFFLINE="false", CARGO_NET_GIT_FETCH_WITH_CLI="false")
+                       CARGO_NET_OFFLINE="true" if restored else "false",
+                       CARGO_NET_GIT_FETCH_WITH_CLI="false")
     result = observe([str(toolchain / "cargo.exe"), "fetch", "--locked", "--target", lock["target"]],
                      root, source / "codex-rs", environment, "p167-locked-fetch", 1200)
     require(builder.source_state(source) == before and sha(cargo_lock) == lock["cargo_lock_sha256"],
             "Cargo fetch changed the reviewed source or Cargo.lock")
-    require(not any(target.iterdir()), "Cargo fetch changed the empty producer target directory")
+    if restored is None:
+        require(not any(target.iterdir()), "Cargo fetch changed the empty producer target directory")
     checkout = p167_checkout_proof(cargo_home, git, environment)
+    if restored is not None:
+        require(checkout == restored["checkout"], "Exact restored V8 checkout witness differs")
     save(root / "evidence/p167-dependency-checkout.json", {
         "status": "LOCKED_FETCH_CHECKOUT_PROVEN", "source_sha256": SOURCE, "build_lock_sha256": LOCK,
         "cargo_lock_sha256": lock["cargo_lock_sha256"], "cargo_home": str(cargo_home),
@@ -544,6 +565,7 @@ def locked_fetch(root):
         "git_configuration_sha256": sha(config), "fetch_log_sha256": result["log_sha256"],
         "fetch_observer_sha256": sha(root / "evidence/p167-locked-fetch.json"),
         "compiled_native_targets": 0, "global_git_config_changed": False,
+        **({"resume_cache": restored} if restored is not None else {}),
     })
 
 
@@ -552,6 +574,12 @@ def require_p167_dependency_checkout(root, lock, toolchain):
     cargo_home = cache / "cargo"
     receipt = load(root / "evidence/p167-dependency-checkout.json")
     environment = p167_environment(root)
+    if os.environ.get("CI_P167_RESUME") == "1":
+        restored = resume_controller().admit_cache(root, lock, SOURCE, LOCK, cache, target)
+        require(receipt.get("resume_cache") == restored, "Fetch receipt did not bind the exact restored cache")
+    else:
+        require(not any(target.iterdir()) and "resume_cache" not in receipt,
+                "Fresh producer requires the original empty target")
     require(receipt["status"] == "LOCKED_FETCH_CHECKOUT_PROVEN"
             and receipt["build_lock_sha256"] == LOCK and receipt["source_sha256"] == SOURCE
             and receipt["cargo_lock_sha256"] == lock["cargo_lock_sha256"]
@@ -562,8 +590,8 @@ def require_p167_dependency_checkout(root, lock, toolchain):
             and receipt["fetch_log_sha256"] == sha(root / "evidence/p167-locked-fetch.log")
             and receipt["fetch_observer_sha256"] == sha(root / "evidence/p167-locked-fetch.json")
             and load(root / "evidence/p167-locked-fetch.json")["passed"] is True
-            and receipt["checkout"] == p167_checkout_proof(cargo_home, shutil.which("git.exe"), environment)
-            and not any(target.iterdir()), "Verified exact dependency checkout required before native build")
+            and receipt["checkout"] == p167_checkout_proof(cargo_home, shutil.which("git.exe"), environment),
+            "Verified exact dependency checkout required before native build")
     environment.update(CARGO_NET_OFFLINE="true", CARGO_NET_GIT_FETCH_WITH_CLI="false")
     return environment
 
@@ -602,6 +630,8 @@ def build(root):
     save(root / "evidence/normal-source-binding.json", {
         "normal_manifest_sha256": sha(root / "native-producer/manifest.json"),
         "source_sha256": SOURCE, "lock_sha256": LOCK, "native_build_executed": True,
+        **({"resume_cache": load(root / "evidence/p167-dependency-checkout.json")["resume_cache"]}
+           if CANDIDATE == "P167" and os.environ.get("CI_P167_RESUME") == "1" else {}),
         "App_GUI_qualified": False})
 
 def exact_case_log(path, case):
@@ -786,7 +816,7 @@ def package(root):
 def main():
     global CANDIDATE, LOCK, SOURCE, SOURCE_FILES, RUST_VERSION, P167_CASES
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("check-only", "prepare", "locked_fetch", "build", "unit", "git_unit", "extra_unit", "package"))
+    parser.add_argument("mode", choices=("check-only", "prepare", "resume_inputs", "locked_fetch", "build", "unit", "git_unit", "extra_unit", "package"))
     parser.add_argument("--root", type=Path)
     parser.add_argument("--candidate", choices=("P20", "P21", "P167"), default="P20")
     args = parser.parse_args()

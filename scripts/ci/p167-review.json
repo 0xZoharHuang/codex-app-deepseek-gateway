@@ -17,5 +17,5 @@
     "session::request_capacity::tests::cold_owned_checkpoint_revalidates_typed_image_metadata_and_delete_fences_late_writer",
     "session::tests::capacity_install_append_failure_fences_session_and_preserves_exact_pending_suffix"
   ],
-  "workflow_sha256": "eeec3915a01ae95b7934ad4e83ab4e5577c2aa7933ebf1db045b75a6452668c3"
+  "workflow_sha256": "4f45173fdeb4a6c0fc31c1091e14a73336def6708c887f8889be02f766e3471a"
 }

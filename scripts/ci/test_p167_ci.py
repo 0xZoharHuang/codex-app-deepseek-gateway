@@ -149,7 +149,7 @@ class P167Gate(unittest.TestCase):
     def test_producer_refuses_missing_or_changed_dependency_evidence(self):
         with tempfile.TemporaryDirectory() as directory, patch.multiple(
             ci, CANDIDATE="P167", LOCK="1" * 64, SOURCE="2" * 64,
-        ):
+        ), patch.dict(ci.os.environ, {"CI_P167_RESUME": "0"}):
             root = Path(directory)
             cache = root / "short-cache"
             target = cache / "target"
@@ -196,15 +196,35 @@ class P167Gate(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     ci.require_p167_dependency_checkout(root, lock, toolchain)
 
-    def test_workflow_read_only_one_cold_build_and_no_restore(self):
+    def test_resume_cache_miss_and_wrong_artifact_fail_closed(self):
+        resume = ci.resume_controller()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / "c167"
+            for bad in ("wrong", resume.CACHE_KEY):
+                with patch.dict(os.environ, {"CI_P167_RESUME": "1", "CI_P167_CACHE_KEY": bad,
+                                             "CI_P167_CACHE_HIT": "false" if bad == resume.CACHE_KEY else "true"}):
+                    with self.assertRaisesRegex(ValueError, "cache restore required"):
+                        resume.admit_cache(root, {}, "", "", cache, cache / "target")
+            artifact = root / "changed.zip"
+            artifact.write_bytes(b"wrong bytes")
+            with self.assertRaisesRegex(ValueError, "artifact bytes required"):
+                resume.verify_archive(artifact)
+
+    def test_workflow_read_only_one_build_and_exact_cache_restore(self):
         text = (ci.REPO / ".github/workflows/p20-native-windows.yml").read_text()
         self.assertIn("runs-on: windows-2022", text)
         self.assertIn("contents: read", text)
         self.assertIn("persist-credentials: false", text)
-        self.assertNotIn("actions/cache/restore", text)
+        resume = ci.resume_controller()
+        self.assertEqual(text.count("actions/cache/restore"), 1)
+        self.assertIn(f"key: {resume.CACHE_KEY}", text)
+        self.assertIn("fail-on-cache-miss: true", text)
+        self.assertNotIn("restore-keys:", text)
         self.assertNotIn("secrets.", text)
         self.assertEqual(text.count("p20-windows.py build --candidate P167"), 1)
-        self.assertTrue(all(re.fullmatch(r"actions/(?:[a-z-]+|cache/save)@[a-f0-9]{40}", action)
+        self.assertLess(text.index("p20-windows.py locked_fetch"), text.index("p20-windows.py build"))
+        self.assertTrue(all(re.fullmatch(r"actions/(?:[a-z-]+|cache/(?:restore|save))@[a-f0-9]{40}", action)
                             for action in re.findall(r"uses: (\S+)", text)))
 
 
