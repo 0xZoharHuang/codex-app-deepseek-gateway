@@ -46,17 +46,25 @@ def admitted_context(ci, path):
             "Exact dispatched early assembler head required")
     return root, head
 
+def retained_identity(retained, resume):
+    require(retained.get("same_runner_core_run") == resume.RUN
+            and retained.get("same_runner_core_artifact_sha256") == resume.ZIP_SHA
+            and retained.get("same_runner_core_compile_sha256") == resume.CORE_SAME_RUNNER_SHA
+            and retained.get("repeat_core_compile_run") == "42511450429"
+            and retained.get("repeat_core_artifact_sha256") ==
+                "5c504baf7ae12bcf96073ff6b12567d15612110ceb2ae5a2daa38e0a854eb213"
+            and retained.get("repeat_core_compile_sha256") == resume.CORE_REPEAT_SHA
+            and retained.get("raw_manifest_sha256") == ORIGINAL_RAW
+            and retained.get("native_producer_rerun") is False
+            and retained.get("original_sandbox_reexecuted") is False
+            and retained.get("original_git_reexecuted") is False,
+            "Exact retained producer/18/Git12 chain required")
+
+
 def assemble(ci, root, head):
     lock, builder, _ = ci.plan()
     retained = ci.load(root / "evidence/p167-retained-producer.json")
-    resume = ci.resume_controller()
-    require(retained["repeat_core_compile_run"] == resume.RUN
-            and retained["repeat_core_artifact_sha256"] == resume.ZIP_SHA
-            and retained["raw_manifest_sha256"] == ORIGINAL_RAW
-            and retained["native_producer_rerun"] is False
-            and retained["original_sandbox_reexecuted"] is False
-            and retained["original_git_reexecuted"] is False,
-            "Exact retained producer/18/Git12 chain required")
+    retained_identity(retained, ci.resume_controller())
     raw = root / "native-producer/manifest.json"
     require(ci.sha(raw) == ORIGINAL_RAW and ci.sha(root / "evidence/normal-six-build.json") == ORIGINAL_BUILD,
             "Exact original normal producer manifest and observer required")

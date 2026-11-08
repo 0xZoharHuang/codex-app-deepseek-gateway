@@ -106,6 +106,22 @@ class EarlyDraft(unittest.TestCase):
             self.assertEqual(payload["observer"]["returncode"],1)
             self.assertNotIn("observed",payload["observer"])
 
+    def test_retained_chain_binds_latest_same_runner_and_previous_repeat(self):
+        with patch.dict(os.environ, {"CI_P167_TEST_RESUME":"1"}):
+            resume = early.controller().resume_controller()
+        retained = {"same_runner_core_run":resume.RUN,"same_runner_core_artifact_sha256":resume.ZIP_SHA,
+            "same_runner_core_compile_sha256":resume.CORE_SAME_RUNNER_SHA,"repeat_core_compile_run":"42511450429",
+            "repeat_core_artifact_sha256":"5c504baf7ae12bcf96073ff6b12567d15612110ceb2ae5a2daa38e0a854eb213",
+            "repeat_core_compile_sha256":resume.CORE_REPEAT_SHA,"raw_manifest_sha256":early.ORIGINAL_RAW,
+            "native_producer_rerun":False,"original_sandbox_reexecuted":False,"original_git_reexecuted":False}
+        early.retained_identity(retained,resume)
+        for changed in ({"same_runner_core_run":retained["repeat_core_compile_run"]},
+                        {"same_runner_core_artifact_sha256":retained["repeat_core_artifact_sha256"]},
+                        {"repeat_core_compile_run":resume.RUN},{"repeat_core_artifact_sha256":resume.ZIP_SHA},
+                        {"raw_manifest_sha256":"different"},{"original_git_reexecuted":True}):
+            with self.subTest(changed=changed),self.assertRaises(ValueError):
+                early.retained_identity({**retained,**changed},resume)
+
     def test_workflow_has_only_private_upload_no_native_compile_or_artifact(self):
         path=early.REPO/".github/workflows/p20-native-package-resume.yml"
         text=path.read_text()
