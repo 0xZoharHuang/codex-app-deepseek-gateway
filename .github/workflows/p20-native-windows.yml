@@ -1,98 +1,95 @@
-name: P21 Windows native candidate from exact P20 cache
+name: P167 Windows native qualification
 on:
   workflow_dispatch:
     inputs:
       candidate:
-        description: Exact P21 native overlay
+        description: Exact P167 Windows native candidate
         required: true
         type: choice
-        options: [P21]
-        default: P21
+        options: [P167]
+        default: P167
+      lock_sha256:
+        description: Exact reviewed O167 native build-lock SHA256
+        required: true
+        type: string
 permissions:
   contents: read
 concurrency:
-  group: p20-native-${{ github.ref }}
+  group: p167-native-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   native:
-    if: ${{ !github.event.repository.private && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/p20-hosted-ci-r570' && inputs.candidate == 'P21' }}
+    if: ${{ !github.event.repository.private && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/p167-hosted-ci-r626' && inputs.candidate == 'P167' }}
     runs-on: windows-2022
-    # Existing Cargo 120m, sandbox test compile 30m and assembly 30m.
-    # P21 adds a separate Git libtest compile with its own 30m bound.
-    timeout-minutes: 230
+    timeout-minutes: 345
     env:
-      CI_P20_ROOT: C:\cagp20-${{ github.run_id }}-${{ github.run_attempt }}
+      CI_P20_ROOT: C:\cagp167-${{ github.run_id }}-${{ github.run_attempt }}
       CI_REPOSITORY_VISIBILITY: public
       CI_P20_BUILD_JOBS: '2'
+      CI_P167_APPROVED_LOCK_SHA256: ${{ inputs.lock_sha256 }}
       OTEL_SDK_DISABLED: 'true'
       VSCMD_SKIP_SENDTELEMETRY: '1'
     steps:
-      - name: Checkout candidate source
+      - name: Checkout exact candidate without persisted credentials
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - name: Reclaim only disposable hosted-runner tools
-        shell: pwsh
-        run: ./scripts/ci/p20-hosted-tools.ps1 -Mode Space
       - name: Python for build control only
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.13'
           architecture: x64
-      - name: Check CI safety and real Git byte roundtrip
+      - name: Verify reviewed lock, assembly admission, and exact gates
         shell: pwsh
         run: |
-          python -I -B -m unittest discover -s scripts/ci -p test_p20_ci.py -v
+          python -I -B -u scripts/ci/p20-windows.py check-only --candidate P167
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -I -B -m unittest discover -s scripts/ci -p test_p21_ci.py -v
+          $hash = (Get-FileHash -Algorithm SHA256 native/build-lock.O167-source.json).Hash.ToLowerInvariant()
+          if ($hash -cne $env:CI_P167_APPROVED_LOCK_SHA256) { throw 'Dispatch lock SHA differs from reviewed native lock.' }
+          python -I -B -m unittest discover -s scripts/ci -p test_p167_ci.py -v
+      - name: Check disposable runner space
+        shell: pwsh
+        run: ./scripts/ci/p20-hosted-tools.ps1 -Mode Space -Candidate P167
       - name: Install pinned controller dependency
         shell: pwsh
         run: |
           python -m pip install --disable-pip-version-check --no-input --no-deps --only-binary=:all: --require-hashes -r scripts/ci/requirements-windows.txt
-      - name: Select exact Rust and native MSVC SDK environment
+      - name: Select exact Rust and native MSVC SDK
         shell: pwsh
-        run: ./scripts/ci/p20-hosted-tools.ps1 -Mode Toolchain
-      - name: Restore native dependency and target build cache
-        id: p20-cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: |
-            C:/cagp20-native-cache-v1/cargo/registry
-            C:/cagp20-native-cache-v1/cargo/git
-            C:/cagp20-native-cache-v1/target
-          key: p20-native-v1-Windows-rust1.99.1-msvc14.44.35207-sdk10.0.26100.0-2259036772c5d8d77d636305ab4f7f12795632b3dfa469d0df5e4a2ade51bbd7-42337939507-1
-      - name: Verify public inputs and normal P21 plan
+        run: ./scripts/ci/p20-hosted-tools.ps1 -Mode Toolchain -Candidate P167
+      - name: Verify official source, V8 chain, and process observer inputs
+        id: prepare
         shell: pwsh
-        run: python -I -B -u scripts/ci/p20-windows.py prepare --candidate P21 --root "$env:CI_P20_ROOT"
-      - name: Normal single Cargo invocation for all six native targets
+        run: python -I -B -u scripts/ci/p20-windows.py prepare --candidate P167 --root "$env:CI_P20_ROOT"
+      - name: Normal single locked Cargo invocation for all six targets
         shell: pwsh
-        env:
-          CI_P20_CACHE_HIT: ${{ steps.p20-cache.outputs.cache-hit }}
-          CI_P20_CACHE_KEY: p20-native-v1-Windows-rust1.99.1-msvc14.44.35207-sdk10.0.26100.0-2259036772c5d8d77d636305ab4f7f12795632b3dfa469d0df5e4a2ade51bbd7-42337939507-1
-        run: python -I -B -u scripts/ci/p20-windows.py build --candidate P21 --root "$env:CI_P20_ROOT"
-      - name: Compile and run the exact eighteen component tests
+        run: python -I -B -u scripts/ci/p20-windows.py build --candidate P167 --root "$env:CI_P20_ROOT"
+      - name: Exact eighteen native sandbox component tests
         shell: pwsh
-        run: python -I -B -u scripts/ci/p20-windows.py unit --candidate P21 --root "$env:CI_P20_ROOT"
-      - name: Compile and run the exact twelve plugin Git tests
+        run: python -I -B -u scripts/ci/p20-windows.py unit --candidate P167 --root "$env:CI_P20_ROOT"
+      - name: Exact twelve native Git lifetime tests
         shell: pwsh
-        run: python -I -B -u scripts/ci/p20-windows.py git_unit --candidate P21 --root "$env:CI_P20_ROOT"
-      - name: Normal clean-source native assembly
+        run: python -I -B -u scripts/ci/p20-windows.py git_unit --candidate P167 --root "$env:CI_P20_ROOT"
+      - name: Exact native Guardian and request capacity tests
         shell: pwsh
-        run: python -I -B -u scripts/ci/p20-windows.py package --candidate P21 --root "$env:CI_P20_ROOT"
-      - name: Save build intermediates even after producer failure
-        if: ${{ always() && !cancelled() && steps.p20-cache.outputs.cache-hit == 'true' }}
+        run: python -I -B -u scripts/ci/p20-windows.py extra_unit --candidate P167 --root "$env:CI_P20_ROOT"
+      - name: Normal clean-source assembly with all native receipts
+        shell: pwsh
+        run: python -I -B -u scripts/ci/p20-windows.py package --candidate P167 --root "$env:CI_P20_ROOT"
+      - name: Preserve new P167 intermediates for exact packaging-only recovery if needed
+        if: ${{ always() && !cancelled() && steps.prepare.outcome == 'success' }}
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
-            C:/cagp20-native-cache-v1/cargo/registry
-            C:/cagp20-native-cache-v1/cargo/git
-            C:/cagp20-native-cache-v1/target
-          key: p21-native-v1-${{ runner.os }}-${{ hashFiles('native/build-lock.O165-P21-source.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+            C:/cagp167-native-cache-v1/cargo/registry
+            C:/cagp167-native-cache-v1/cargo/git
+            C:/cagp167-native-cache-v1/target
+          key: p167-native-v1-Windows-rust1.95.0-msvc14.44.35207-sdk10.0.26100.0-${{ inputs.lock_sha256 }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Upload scoped candidate and original evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: p21-native-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          name: p167-native-windows-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ env.CI_P20_ROOT }}/delivery/**
             ${{ env.CI_P20_ROOT }}/evidence/**

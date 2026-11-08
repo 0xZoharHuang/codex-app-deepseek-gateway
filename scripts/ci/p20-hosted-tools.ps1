@@ -1,7 +1,9 @@
 param(
     [Parameter(Mandatory=$true)]
     [ValidateSet("Space","Toolchain")]
-    [string]$Mode
+    [string]$Mode,
+    [ValidateSet("P20","P167")]
+    [string]$Candidate = "P20"
 )
 $ErrorActionPreference = "Stop"
 # No reclaim or configuration on shared/self-hosted computers.
@@ -11,7 +13,14 @@ if ($env:GITHUB_ACTIONS -cne "true" -or $env:RUNNER_ENVIRONMENT -cne "github-hos
     $env:GITHUB_RUN_ID -notmatch '^\d+$' -or $env:GITHUB_RUN_ATTEMPT -notmatch '^\d+$') {
     throw "Only a disposable standard public GitHub-hosted Windows x64 job is admitted."
 }
-$expected = "$env:SystemDrive\cagp20-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+$prefix = if ($Candidate -eq "P167") { "cagp167" } else { "cagp20" }
+if ($Candidate -eq "P167" -and
+    ($env:GITHUB_REF -cne "refs/heads/codex/p167-hosted-ci-r626" -or
+     $env:GITHUB_EVENT_NAME -cne "workflow_dispatch" -or
+     $env:CI_P167_APPROVED_LOCK_SHA256 -cnotmatch '^[a-f0-9]{64}$')) {
+    throw "P167 requires the exact manually approved hosted candidate."
+}
+$expected = "$env:SystemDrive\$prefix-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
 if ($env:CI_P20_ROOT -cne $expected) { throw "Unexpected CI work root." }
 $root = $env:CI_P20_ROOT
 New-Item -ItemType Directory -Path "$root\evidence" -Force | Out-Null
@@ -108,9 +117,10 @@ if ($Mode -eq "Space") {
 }
 
 $rustup = (Get-Command rustup.exe -ErrorAction Stop).Source
-& $rustup toolchain install 1.99.1 --profile minimal --no-self-update
-if ($LASTEXITCODE -ne 0) { throw "Official rustup could not install exact 1.99.1." }
-$cargo = (& $rustup which --toolchain 1.99.1 cargo).Trim()
+$rust = if ($Candidate -eq "P167") { "1.95.0" } else { "1.99.1" }
+& $rustup toolchain install $rust --profile minimal --no-self-update
+if ($LASTEXITCODE -ne 0) { throw "Official rustup could not install exact $rust." }
+$cargo = (& $rustup which --toolchain $rust cargo).Trim()
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $cargo)) { throw "Pinned Cargo unavailable." }
 $toolchain = Split-Path -Parent $cargo
 $pf86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
@@ -120,9 +130,16 @@ if ($LASTEXITCODE -ne 0 -or -not $vs) { throw "MSVC x64 tools unavailable." }
 $vcargs = "-no_logo -arch=amd64 -host_arch=amd64"
 $preferred = Get-ChildItem -LiteralPath "$vs\VC\Tools\MSVC" -Directory |
     Where-Object { $_.Name -like "14.44.*" } | Sort-Object Name -Descending | Select-Object -First 1
-if ($preferred) { $vcargs += " -vcvars_ver=14.44" }
-if (Test-Path -LiteralPath "$pf86\Windows Kits\10\Include\10.0.26100.0\um\windows.h") {
-    $vcargs += " -winsdk=10.0.26100.0"
+$sdkHeader = "$pf86\Windows Kits\10\Include\10.0.26100.0\um\windows.h"
+if ($Candidate -eq "P167") {
+    if (-not (Test-Path -LiteralPath "$vs\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\cl.exe") -or
+        -not (Test-Path -LiteralPath $sdkHeader)) {
+        throw "P167 requires the measured MSVC 14.44.35207 and SDK 10.0.26100.0."
+    }
+    $vcargs += " -vcvars_ver=14.44.35207 -winsdk=10.0.26100.0"
+} else {
+    if ($preferred) { $vcargs += " -vcvars_ver=14.44" }
+    if (Test-Path -LiteralPath $sdkHeader) { $vcargs += " -winsdk=10.0.26100.0" }
 }
 # The native lock pins Rust/profile/source, not a local absolute MSVC path or
 # SDK patch. Prefer the measured family; record the actual native toolchain.

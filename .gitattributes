@@ -46,3 +46,4 @@ native/licenses/spdx/*.txt -text
 scripts/build_native.py -text
 scripts/package_native_release.py -text
 scripts/ci/* -text
+.github/workflows/p20-native-windows.yml -text

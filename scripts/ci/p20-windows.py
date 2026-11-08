@@ -7,6 +7,27 @@ REPO = Path(__file__).resolve().parents[2]
 LOCK = "3736e573e634180a1443b0c3e2cdbbf3d28304cf17d76fd3752aab344356b44c"
 SOURCE = "37efcaa4a32880ecb16f3420f4efb6a39e9c82fb407a169ec67e0d74991763da"
 CANDIDATE = "P20"
+RUST_VERSION = "1.99.1"
+P167_BRANCH = "refs/heads/codex/p167-hosted-ci-r626"
+P167_UPSTREAM = "c40729ea5cf8e947481b130c59807273eda2f8e9"
+P167_ARCHIVE = "473fbbe3523605050abd0606b28d88b06f194b42653a66c23ca2d5f86043725a"
+P167_LOCK_NAME = "build-lock.O167-source.json"
+P167_V8_VERSION = "152.2.0"
+P167_V8_MANIFEST_SHA = "e16bf2d7bc4b64a96a89e87048d61b9c466040e4c82ae64cfe9f7f2052ef3179"
+P167_V8_FILES = {
+    "rusty_v8_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.lib.gz": "cd829415695b30ad61b306b23a381e11276f14bb0b46815ac5ed8b96711d002d",
+    "src_binding_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.rs": "572ed16ff09bb7944f4b35c659ff62dcd3faf43a0351e3f94f011e01b2f92a62",
+}
+P167_GUARDIAN_CASES = {
+    "codex-core": (
+        "thread_manager::tests::start_thread_keeps_internal_threads_hidden_from_normal_lookups",
+        "thread_manager::tests::thread_id_generator_does_not_replace_resumed_thread_id",
+    ),
+    "codex-guardian-v2": (
+        "async_scorer::sampler::connection_pool::tests::provider_without_websockets_scores_over_http_without_opening_pool",
+    ),
+}
+P167_CASES = {}
 SOURCE_FILES = 9529
 P21_LOCK = "1a80f6e1e4fdb2f5b255a416f70350b5fd764493322bc463137381900374cdab"
 P21_SOURCE = "5b39fc728fcb025715fc5b6467c406b7190e7fbabd8b1342f86cc754b4458c1c"
@@ -62,13 +83,60 @@ def load_module(name, path):
     spec.loader.exec_module(module)
     return module
 
+def reviewed_p167_plan(review):
+    require(isinstance(review, dict) and review.get("status") == "sealed",
+            "P167 source, package admission, and selectors must be sealed before build")
+    digest_keys = ("lock_sha256", "source_sha256", "builder_sha256", "packager_sha256", "workflow_sha256")
+    require(all(isinstance(review.get(key), str) and re.fullmatch(r"[0-9a-f]{64}", review[key])
+                for key in digest_keys), "Exact P167 digest pins required")
+    require(type(review.get("source_files")) is int and review["source_files"] >= 9816,
+            "Exact prepared source file count required")
+    capacity = review.get("capacity_cases")
+    require(isinstance(capacity, list) and bool(capacity)
+            and all(isinstance(case, str)
+                    and re.fullmatch(r"(?:[a-z0-9_]+::)+[a-z0-9_]+", case)
+                    for case in capacity)
+            and len(set(capacity)) == len(capacity)
+            and not set(capacity).intersection(P167_GUARDIAN_CASES["codex-core"]),
+            "Explicit distinct full native capacity libtest selectors required")
+    return {**P167_GUARDIAN_CASES,
+            "codex-core": (*P167_GUARDIAN_CASES["codex-core"], *capacity)}
+
+
+def select_p167(review):
+    cases = reviewed_p167_plan(review)
+    lock_path = REPO / "native" / P167_LOCK_NAME
+    require(lock_path.is_file() and sha(lock_path) == review["lock_sha256"],
+            "Reviewed P167 build-lock bytes missing or changed")
+    lock = load(lock_path)
+    expected = {"candidate_revision": "O167", "native_version": "0.167.0-alpha.3.2",
+                "rust_version": "1.95.0", "target": "x86_64-pc-windows-msvc",
+                "upstream_commit": P167_UPSTREAM, "archive_sha256": P167_ARCHIVE,
+                "prepared_source_sha256": review["source_sha256"],
+                "prepared_source_files": review["source_files"]}
+    require(all(lock.get(key) == value for key, value in expected.items()),
+            "Reviewed P167 lock differs from official runtime and prepared source identity")
+    builder = REPO / "scripts/build_native.py"
+    packager = REPO / "scripts/package_native_release.py"
+    workflow = REPO / ".github/workflows/p20-native-windows.yml"
+    require(sha(workflow) == review["workflow_sha256"], "Reviewed P167 workflow bytes differ")
+    require(sha(builder) == review["builder_sha256"] and sha(packager) == review["packager_sha256"],
+            "Reviewed normal P167 producer or packager differs")
+    pack = load_module("cadsg_p167_packager_admission", packager)
+    require((P167_LOCK_NAME, review["lock_sha256"]) in pack.REVIEWED_SOURCE_LOCKS,
+            "Normal packager does not independently admit the exact P167 lock")
+    require(pack.single_graph(lock, lock_path.parent)["producer_id"] == "O167",
+            "Normal packager must admit the exact O167 source and patch graph")
+    return cases
+
+
 def plan():
     lock_path = native_lock_path()
     require(sha(lock_path) == LOCK, "Exact candidate lock bytes required")
     lock = load(lock_path)
     require(lock["prepared_source_sha256"] == SOURCE and lock["prepared_source_files"] == SOURCE_FILES,
             "Exact reviewed candidate source required")
-    require(lock["rust_version"] == "1.99.1" and set(lock["binaries"]) == BINS
+    require(lock["rust_version"] == RUST_VERSION and set(lock["binaries"]) == BINS
             and len(lock["binaries"]) == 6 and lock["package_mode"] == "cadsg-native-msix",
             "Pinned toolchain and six-target source bundle required")
     builder = load_module("cadsg_ci_normal_native", REPO / "scripts/build_native.py")
@@ -87,13 +155,21 @@ def hosted_context(environment, platform_name):
             "Only a disposable public GitHub-hosted Windows x64 runner is admitted")
     require(all(re.fullmatch(r"[0-9]+", environment.get(k, "")) for k in
                 ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")), "Missing canonical run identity")
-    require(environment.get("GITHUB_REF", "").startswith("refs/heads/codex/p20-hosted-ci-"),
+    ref = environment.get("GITHUB_REF", "")
+    require(ref == P167_BRANCH if CANDIDATE == "P167" else
+            ref.startswith("refs/heads/codex/p20-hosted-ci-"),
             "Candidate branch only; no main/tag stable publication")
+    if CANDIDATE == "P167":
+        require(environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+                and environment.get("CI_P167_APPROVED_LOCK_SHA256") == LOCK,
+                "P167 requires manual dispatch bound to the reviewed lock")
+        require(environment.get("CI_P20_BUILD_JOBS") == "2", "P167 requires two build jobs")
     return environment["GITHUB_RUN_ID"], environment["GITHUB_RUN_ATTEMPT"]
 
 def hosted_root(path):
     run_id, attempt = hosted_context(os.environ, os.name)
-    expected = Path(os.environ["SystemDrive"] + "\\") / f"cagp20-{run_id}-{attempt}"
+    prefix = "cagp167" if CANDIDATE == "P167" else "cagp20"
+    expected = Path(os.environ["SystemDrive"] + "\\") / f"{prefix}-{run_id}-{attempt}"
     require(path.absolute() == expected.absolute(), "Unexpected hosted CI root")
     require(path.is_dir() and (path / "evidence/runner-space.json").is_file(),
             "Run hosted-only preflight first")
@@ -130,6 +206,12 @@ def prepare(root):
     for name in ("inputs", "delivery"):
         (root / name).mkdir(exist_ok=False)
     cache, target = cache_paths(root)
+    if CANDIDATE == "P167":
+        require(not cache.exists(), "P167 requires a fresh toolchain-specific cache")
+        require(os.environ.get("VCToolsVersion") == "14.44.35207"
+                and os.environ.get("UCRTVersion") == "10.0.26100.0"
+                and os.environ.get("WindowsSDKVersion", "").rstrip("\\") == "10.0.26100.0",
+                "P167 requires the exact previously measured native MSVC/SDK")
     for path in (cache, cache / "cargo", target):
         require(path.resolve() == path.absolute() and not path.is_symlink(), "Build cache redirected")
         path.mkdir(parents=True, exist_ok=True)
@@ -148,6 +230,11 @@ def prepare(root):
         versions = {x["version"] for x in cargo["package"] if x["name"] == "v8"}
         require(len(versions) == 1, "Exactly one V8 crate version required")
         version = versions.pop()
+        if CANDIDATE == "P167":
+            upstream_toolchain = tomllib.loads(member("codex-rs/rust-toolchain.toml").decode())
+            require(upstream_toolchain["toolchain"]["channel"] == RUST_VERSION
+                    and version == P167_V8_VERSION,
+                    "Pinned upstream Rust toolchain or V8 crate version changed")
         trusted = checksum_lines(member(
             f"third_party/v8/rusty_v8_{version.replace('.', '_')}_release_manifests.sha256"))
     v8 = root / "inputs/rusty-v8"
@@ -155,10 +242,15 @@ def prepare(root):
     suffix = "ptrcomp_sandbox_release_x86_64-pc-windows-msvc"
     manifest_name = f"rusty_v8_{suffix}.sha256"
     base = f"https://github.com/openai/codex/releases/download/rusty-v8-v{version}"
+    if CANDIDATE == "P167":
+        require(trusted.get(manifest_name) == P167_V8_MANIFEST_SHA,
+                "Exact official P167 Windows V8 manifest pin required")
     records.append(download(f"{base}/{manifest_name}", v8 / manifest_name, trusted[manifest_name]))
     pair = checksum_lines((v8 / manifest_name).read_bytes())
     require(set(pair) == {f"rusty_v8_{suffix}.lib.gz", f"src_binding_{suffix}.rs"},
             "Only the official sandbox V8 archive and binding are admitted")
+    if CANDIDATE == "P167":
+        require(pair == P167_V8_FILES, "Exact official P167 V8 archive and binding pins required")
     for name, digest in pair.items():
         records.append(download(f"{base}/{name}", v8 / name, digest))
     observer = root / "inputs/build-observer"
@@ -169,8 +261,9 @@ def prepare(root):
     toolchain = Path(os.environ["CI_RUST_TOOLCHAIN_BIN"])
     rust = subprocess.check_output([str(toolchain / "rustc.exe"), "--version", "--verbose"], text=True)
     cargo_version = subprocess.check_output([str(toolchain / "cargo.exe"), "--version"], text=True)
-    require(rust.startswith("rustc 1.99.1 ") and cargo_version.startswith("cargo 1.99.1 "),
-            "Exact Rust/Cargo 1.99.1, no version fallback")
+    require(rust.startswith(f"rustc {RUST_VERSION} ")
+            and cargo_version.startswith(f"cargo {RUST_VERSION} "),
+            f"Exact Rust/Cargo {RUST_VERSION}, no version fallback")
     import psutil
     require(psutil.cpu_count() >= 4 and psutil.virtual_memory().total >= 15_000_000_000,
             "Standard public four-CPU/sixteen-GB runner required")
@@ -187,6 +280,8 @@ def prepare(root):
         "performance_cache": {"root": str(cache), "target": str(target), "authoritative_build_evidence": False},
         "build_jobs": build_jobs(),
         "initial_memory": psutil.virtual_memory()._asdict(), "unit_cases": cases,
+        **({"p167_additional_cases": P167_CASES, "prior_toolchain_cache_reused": False}
+           if CANDIDATE == "P167" else {}),
         "App_GUI_qualified": False, "stable_publication": False})
 
 def classify_compiler_telemetry_cleanup(result, toolchain):
@@ -265,7 +360,10 @@ def observe(command, root, cwd, environment, name, timeout):
     result.update(command=command, fixed_timeout_seconds=timeout,
                   log_sha256=sha(log_path), build_controller_only=True)
     telemetry = None
-    if not result["observer_passed"] and name in {"normal-six-build", "native-unit-compile", "native-git-unit-compile"}:
+    compile_steps = {"normal-six-build", "native-unit-compile", "native-git-unit-compile"}
+    if CANDIDATE == "P167":
+        compile_steps.update(f"native-p167-{name}-compile" for name in P167_CASES)
+    if not result["observer_passed"] and name in compile_steps:
         telemetry = classify_compiler_telemetry_cleanup(result, load(root / "evidence/toolchain.json"))
     result["qualified_compiler_telemetry_cleanup"] = telemetry
     result["passed"] = bool((result["observer_passed"] or telemetry is not None) and
@@ -287,7 +385,8 @@ def clean_environment(environment=None):
 
 def cache_paths(root):
     # Source, build-owner records, final outputs and evidence stay fresh per run.
-    cache = Path(root.anchor) / "cagp20-native-cache-v1"
+    cache_name = "cagp167-native-cache-v1" if CANDIDATE == "P167" else "cagp20-native-cache-v1"
+    cache = Path(root.anchor) / cache_name
     return cache, cache / "target"
 
 def build_jobs(environment=None):
@@ -308,7 +407,8 @@ def verify_normal_outputs(root, manifest):
 
 
 def native_lock_path():
-    return REPO / f"native/build-lock.O165-{CANDIDATE}-source.json"
+    return REPO / "native" / (P167_LOCK_NAME if CANDIDATE == "P167"
+                              else f"build-lock.O165-{CANDIDATE}-source.json")
 
 
 def work_path(root):
@@ -375,7 +475,15 @@ def build(root):
         "source_sha256": SOURCE, "lock_sha256": LOCK, "native_build_executed": True,
         "App_GUI_qualified": False})
 
-def unit(root, *, plugin_git=False):
+def exact_case_log(path, case):
+    text = path.read_text(encoding="utf8", errors="replace")
+    require(len(re.findall(r"(?m)^test " + re.escape(case) + r" \.\.\. ok$", text)) == 1
+            and len(re.findall(r"(?m)^test result: ok\. 1 passed; 0 failed; 0 ignored;", text)) == 1,
+            "Exact native test must actually execute once; no filtered-out pass")
+    return sha(path)
+
+
+def unit(root, *, plugin_git=False, p167_group=None):
     lock, builder, cases = plan()
     require(load(root / "evidence/normal-six-build.json")["passed"], "Normal six-target producer required")
     toolchain = Path(os.environ["CI_RUST_TOOLCHAIN_BIN"])
@@ -388,8 +496,20 @@ def unit(root, *, plugin_git=False):
     environment.update(builder.verified_rusty_v8_inputs(
         source, root / "inputs/rusty-v8", lock["target"])["environment"])
     package_name = "codex-core-plugins" if plugin_git else "codex-windows-sandbox"
+    if p167_group is not None:
+        require(CANDIDATE == "P167" and p167_group in P167_CASES, "Unknown P167 test group")
+        package_name, cases = p167_group, P167_CASES[p167_group]
+        compile_name = f"native-p167-{p167_group}-compile"
+        case_prefix = f"native-p167-{p167_group}-case"
+        receipt = f"native-p167-{p167_group}.json"
+        status = "P167_EXACT_NATIVE_UNIT_PASSED_NOT_APP_QUALIFIED"
+    elif plugin_git:
+        compile_name, case_prefix, receipt = "native-git-unit-compile", "native-git-case", "native-git-unit12.json"
+        status = f"{CANDIDATE}_NATIVE_GIT12_PASSED_NOT_APP_QUALIFIED"
+    else:
+        compile_name, case_prefix, receipt = "native-unit-compile", "native-case", "native-unit18.json"
+        status = ("P167" if CANDIDATE == "P167" else "P20") + "_NATIVE_COMPONENT18_PASSED_NOT_APP_QUALIFIED"
     target_name = package_name.replace("-", "_")
-    compile_name = "native-git-unit-compile" if plugin_git else "native-unit-compile"
     if plugin_git:
         cases = [f"{module}::git_lifetime_windows_tests::{case}"
                  for module in ("startup_sync", "marketplace_upgrade::git")
@@ -420,20 +540,14 @@ def unit(root, *, plugin_git=False):
     require(sha(sealed) == sha(executable), "Sealed native test copy differs")
     observed = []
     for index, case in enumerate(cases):
-        name = f"native-git-case-{index:02}" if plugin_git else f"native-case-{index:02}"
+        name = f"{case_prefix}-{index:02}"
         observe([str(sealed), "--exact", case, "--show-output", "--test-threads=1"],
                 root, source / "codex-rs", environment, name, 180)
-        text = (root / f"evidence/{name}.log").read_text(encoding="utf8", errors="replace")
-        require(len(re.findall(r"(?m)^test " + re.escape(case) + r" \.\.\. ok$", text)) == 1
-                and len(re.findall(r"(?m)^test result: ok\. 1 passed; 0 failed; 0 ignored;", text)) == 1,
-                "Exact native test must actually execute once; no filtered-out pass")
-        observed.append({"name": case, "log_sha256": sha(root / f"evidence/{name}.log")})
+        observed.append({"name": case, "log_sha256": exact_case_log(root / f"evidence/{name}.log", case)})
     require(builder.source_state(source)["sha256"] == SOURCE,
             "Native source changed during unit qualification")
     manifest = load(root / "native-producer/manifest.json")
     verify_normal_outputs(root, manifest)
-    receipt = "native-git-unit12.json" if plugin_git else "native-unit18.json"
-    status = "P21_NATIVE_GIT12_PASSED_NOT_APP_QUALIFIED" if plugin_git else "P20_NATIVE_COMPONENT18_PASSED_NOT_APP_QUALIFIED"
     save(root / "evidence" / receipt, {
         "status": status,
         "cases": observed, "source_sha256": SOURCE, "lock_sha256": LOCK,
@@ -441,24 +555,61 @@ def unit(root, *, plugin_git=False):
                        "profile": artifacts[0]["profile"]}, "App_GUI_qualified": False})
 
 def git_unit(root):
-    require(CANDIDATE == "P21", "Focused Git cases are specific to P21")
+    require(CANDIDATE in {"P21", "P167"}, "Focused Git cases require the atomic Git candidate")
     unit(root, plugin_git=True)
 
 
+def extra_unit(root):
+    require(CANDIDATE == "P167" and bool(P167_CASES), "P167 exact Guardian/capacity selectors required")
+    for group in P167_CASES:
+        unit(root, p167_group=group)
+
+
+def verify_p167_unit_receipts(root, cases):
+    gates = {"native-unit18.json": ("P167_NATIVE_COMPONENT18_PASSED_NOT_APP_QUALIFIED", cases, "native-case"),
+             "native-git-unit12.json": ("P167_NATIVE_GIT12_PASSED_NOT_APP_QUALIFIED",
+                 [f"{module}::git_lifetime_windows_tests::{case}"
+                  for module in ("startup_sync", "marketplace_upgrade::git") for case in P21_GIT_CASES],
+                 "native-git-case")}
+    gates.update({f"native-p167-{group}.json": (
+        "P167_EXACT_NATIVE_UNIT_PASSED_NOT_APP_QUALIFIED", names, f"native-p167-{group}-case")
+        for group, names in P167_CASES.items()})
+    digests = {}
+    for filename, (status, names, prefix) in gates.items():
+        path = root / "evidence" / filename
+        receipt = load(path)
+        require(receipt["status"] == status and receipt["source_sha256"] == SOURCE
+                and receipt["lock_sha256"] == LOCK and receipt["App_GUI_qualified"] is False
+                and [row["name"] for row in receipt["cases"]] == list(names),
+                f"Missing exact P167 receipt or test selector: {filename}")
+        for index, row in enumerate(receipt["cases"]):
+            log = root / "evidence" / f"{prefix}-{index:02}.log"
+            require(exact_case_log(log, row["name"]) == row["log_sha256"],
+                    f"P167 test log differs: {row['name']}")
+        executable = receipt["executable"]
+        path_exe = Path(executable["path"])
+        require(path_exe.is_relative_to(root / "delivery/unit")
+                and sha(path_exe) == executable["sha256"] and executable["profile"]["test"] is True,
+                "Sealed P167 libtest executable differs")
+        digests[filename] = sha(path)
+    return digests
+
+
 def package(root):
-    lock, builder, _ = plan()
+    lock, builder, cases = plan()
     source = work_path(root) / "source"
+    p167_receipts = verify_p167_unit_receipts(root, cases) if CANDIDATE == "P167" else {}
     if CANDIDATE == "P21":
         git_result = load(root / "evidence/native-git-unit12.json")
         require(git_result["status"] == "P21_NATIVE_GIT12_PASSED_NOT_APP_QUALIFIED"
                 and git_result["source_sha256"] == SOURCE and git_result["lock_sha256"] == LOCK
                 and len(git_result["cases"]) == 12, "Exact new Git lifetime cases required")
     require(load(root / "evidence/normal-six-build.json")["passed"]
-            and load(root / "evidence/native-unit18.json")["status"] ==
-            "P20_NATIVE_COMPONENT18_PASSED_NOT_APP_QUALIFIED", "Build and exact unit gates required")
+            and (CANDIDATE == "P167" or load(root / "evidence/native-unit18.json")["status"] ==
+                 "P20_NATIVE_COMPONENT18_PASSED_NOT_APP_QUALIFIED"), "Build and exact unit gates required")
     toolchain = Path(os.environ["CI_RUST_TOOLCHAIN_BIN"])
     manifest = root / "native-producer/manifest.json"
-    if CANDIDATE == "P21":
+    if CANDIDATE in {"P21", "P167"}:
         # Cargo metadata may require locked sources that compilation did not fetch.
         # Reuse the original resumed assembler's target-specific source prefetch.
         env = clean_environment()
@@ -485,7 +636,8 @@ def package(root):
     shutil.copyfile(archive, root / "delivery" / archive.name)
     shutil.copyfile(root / "assembled/manifest.json", root / "delivery/manifest.json")
     save(root / "delivery/candidate.json", {
-        "status": ("P21_NORMAL_SIX_AND_COMPONENT30_ASSEMBLED_NOT_APP_QUALIFIED"
+        "status": ("P167_NORMAL_SIX_AND_EXACT_NATIVE_CASES_ASSEMBLED_NOT_APP_QUALIFIED"
+                   if CANDIDATE == "P167" else "P21_NORMAL_SIX_AND_COMPONENT30_ASSEMBLED_NOT_APP_QUALIFIED"
                    if CANDIDATE == "P21" else "P20_NORMAL_SIX_AND_COMPONENT18_ASSEMBLED_NOT_APP_QUALIFIED"),
         "source_sha256": SOURCE, "lock_sha256": LOCK,
         "archive": archive.name, "archive_sha256": sha(archive),
@@ -495,15 +647,16 @@ def package(root):
         "native_unit18_sha256": sha(root / "evidence/native-unit18.json"),
         **({"native_git_unit12_sha256": sha(root / "evidence/native-git-unit12.json")}
            if CANDIDATE == "P21" else {}),
+        **({"p167_exact_native_receipts": p167_receipts} if CANDIDATE == "P167" else {}),
         "App_GUI_qualified": False, "public_stable_release": False,
         "required_next": "Windows Limited Session3 helper/network migration and real official App acceptance"})
 
 def main():
-    global CANDIDATE, LOCK, SOURCE, SOURCE_FILES
+    global CANDIDATE, LOCK, SOURCE, SOURCE_FILES, RUST_VERSION, P167_CASES
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("check-only", "prepare", "build", "unit", "git_unit", "package"))
+    parser.add_argument("mode", choices=("check-only", "prepare", "build", "unit", "git_unit", "extra_unit", "package"))
     parser.add_argument("--root", type=Path)
-    parser.add_argument("--candidate", choices=("P20", "P21"), default="P20")
+    parser.add_argument("--candidate", choices=("P20", "P21", "P167"), default="P20")
     args = parser.parse_args()
     if args.candidate == "P21":
         CANDIDATE, LOCK, SOURCE, SOURCE_FILES = "P21", P21_LOCK, P21_SOURCE, P21_SOURCE_FILES
@@ -511,11 +664,23 @@ def main():
             require(os.environ.get("GITHUB_REF") == "refs/heads/codex/p20-hosted-ci-r570"
                     and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch",
                     "P21 manual gate on the existing disposable cache branch required")
+    if args.candidate == "P167":
+        CANDIDATE, RUST_VERSION = "P167", "1.95.0"
+        if args.mode != "check-only":
+            require(os.name == "nt" and os.environ.get("GITHUB_ACTIONS") == "true"
+                    and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+                    and os.environ.get("GITHUB_REF") == P167_BRANCH
+                    and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch",
+                    "P167 manual gate on the exact disposable GitHub-hosted branch required")
+        review = load(REPO / "scripts/ci/p167-review.json")
+        P167_CASES = select_p167(review)
+        LOCK, SOURCE, SOURCE_FILES = review["lock_sha256"], review["source_sha256"], review["source_files"]
     if args.mode == "check-only":
         lock, _, cases = plan()
         print(json.dumps({"source": SOURCE, "lock": LOCK, "binaries": lock["binaries"],
                           "cases": len(cases), "host_changes": False, "native_execution": False,
-                          **({"git_cases": 2 * len(P21_GIT_CASES)} if CANDIDATE == "P21" else {})}))
+                          **({"git_cases": 2 * len(P21_GIT_CASES)} if CANDIDATE in {"P21", "P167"} else {}),
+                          **({"additional_cases": P167_CASES} if CANDIDATE == "P167" else {})}))
         return 0
     root = hosted_root(args.root)
     try:

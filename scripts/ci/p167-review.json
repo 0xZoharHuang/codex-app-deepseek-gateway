@@ -1,0 +1,10 @@
+{
+  "status": "pending",
+  "lock_sha256": null,
+  "source_sha256": null,
+  "source_files": null,
+  "builder_sha256": null,
+  "packager_sha256": null,
+  "capacity_cases": null,
+  "workflow_sha256": "bbc47c836aa9a640dcedac944a78a415f54b7e8da894c557df7954f924bdd6ff"
+}
