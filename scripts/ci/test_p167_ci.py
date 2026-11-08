@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from urllib.error import HTTPError
 from pathlib import Path, PureWindowsPath
 from unittest.mock import patch
@@ -399,6 +400,28 @@ class P167Gate(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Core V8 input differs"):
                 ci.warm_inputs(builder, source, v8, lock)
 
+    def test_only_core_uses_jobs4_and_admission_rejects_wrong_hardware(self):
+        with patch.object(ci,"CANDIDATE","P167"), patch.dict(os.environ, {
+            "CI_P167_CORE_JOBS4":"1","CI_P20_BUILD_JOBS":"2",
+        }):
+            self.assertEqual(ci.build_jobs(),2)
+            self.assertEqual(ci.unit_jobs("codex-core"),4)
+            for name in ("codex-guardian-v2","codex-core-plugins","codex-windows-sandbox"):
+                self.assertEqual(ci.unit_jobs(name),2)
+            self.assertEqual(ci.unit_command(Path("toolchain"),ci.unit_jobs("codex-core"),"codex-core")[4:6],
+                             ["--jobs","4"])
+        for cpus, available in ((4,8*1024**3),(2,8*1024**3),(4,8*1024**3-1)):
+            fake = SimpleNamespace(cpu_count=lambda logical:cpus,
+                                   virtual_memory=lambda:SimpleNamespace(total=17174360064,available=available))
+            with patch.dict(sys.modules, {"psutil":fake}):
+                if cpus==4 and available>=8*1024**3:
+                    d=ci.core_resource_admission()
+                    self.assertEqual((d["logical_cpus"],d["initial_available_memory_bytes"],d["memory_floor_bytes"]),
+                                     (4,8*1024**3,4*1024**3))
+                else:
+                    with self.assertRaisesRegex(ValueError,"four logical CPUs"):
+                        ci.core_resource_admission()
+
     def test_workflow_read_only_no_rebuild_and_exact_cache_restore(self):
         text = (ci.REPO / ".github/workflows/p20-native-windows.yml").read_text()
         self.assertIn("runs-on: windows-2022", text)
@@ -418,6 +441,8 @@ class P167Gate(unittest.TestCase):
         self.assertLess(text.index("p20-windows.py restore_producer"), text.index("p20-windows.py warm_core"))
         self.assertLess(text.index("p20-windows.py warm_core"), text.index("p20-windows.py extra_unit"))
         self.assertEqual(text.count("p20-windows.py warm_core --candidate P167"), 1)
+        self.assertIn("CI_P167_CORE_JOBS4: '1'", text)
+        self.assertIn("CI_P20_BUILD_JOBS: '2'", text)
         self.assertTrue(all(re.fullmatch(r"actions/(?:[a-z-]+|cache/(?:restore|save))@[a-f0-9]{40}", action)
                             for action in re.findall(r"uses: (\S+)", text)))
 

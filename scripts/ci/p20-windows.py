@@ -709,6 +709,25 @@ def unit_environment(root, lock, builder, work, toolchain, cache, target, jobs):
     return environment, v8
 
 
+def unit_jobs(package_name):
+    jobs = build_jobs()
+    if (CANDIDATE == "P167" and package_name == "codex-core"
+            and os.environ.get("CI_P167_CORE_JOBS4") == "1"):
+        require(jobs == 2, "Normal producer and all other groups stay at two jobs")
+        return 4
+    return jobs
+
+
+def core_resource_admission():
+    import psutil
+    logical = psutil.cpu_count(logical=True)
+    memory = psutil.virtual_memory()
+    require(logical == 4 and memory.total >= 15_000_000_000 and memory.available >= 8*1024**3,
+            "Core jobs4 requires exactly four logical CPUs and at least 8 GiB available")
+    return {"logical_cpus": logical, "total_memory_bytes": memory.total,
+            "initial_available_memory_bytes": memory.available, "memory_floor_bytes": FLOOR, "jobs": 4}
+
+
 def unit_command(toolchain, jobs, package_name):
     return [str(toolchain / "cargo.exe"), "test", "--locked", "--release", "--jobs", str(jobs),
             "-p", package_name, "--lib", "--no-run", "--message-format=json-render-diagnostics"]
@@ -765,18 +784,20 @@ def admit_warm_result(raw, command, log):
 
 
 def warm_core(root):
-    require(CANDIDATE == "P167" and os.environ.get("CI_P167_CORE_WARMUP") == "1",
-            "Exact P167 Core warm-up workflow required")
+    require(CANDIDATE == "P167" and os.environ.get("CI_P167_CORE_WARMUP") == "1"
+            and os.environ.get("CI_P167_CORE_JOBS4") == "1",
+            "Exact P167 Core jobs4 warm-up workflow required")
     retained = load(root / "evidence/p167-retained-producer.json")
-    require(retained["repeat_core_compile_sha256"] == resume_controller().CORE_REPEAT_SHA,
-            "Exact repeated Core timeout evidence required")
+    require(retained["same_runner_core_compile_sha256"] == resume_controller().CORE_SAME_RUNNER_SHA,
+            "Exact prior same-runner Core timeout evidence required")
     lock, builder, _ = plan()
     toolchain = Path(os.environ["CI_RUST_TOOLCHAIN_BIN"])
-    cache, target = cache_paths(root); jobs = build_jobs()
+    cache, target = cache_paths(root); jobs = unit_jobs("codex-core")
     work = work_path(root)
     source = work / "source"
     environment, v8 = unit_environment(root, lock, builder, work, toolchain, cache, target, jobs)
     before = warm_inputs(builder, source, v8, lock)
+    resources = core_resource_admission()
     command = unit_command(toolchain, jobs, "codex-core")
     name = "native-p167-core-warmup"
     try:
@@ -792,7 +813,8 @@ def warm_core(root):
     require(before == after, "Core warm-up changed the prepared source/V8 bytes or natural mtimes")
     save(root / "evidence/p167-core-warmup.json", {"status": status, "command": command,
         "run_id": os.environ["GITHUB_RUN_ID"], "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
-        "inputs": after, "observer_sha256": sha(path), "log_sha256": sha(log), "cases_credited": 0})
+        "inputs": after, "resources": resources, "observer_sha256": sha(path),
+        "log_sha256": sha(log), "cases_credited": 0})
 
 
 def unit(root, *, plugin_git=False, p167_group=None):
@@ -801,10 +823,9 @@ def unit(root, *, plugin_git=False, p167_group=None):
     require(os.environ.get("CI_P167_TEST_RESUME") != "1" or plugin_git or p167_group is not None,
             "Test continuation preserves the original sandbox18 without reexecution")
     toolchain = Path(os.environ["CI_RUST_TOOLCHAIN_BIN"])
-    cache, target = cache_paths(root); jobs = build_jobs()
+    cache, target = cache_paths(root)
     work = work_path(root)
     source = work / "source"
-    environment, v8 = unit_environment(root, lock, builder, work, toolchain, cache, target, jobs)
     package_name = "codex-core-plugins" if plugin_git else "codex-windows-sandbox"
     if p167_group is not None:
         require(CANDIDATE == "P167" and p167_group in P167_CASES, "Unknown P167 test group")
@@ -824,6 +845,8 @@ def unit(root, *, plugin_git=False, p167_group=None):
         cases = [f"{module}::git_lifetime_windows_tests::{case}"
                  for module in ("startup_sync", "marketplace_upgrade::git")
                  for case in P21_GIT_CASES]
+    jobs = unit_jobs(package_name)
+    environment, v8 = unit_environment(root, lock, builder, work, toolchain, cache, target, jobs)
     command = unit_command(toolchain, jobs, package_name)
     if p167_group == "codex-core" and os.environ.get("CI_P167_CORE_WARMUP") == "1":
         proof = load(root / "evidence/p167-core-warmup.json")
@@ -834,8 +857,15 @@ def unit(root, *, plugin_git=False, p167_group=None):
                 and proof["run_attempt"] == os.environ["GITHUB_RUN_ATTEMPT"]
                 and proof["observer_sha256"] == sha(warm_raw) and proof["log_sha256"] == sha(warm_log)
                 and proof["status"] == admit_warm_result(load(warm_raw), command, warm_log)
-                and proof["inputs"] == warm_inputs(builder, source, v8, lock),
+                and proof["inputs"] == warm_inputs(builder, source, v8, lock)
+                and proof["resources"]["jobs"] == jobs == 4 and proof["resources"]["logical_cpus"] == 4
+                and proof["resources"]["initial_available_memory_bytes"] >= 8*1024**3
+                and proof["resources"]["memory_floor_bytes"] == FLOOR,
                 "Normal Core compile must use the same runner, exact inputs and natural mtimes as warm-up")
+        resources = core_resource_admission()
+        save(root / "evidence/p167-core-normal-resource-admission.json",
+             {**resources, "command":command, "run_id":os.environ["GITHUB_RUN_ID"],
+              "warmup_receipt_sha256":sha(root / "evidence/p167-core-warmup.json")})
     observe(command, root, source / "codex-rs", environment, compile_name, 1800)
     artifacts, finished = [], []
     for line in (root / "evidence" / f"{compile_name}.log").read_text(
@@ -977,7 +1007,8 @@ def package(root):
         **({"p167_exact_native_receipts": p167_receipts} if CANDIDATE == "P167" else {}),
         **({"p167_retained_producer_receipt_sha256": sha(root / "evidence/p167-retained-producer.json")}
            if CANDIDATE == "P167" and os.environ.get("CI_P167_TEST_RESUME") == "1" else {}),
-        **({"p167_core_warmup_receipt_sha256": sha(root / "evidence/p167-core-warmup.json")}
+        **({"p167_core_warmup_receipt_sha256": sha(root / "evidence/p167-core-warmup.json"),
+            "p167_core_normal_resource_receipt_sha256": sha(root / "evidence/p167-core-normal-resource-admission.json")}
            if CANDIDATE == "P167" and os.environ.get("CI_P167_CORE_WARMUP") == "1" else {}),
         "App_GUI_qualified": False, "public_stable_release": False,
         "required_next": "Windows Limited Session3 helper/network migration and real official App acceptance"})

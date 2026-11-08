@@ -17,17 +17,20 @@ original_v8_directory = previous.original_v8_directory
 stage_v8_inputs = previous.stage_v8_inputs
 need = previous.require
 
-RUN = "42511450429"
-COMMIT = "5e32ca89a8d20a934a980066973581a55e2da91a"
-ARTIFACT = 13630669722
-SIZE = 255465683
-ZIP_SHA = "5c504baf7ae12bcf96073ff6b12567d15612110ceb2ae5a2daa38e0a854eb213"
+RUN = "42516370653"
+COMMIT = "9924d70f11d9733ee495a00d45ac4f3a50f9f47b"
+ARTIFACT = 13634163269
+SIZE = 372046001
+ZIP_SHA = "7d1d393fdf8585e75bf12d43126df15b635a98bc699ae438935b6bd60cccf62b"
+CORE_SAME_RUNNER_SHA = "7eb236bf8a73d7b2900f91b61f752610ae61af28069afbca70982526fcc763b0"
+CORE_WARM_OBSERVER_SHA = "84bd8f0c6790e85843cc56d9ebb807409ebf1ff46200e3ffcebb0a460990d4e2"
+CORE_WARM_PROOF_SHA = "8f309ab17e4106378e0d591003cfec8c6eeb6b85e429d94882e2c25ac4498374"
 GIT_RUN = "42504592572"
 GIT_ZIP_SHA = "eb1c90aad09e7895b20b5782b1fbdba0a43f14cd14fdb18846c84c906783dcd2"
 CORE_REPEAT_SHA = "092de3ce84a3bdd2d0742cb6f50418b9a9008089094515edf8a0697927b1414c"
 PRODUCER_RUN = "42469680627"
 PRODUCER_ZIP_SHA = "39ea2714f46b6af8959c7703c6528b767301c60d174694e8575934421d50b82f"
-RETAINED_SHA = "ba376f4b92067db70266a186cd55f494874139766db8e0997abb5db249020ae9"
+RETAINED_SHA = "999e250a6130739d8fd98d13dbe811f32a79fffb24b4d4b09647ddc5be2229be"
 GIT_SHA = "c078884443ee9d8865497436620bb899abe0b9e131acccfb2700ec1b40169c30"
 GIT_COMPILE_SHA = "48715fe8357b7b63ec3745409d5e556a7a44cead7e970243694f3daf2524d5cb"
 CORE_TIMEOUT_SHA = "99b1ebcb1e9dce1add23c5e540b269eea3b7691ac4805efe1ad0b5c387bd9b63"
@@ -36,7 +39,7 @@ BUILD_SHA = "07f8f7bcf9fdc3247b62126e479734890c733e00af8665a8465b0c8e966a7575"
 SANDBOX_SHA = "e43829cedfb262e6f67321c8ed3063f5e808c738df458402363c99158ef29b86"
 GIT_FAILURE_SHA = "7dc4493fae2e9342195b3172f196df0a1afd79102a5d769eb3402fe9737190c7"
 KEY = ("p167-native-v1-Windows-rust1.95.0-msvc14.44.35207-sdk10.0.26100.0-"
-       "24dab591cfe8c61f3960f109f1a67c7d3e57d9dc371fe8ed09042d35cc695c6d-42511450429-1")
+       "24dab591cfe8c61f3960f109f1a67c7d3e57d9dc371fe8ed09042d35cc695c6d-42516370653-1")
 LEAF = "codex-windows-sandbox-p167-libtest.exe"
 GIT_LEAF = "codex-core-plugins-p167-libtest.exe"
 ORIGINAL_SANDBOX = Path(rf"C:\cagp167-{PRODUCER_RUN}-1\delivery\unit") / LEAF
@@ -51,7 +54,7 @@ def sha(path):
         return hashlib.file_digest(f, "sha256").hexdigest()
 
 def original_archive(root):
-    return root / "evidence" / f"repeated-core-p167-{RUN}.zip"
+    return root / "evidence" / f"same-runner-core-p167-{RUN}.zip"
 
 def verify_zip(path):
     need(path.is_file() and path.stat().st_size == SIZE and sha(path) == ZIP_SHA,
@@ -81,7 +84,10 @@ def read_origin(path, evidence, work, cache, target, lock, source_sha, lock_sha)
         old_git = exact("original-native-git-unit-compile.json", GIT_FAILURE_SHA)
         git = exact("native-git-unit-compile.json", GIT_COMPILE_SHA)
         old_core = exact("original-native-p167-codex-core-compile.json", CORE_TIMEOUT_SHA)
-        core = exact("native-p167-codex-core-compile.json", CORE_REPEAT_SHA)
+        repeat_core = exact("repeat-native-p167-codex-core-compile.json", CORE_REPEAT_SHA)
+        core = exact("native-p167-codex-core-compile.json", CORE_SAME_RUNNER_SHA)
+        warm = exact("native-p167-core-warmup.json", CORE_WARM_OBSERVER_SHA)
+        warm_proof = exact("p167-core-warmup.json", CORE_WARM_PROOF_SHA)
         retained = exact("p167-retained-producer.json", RETAINED_SHA)
         sandbox = exact("native-unit18.json", SANDBOX_SHA)
         git_tests = exact("native-git-unit12.json", GIT_SHA)
@@ -121,11 +127,18 @@ def read_origin(path, evidence, work, cache, target, lock, source_sha, lock_sha)
              and git["log_sha256"] == previous.digest(z.read("evidence/native-git-unit-compile.log")),
              "Original qualified Git compiler gate differs")
         need(old_core["timed_out"] is True and old_core["passed"] is False
-             and core["timed_out"] is True and core["fixed_timeout_seconds"] == 1800 and core["passed"] is False
-             and not any(core.get(k) for k in ("unknown_live","remaining_after_cleanup","resource_guard",
-                                              "wrapper_resource_guard","cleanup_errors","observation_errors"))
-             and core["log_sha256"] == previous.digest(z.read("evidence/native-p167-codex-core-compile.log")),
-             "Original Core compilation timeout differs")
+             and repeat_core["timed_out"] is True and repeat_core["passed"] is False
+             and retained["repeat_core_compile_sha256"] == CORE_REPEAT_SHA
+             and warm_proof["status"] == "warm_compile_timed_out_without_survivors"
+             and warm_proof["cases_credited"] == 0 and warm_proof["observer_sha256"] == CORE_WARM_OBSERVER_SHA
+             and warm_proof["command"] == warm["command"] == core["command"],
+             "Original and same-runner Core lineage differs")
+        for row, stem in ((core, "native-p167-codex-core-compile"), (warm, "native-p167-core-warmup")):
+            need(row["timed_out"] is True and row["fixed_timeout_seconds"] == 1800 and row["passed"] is False
+                 and not any(row.get(k) for k in ("unknown_live","remaining_after_cleanup","resource_guard",
+                                                  "wrapper_resource_guard","cleanup_errors","observation_errors"))
+                 and row["log_sha256"] == previous.digest(z.read(f"evidence/{stem}.log")),
+                 "Original same-runner bounded Core evidence differs")
         need(deps["status"] == "LOCKED_FETCH_CHECKOUT_PROVEN" and deps["source_sha256"] == source_sha
              and deps["build_lock_sha256"] == lock_sha and deps["cargo_lock_sha256"] == lock["cargo_lock_sha256"]
              and deps["cargo_home"] == str(cache / "cargo"), "Original locked dependency witness differs")
@@ -153,8 +166,10 @@ def read_origin(path, evidence, work, cache, target, lock, source_sha, lock_sha)
                      and previous.digest(z.read(f"evidence/{stage}.log")) == row["log_sha256"] == observed["log_sha256"],
                      "Original native case evidence differs")
     return {**retained, "cache_key": KEY, "checkout": deps["checkout"],
-            "repeat_core_compile_run": RUN, "repeat_core_compile_commit": COMMIT,
-            "repeat_core_artifact_sha256": ZIP_SHA, "repeat_core_compile_sha256": CORE_REPEAT_SHA}
+            "same_runner_core_run": RUN, "same_runner_core_commit": COMMIT,
+            "same_runner_core_artifact_sha256": ZIP_SHA, "same_runner_core_compile_sha256": CORE_SAME_RUNNER_SHA,
+            "same_runner_core_warm_observer_sha256": CORE_WARM_OBSERVER_SHA,
+            "same_runner_core_warm_proof_sha256": CORE_WARM_PROOF_SHA}
 
 
 def admit_cache(root, lock, source_sha, lock_sha, cache, target):
@@ -208,10 +223,13 @@ def restore(root, lock, builder, cache, target, expected, restored, git):
                      "native-git-unit12.json", "native-git-unit-compile.json", "native-git-unit-compile.log",
                      "original-native-git-unit-compile.json", "original-native-git-unit-compile.log",
                      "original-git_unit-failure.json", "original-native-p167-codex-core-compile.json",
-                     "original-native-p167-codex-core-compile.log", "original-extra_unit-failure.json"):
+                     "original-native-p167-codex-core-compile.log", "original-extra_unit-failure.json",
+                     "repeat-native-p167-codex-core-compile.json", "repeat-native-p167-codex-core-compile.log",
+                     "repeat-extra_unit-failure.json"):
             copy("evidence/" + name, evidence / name)
-        for name in ("native-p167-codex-core-compile.json", "native-p167-codex-core-compile.log", "extra_unit-failure.json"):
-            copy("evidence/" + name, evidence / ("repeat-" + name))
+        for name in ("native-p167-codex-core-compile.json", "native-p167-codex-core-compile.log", "extra_unit-failure.json",
+                     "native-p167-core-warmup.json", "native-p167-core-warmup.log", "p167-core-warmup.json"):
+            copy("evidence/" + name, evidence / ("same-runner-" + name))
         for prefix, count in (("native-case", 18), ("native-git-case", 12)):
             for i in range(count):
                 for suffix in (".json", ".log"):
