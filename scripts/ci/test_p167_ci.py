@@ -327,7 +327,7 @@ class P167Gate(unittest.TestCase):
     def test_completed_producer_cache_requires_exact_six_bytes_before_copy(self):
         resume = ci.load_module("p167_completed_cache_test", ci.REPO / "scripts/ci/p167-tests-resume.py")
         with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory)
+            target = Path(directory).resolve(strict=True)
             release = target / "release"
             release.mkdir()
             rows = []
