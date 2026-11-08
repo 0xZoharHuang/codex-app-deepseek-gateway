@@ -1,9 +1,12 @@
 """Offline early draft admission. No remote calls or native process launch."""
+import contextlib
 import hashlib
+import io
 import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -66,6 +69,43 @@ class EarlyDraft(unittest.TestCase):
                     self.assertEqual([x.args[0] for x in hidden.call_args_list],[100,101])
                 self.assertEqual(len(uploaded),2)
 
+    def test_packaging_failure_exposes_bounded_sanitized_raw_diagnostics_and_stays_failed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); evidence = root / "evidence"
+            (evidence / "early-assembly").mkdir(parents=True)
+            (evidence / "early-normal-package.log").write_bytes(
+                b"x"*8000+b"\nNative assembly rejected: locked source error\n"
+                b"Authorization: Bearer ghp_demo_sensitive\nGITHUB_TOKEN=demo_sensitive\n")
+            (evidence / "early-assembly/cargo-metadata.stderr").write_bytes(
+                b"error: offline package missing\nhttps://server.invalid/asset?sig=demo_sensitive\n")
+            (evidence / "early-normal-package.json").write_text(json.dumps({
+                "passed":False,"returncode":1,"timed_out":False,"seconds":30,
+                "unknown_live":[12],"observed":[{"argv":["demo_sensitive"]}]}))
+            class CI:
+                sha = staticmethod(lambda p:hashlib.sha256(p.read_bytes()).hexdigest())
+                load = staticmethod(lambda p:json.loads(p.read_bytes()))
+            out = io.StringIO()
+            with patch.object(sys,"argv",["early","assemble","--root",str(root)]), \
+                 patch.object(early,"controller",return_value=CI), \
+                 patch.object(early,"admitted_context",return_value=(root,self.head)), \
+                 patch.object(early,"assemble",side_effect=ValueError("original package failure")) as run, \
+                 patch.object(early,"upload") as upload, contextlib.redirect_stdout(out):
+                with self.assertRaisesRegex(ValueError,"original package failure"):
+                    early.main()
+                run.assert_called_once()
+                upload.assert_not_called()
+            text=out.getvalue()
+            self.assertNotIn("demo_sensitive",text)
+            self.assertEqual(len(text.splitlines()),1)
+            payload=json.loads(text.removeprefix("EARLY_UNQUALIFIED_DIAGNOSTIC "))
+            self.assertTrue(payload["packager_log"]["truncated"])
+            self.assertLessEqual(len(payload["packager_log"]["tail"]),4096)
+            self.assertIn("Native assembly rejected:",payload["packager_log"]["tail"])
+            self.assertIn("offline package missing",payload["cargo_metadata_stderr"]["tail"])
+            self.assertEqual(payload["observer"]["unknown_live_count"],1)
+            self.assertEqual(payload["observer"]["returncode"],1)
+            self.assertNotIn("observed",payload["observer"])
+
     def test_workflow_has_only_private_upload_no_native_compile_or_artifact(self):
         path=early.REPO/".github/workflows/p20-native-package-resume.yml"
         text=path.read_text()
@@ -75,6 +115,9 @@ class EarlyDraft(unittest.TestCase):
         self.assertIn("p20-windows.py restore_producer --candidate P167",text)
         self.assertIn("p167-early-draft.py upload",text)
         self.assertIn("fail-on-cache-miss: true",text)
+        with patch.dict(os.environ, {"CI_P167_TEST_RESUME":"1"}):
+            resume = early.controller().resume_controller()
+            self.assertIn(f"key: {resume.KEY}",text)
 
 if __name__ == "__main__":
     unittest.main()

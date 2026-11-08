@@ -101,6 +101,44 @@ def assemble(ci, root, head):
     ci.save(root / "evidence/EARLY_UNQUALIFIED.json", proof)
     print(json.dumps({"status":proof["status"], "sha256":proof["archive_sha256"], "size":proof["archive_size"]}), flush=True)
 
+def diagnostic_tail(path, limit=4096):
+    if not path.is_file():
+        return None
+    with path.open("rb") as stream:
+        size = stream.seek(0, 2)
+        stream.seek(max(0, size - limit))
+        text = stream.read(limit).decode("utf-8", errors="replace")
+    if size > limit:
+        text = text.partition("\n")[2]
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+    text = re.sub(r"(?i)(https?://)[^/\s:@]+:[^/\s@]+@", r"\1[redacted]@", text)
+    text = re.sub(r"(?i)(https?://[^\s?\"']+)\?[^\s\"'<>]+", r"\1?[redacted]", text)
+    text = re.sub(r"(?i)\bBearer\s+[^\s,\"']+", "Bearer [redacted]", text)
+    text = re.sub(r"(?i)\b(?:gh[pousr]_|github_pat_|sk-or-v1-)[A-Za-z0-9_-]+", "[redacted]", text)
+    text = re.sub(r"(?im)\b([A-Z_]*(?:TOKEN|PASSWORD|SECRET|COOKIE))\s*[:=]\s*[^\r\n]+", r"\1=[redacted]", text)
+    return {"bytes": size, "tail": text, "truncated": size > limit}
+
+
+def assembly_failure(ci, root):
+    evidence = root / "evidence"
+    detail = {"packager_log": diagnostic_tail(evidence / "early-normal-package.log"),
+              "cargo_metadata_stderr": diagnostic_tail(evidence / "early-assembly/cargo-metadata.stderr")}
+    path = evidence / "early-normal-package.json"
+    if path.is_file():
+        try:
+            raw = ci.load(path)
+            keys = ("passed", "observer_passed", "returncode", "timed_out", "seconds",
+                    "fixed_timeout_seconds", "wrapper_minimum_available_memory_bytes")
+            detail["observer"] = {key:raw.get(key) for key in keys if type(raw.get(key)) in (int,float,bool)}
+            for key in ("unknown_live", "remaining_after_cleanup", "cleanup_errors", "observation_errors"):
+                detail["observer"][key+"_count"] = len(raw.get(key) or [])
+            detail["observer"]["resource_guard_present"] = bool(raw.get("resource_guard") or raw.get("wrapper_resource_guard"))
+            detail["observer"]["raw_sha256"] = ci.sha(path)
+        except (OSError, ValueError, TypeError):
+            detail["observer"] = {"readable":False}
+    print("EARLY_UNQUALIFIED_DIAGNOSTIC " + json.dumps(detail, ensure_ascii=True), flush=True)
+
+
 def gh_json(*args):
     return json.loads(subprocess.check_output(["gh", "api", *args], timeout=180))
 
@@ -162,7 +200,14 @@ def main():
     ci = controller()
     root, head = admitted_context(ci, args.root)
     if args.mode == "assemble":
-        assemble(ci, root, head)
+        try:
+            assemble(ci, root, head)
+        except Exception:
+            try:
+                assembly_failure(ci, root)
+            except Exception as diagnostic_error:
+                print("EARLY_UNQUALIFIED_DIAGNOSTIC_UNAVAILABLE " + type(diagnostic_error).__name__, flush=True)
+            raise
     else:
         upload(ci, root, head, args.release)
 
