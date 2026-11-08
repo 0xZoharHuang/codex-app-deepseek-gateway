@@ -773,6 +773,7 @@ def unit(root, *, plugin_git=False, p167_group=None):
                        "profile": artifacts[0]["profile"]}, "App_GUI_qualified": False})
 
 def git_unit(root):
+    require(os.environ.get("CI_P167_TEST_RESUME") != "1", "Continuation retains the exact original Git12")
     require(CANDIDATE in {"P21", "P167"}, "Focused Git cases require the atomic Git candidate")
     unit(root, plugin_git=True)
 
@@ -806,14 +807,13 @@ def verify_p167_unit_receipts(root, cases):
                     f"P167 test log differs: {row['name']}")
         executable = receipt["executable"]
         path_exe = Path(executable["path"])
-        if filename == "native-unit18.json" and os.environ.get("CI_P167_TEST_RESUME") == "1":
+        if filename in {"native-unit18.json", "native-git-unit12.json"} and os.environ.get("CI_P167_TEST_RESUME") == "1":
             prior = load(root / "evidence/p167-retained-producer.json")
-            resume = resume_controller()
-            require(path_exe == resume.ORIGINAL_SANDBOX and sha(path) == resume.SANDBOX_SHA
-                    and prior["sandbox_receipt_sha256"] == resume.SANDBOX_SHA
-                    and prior["original_sandbox_executable"] == str(path_exe),
-                    "Retained sandbox receipt must name the exact original libtest path")
-            path_exe = root / "delivery/unit" / resume.LEAF
+            expected_sha, expected_path, sha_key, path_key = resume_controller().RETAINED_UNITS[filename]
+            require(path_exe == expected_path and sha(path) == expected_sha
+                    and prior[sha_key] == expected_sha and prior[path_key] == str(path_exe),
+                    "Retained unit receipt must name its exact original libtest path")
+            path_exe = root / "delivery/unit" / expected_path.name
         require(path_exe.is_relative_to(root / "delivery/unit")
                 and sha(path_exe) == executable["sha256"] and executable["profile"]["test"] is True,
                 "Sealed P167 libtest executable differs")

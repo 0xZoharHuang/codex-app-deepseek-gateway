@@ -349,6 +349,8 @@ class P167Gate(unittest.TestCase):
         with patch.dict(os.environ, {"CI_P167_TEST_RESUME": "1"}):
             with self.assertRaisesRegex(ValueError, "must not compile the six"):
                 ci.build(Path("unused"))
+            with self.assertRaisesRegex(ValueError, "retains the exact original Git12"):
+                ci.git_unit(Path("unused"))
 
     def test_workflow_read_only_no_rebuild_and_exact_cache_restore(self):
         text = (ci.REPO / ".github/workflows/p20-native-windows.yml").read_text()
@@ -365,7 +367,8 @@ class P167Gate(unittest.TestCase):
         self.assertNotIn("p20-windows.py unit --candidate P167", text)
         self.assertEqual(text.count("p20-windows.py restore_producer --candidate P167"), 1)
         self.assertLess(text.index("p20-windows.py locked_fetch"), text.index("p20-windows.py restore_producer"))
-        self.assertLess(text.index("p20-windows.py restore_producer"), text.index("p20-windows.py git_unit"))
+        self.assertNotIn("p20-windows.py git_unit --candidate P167", text)
+        self.assertLess(text.index("p20-windows.py restore_producer"), text.index("p20-windows.py extra_unit"))
         self.assertTrue(all(re.fullmatch(r"actions/(?:[a-z-]+|cache/(?:restore|save))@[a-f0-9]{40}", action)
                             for action in re.findall(r"uses: (\S+)", text)))
 

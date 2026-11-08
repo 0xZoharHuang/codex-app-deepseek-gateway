@@ -17,26 +17,38 @@ original_v8_directory = previous.original_v8_directory
 stage_v8_inputs = previous.stage_v8_inputs
 need = previous.require
 
-RUN = "42469680627"
-COMMIT = "3c0d671b40fbca5c48209019e25f298e9776b110"
-ARTIFACT = 13617362948
-SIZE = 29550203
-ZIP_SHA = "39ea2714f46b6af8959c7703c6528b767301c60d174694e8575934421d50b82f"
+RUN = "42504592572"
+COMMIT = "86f39e40b0b4257b2cd0451f262a88e579463ac0"
+ARTIFACT = 13629186832
+SIZE = 141667502
+ZIP_SHA = "eb1c90aad09e7895b20b5782b1fbdba0a43f14cd14fdb18846c84c906783dcd2"
+PRODUCER_RUN = "42469680627"
+PRODUCER_ZIP_SHA = "39ea2714f46b6af8959c7703c6528b767301c60d174694e8575934421d50b82f"
+RETAINED_SHA = "8ae4bc01869a147fb9c895645ada9ef93405cee22a4bb62b4ad9caed1592857e"
+GIT_SHA = "c078884443ee9d8865497436620bb899abe0b9e131acccfb2700ec1b40169c30"
+GIT_COMPILE_SHA = "48715fe8357b7b63ec3745409d5e556a7a44cead7e970243694f3daf2524d5cb"
+CORE_TIMEOUT_SHA = "99b1ebcb1e9dce1add23c5e540b269eea3b7691ac4805efe1ad0b5c387bd9b63"
 RAW_SHA = "3bd9b092b342b728d59db3a92b4200d70b981ae3f9d047ad36fb55f3c0bb9f38"
 BUILD_SHA = "07f8f7bcf9fdc3247b62126e479734890c733e00af8665a8465b0c8e966a7575"
 SANDBOX_SHA = "e43829cedfb262e6f67321c8ed3063f5e808c738df458402363c99158ef29b86"
 GIT_FAILURE_SHA = "7dc4493fae2e9342195b3172f196df0a1afd79102a5d769eb3402fe9737190c7"
 KEY = ("p167-native-v1-Windows-rust1.95.0-msvc14.44.35207-sdk10.0.26100.0-"
-       "24dab591cfe8c61f3960f109f1a67c7d3e57d9dc371fe8ed09042d35cc695c6d-42469680627-1")
+       "24dab591cfe8c61f3960f109f1a67c7d3e57d9dc371fe8ed09042d35cc695c6d-42504592572-1")
 LEAF = "codex-windows-sandbox-p167-libtest.exe"
-ORIGINAL_SANDBOX = Path(rf"C:\cagp167-{RUN}-1\delivery\unit") / LEAF
+GIT_LEAF = "codex-core-plugins-p167-libtest.exe"
+ORIGINAL_SANDBOX = Path(rf"C:\cagp167-{PRODUCER_RUN}-1\delivery\unit") / LEAF
+ORIGINAL_GIT = Path(rf"C:\cagp167-{RUN}-1\delivery\unit") / GIT_LEAF
+RETAINED_UNITS = {
+    "native-unit18.json": (SANDBOX_SHA, ORIGINAL_SANDBOX, "sandbox_receipt_sha256", "original_sandbox_executable"),
+    "native-git-unit12.json": (GIT_SHA, ORIGINAL_GIT, "git_receipt_sha256", "original_git_executable"),
+}
 
 def sha(path):
     with path.open("rb") as f:
         return hashlib.file_digest(f, "sha256").hexdigest()
 
 def original_archive(root):
-    return root / "evidence" / f"completed-p167-{RUN}.zip"
+    return root / "evidence" / f"retained-git-p167-{RUN}.zip"
 
 def verify_zip(path):
     need(path.is_file() and path.stat().st_size == SIZE and sha(path) == ZIP_SHA,
@@ -63,8 +75,12 @@ def read_origin(path, evidence, work, cache, target, lock, source_sha, lock_sha)
             return json.loads(b)
         raw = exact("normal-raw-manifest.json", RAW_SHA)
         build = exact("normal-six-build.json", BUILD_SHA)
-        git = exact("native-git-unit-compile.json", GIT_FAILURE_SHA)
+        old_git = exact("original-native-git-unit-compile.json", GIT_FAILURE_SHA)
+        git = exact("native-git-unit-compile.json", GIT_COMPILE_SHA)
+        core = exact("native-p167-codex-core-compile.json", CORE_TIMEOUT_SHA)
+        retained = exact("p167-retained-producer.json", RETAINED_SHA)
         sandbox = exact("native-unit18.json", SANDBOX_SHA)
+        git_tests = exact("native-git-unit12.json", GIT_SHA)
         deps = exact("p167-dependency-checkout.json")
         bind = exact("normal-source-binding.json")
         inputs = exact("inputs.json")
@@ -85,37 +101,55 @@ def read_origin(path, evidence, work, cache, target, lock, source_sha, lock_sha)
              and build["passed"] is True and build["returncode"] == 0 and build["timed_out"] is False
              and build["fixed_timeout_seconds"] == 7200 and not build["unknown_live"]
              and not build["remaining_after_cleanup"], "Completed normal six provenance differs")
-        need(git["timed_out"] is True and git["fixed_timeout_seconds"] == 1800 and git["passed"] is False
+        need(retained["completed_producer_run"] == PRODUCER_RUN
+             and retained["artifact_sha256"] == PRODUCER_ZIP_SHA
+             and retained["raw_manifest_sha256"] == RAW_SHA and retained["sandbox_receipt_sha256"] == SANDBOX_SHA
+             and retained["native_producer_rerun"] is False and retained["original_sandbox_reexecuted"] is False,
+             "Original six/18 retained producer chain differs")
+        need(old_git["timed_out"] is True and old_git["passed"] is False
+             and git["passed"] is True and git["returncode"] == 0 and git["timed_out"] is False
              and not git["unknown_live"] and not git["remaining_after_cleanup"]
-             and not git.get("resource_guard") and not git.get("wrapper_resource_guard"),
-             "Original Git compilation timeout differs")
+             and git["fixed_timeout_seconds"] == 1800
+             and (git["observer_passed"] is True or (git.get("qualified_compiler_telemetry_cleanup") or {}).get(
+                  "kind") == "observed_MSVC_VCTIP_telemetry_cleanup_only")
+             and git["log_sha256"] == previous.digest(z.read("evidence/native-git-unit-compile.log")),
+             "Original qualified Git compiler gate differs")
+        need(core["timed_out"] is True and core["fixed_timeout_seconds"] == 1800 and core["passed"] is False
+             and not any(core.get(k) for k in ("unknown_live","remaining_after_cleanup","resource_guard",
+                                              "wrapper_resource_guard","cleanup_errors","observation_errors"))
+             and core["log_sha256"] == previous.digest(z.read("evidence/native-p167-codex-core-compile.log")),
+             "Original Core compilation timeout differs")
         need(deps["status"] == "LOCKED_FETCH_CHECKOUT_PROVEN" and deps["source_sha256"] == source_sha
              and deps["build_lock_sha256"] == lock_sha and deps["cargo_lock_sha256"] == lock["cargo_lock_sha256"]
              and deps["cargo_home"] == str(cache / "cargo"), "Original locked dependency witness differs")
         names = json.loads((REPO / "scripts/ci/p20-native-unit-cases.json").read_bytes())
-        need(sandbox["status"] == "P167_NATIVE_COMPONENT18_PASSED_NOT_APP_QUALIFIED"
-             and sandbox["source_sha256"] == source_sha and sandbox["lock_sha256"] == lock_sha
-             and sandbox["App_GUI_qualified"] is False and [x["name"] for x in sandbox["cases"]] == names
-             and len(names) == 18 and sandbox["executable"]["path"] == str(ORIGINAL_SANDBOX)
-             and sandbox["executable"]["profile"]["test"] is True, "Original sealed sandbox18 differs")
-        with z.open(f"delivery/unit/{LEAF}") as f:
-            need(hashlib.file_digest(f, "sha256").hexdigest() == sandbox["executable"]["sha256"],
-                 "Original sealed sandbox libtest differs")
-        for i, row in enumerate(sandbox["cases"]):
-            stage = f"native-case-{i:02}"
-            receipt = exact(stage + ".json")
-            need(receipt["passed"] is True and receipt["returncode"] == 0 and receipt["timed_out"] is False
-                 and not receipt["unknown_live"] and not receipt["remaining_after_cleanup"]
-                 and receipt["command"] == [str(ORIGINAL_SANDBOX), "--exact", row["name"],
-                                              "--show-output", "--test-threads=1"]
-                 and previous.digest(z.read(f"evidence/{stage}.log")) == row["log_sha256"] == receipt["log_sha256"],
-                 "Original native sandbox case evidence differs")
-    return {"completed_producer_run": RUN, "completed_producer_commit": COMMIT, "artifact_sha256": ZIP_SHA,
-            "cache_key": KEY, "original_absolute_work": str(work),
-            "original_v8_directory": str(original_v8_directory(work)), "checkout": deps["checkout"],
-            "raw_manifest_sha256": RAW_SHA, "sandbox_receipt_sha256": SANDBOX_SHA,
-            "original_sandbox_executable": str(ORIGINAL_SANDBOX), "original_git_compile_sha256": GIT_FAILURE_SHA,
-            "native_producer_rerun": False, "original_sandbox_reexecuted": False}
+        need([x["name"] for x in sandbox["cases"]] == names, "Original sandbox18 selectors differ")
+        for receipt, status, executable, prefix, count in (
+            (sandbox, "P167_NATIVE_COMPONENT18_PASSED_NOT_APP_QUALIFIED", ORIGINAL_SANDBOX, "native-case", 18),
+            (git_tests, "P167_NATIVE_GIT12_PASSED_NOT_APP_QUALIFIED", ORIGINAL_GIT, "native-git-case", 12),
+        ):
+            rows = receipt["cases"]
+            need(receipt["status"] == status and receipt["source_sha256"] == source_sha
+                 and receipt["lock_sha256"] == lock_sha and receipt["App_GUI_qualified"] is False
+                 and len(rows) == len({x["name"] for x in rows}) == count
+                 and receipt["executable"]["path"] == str(executable)
+                 and receipt["executable"]["profile"]["test"] is True, "Original sealed unit group differs")
+            with z.open(f"delivery/unit/{executable.name}") as f:
+                need(hashlib.file_digest(f, "sha256").hexdigest() == receipt["executable"]["sha256"],
+                     "Original sealed libtest differs")
+            for i, row in enumerate(rows):
+                stage = f"{prefix}-{i:02}"
+                observed = exact(stage + ".json")
+                need(observed["passed"] is True and observed["returncode"] == 0 and observed["timed_out"] is False
+                     and not observed["unknown_live"] and not observed["remaining_after_cleanup"]
+                     and observed["command"] == [str(executable), "--exact", row["name"], "--show-output", "--test-threads=1"]
+                     and previous.digest(z.read(f"evidence/{stage}.log")) == row["log_sha256"] == observed["log_sha256"],
+                     "Original native case evidence differs")
+    return {**retained, "cache_key": KEY, "checkout": deps["checkout"],
+            "retained_git_run": RUN, "retained_git_commit": COMMIT, "retained_git_artifact_sha256": ZIP_SHA,
+            "git_receipt_sha256": GIT_SHA, "original_git_executable": str(ORIGINAL_GIT),
+            "original_core_compile_sha256": CORE_TIMEOUT_SHA, "original_git_reexecuted": False}
+
 
 def admit_cache(root, lock, source_sha, lock_sha, cache, target):
     need(os.environ.get("CI_P167_TEST_RESUME") == "1" and os.environ.get("CI_P167_CACHE_HIT") == "true"
@@ -164,15 +198,20 @@ def restore(root, lock, builder, cache, target, expected, restored, git):
         evidence = root / "evidence"
         for name in ("normal-six-build.json", "normal-six-build.log", "normal-raw-manifest.json",
                      "normal-source-binding.json", "build-report.json", "source-manifest.json", "build-owner.json",
-                     "native-unit18.json", "native-unit-compile.json", "native-unit-compile.log"):
+                     "native-unit18.json", "native-unit-compile.json", "native-unit-compile.log",
+                     "native-git-unit12.json", "native-git-unit-compile.json", "native-git-unit-compile.log",
+                     "original-native-git-unit-compile.json", "original-native-git-unit-compile.log",
+                     "original-git_unit-failure.json"):
             copy("evidence/" + name, evidence / name)
-        for name in ("native-git-unit-compile.json", "native-git-unit-compile.log", "git_unit-failure.json"):
+        for name in ("native-p167-codex-core-compile.json", "native-p167-codex-core-compile.log", "extra_unit-failure.json"):
             copy("evidence/" + name, evidence / ("original-" + name))
-        for i in range(18):
-            for suffix in (".json", ".log"):
-                name = f"native-case-{i:02}{suffix}"
-                copy("evidence/" + name, evidence / name)
+        for prefix, count in (("native-case", 18), ("native-git-case", 12)):
+            for i in range(count):
+                for suffix in (".json", ".log"):
+                    name = f"{prefix}-{i:02}{suffix}"
+                    copy("evidence/" + name, evidence / name)
         unit = root / "delivery/unit"
         unit.mkdir()
-        copy("delivery/unit/" + LEAF, unit / LEAF)
+        for leaf in (LEAF, GIT_LEAF):
+            copy("delivery/unit/" + leaf, unit / leaf)
     return v8, {**restored, "six": {x["file"]: {"size": x["size"], "sha256": x["sha256"]} for x in rows}}
