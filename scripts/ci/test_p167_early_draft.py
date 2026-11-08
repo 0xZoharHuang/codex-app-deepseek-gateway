@@ -40,12 +40,38 @@ class EarlyDraft(unittest.TestCase):
             class CI:
                 sha = staticmethod(digest)
                 load = staticmethod(lambda p:json.loads(p.read_bytes()))
+            assembly_path = root / "evidence/early-assembly/assembly-result.json"
+            assembly_path.parent.mkdir()
+            assembly = {"archive":str(archive), "kind":"clean_source_assembly",
+                        "status":"raw_native_assembled_not_App_qualified", "raw_binary_count":6,
+                        "no_compile_or_native_execution":True, "original_source_and_receipts_unchanged":True,
+                        "manifest_sha256":"a"*64,
+                        "archive_identity":{"sha256":digest(archive),"size":archive.stat().st_size}}
+            raw = (json.dumps(assembly, indent=2) + "\n").encode()
+            assembly_path.write_bytes(raw)
             proof = {"status":"P167_EARLY_UNQUALIFIED_PRIVATE_SMOKE_ONLY","head":self.head,"run":"21",
                      "archive_sha256":digest(archive),"archive_size":archive.stat().st_size,
+                     "normal_assembly_receipt_asset":early.ASSEMBLY_ASSET,
+                     "normal_assembly_receipt_sha256":digest(assembly_path),
+                     "normal_assembly_receipt_size":assembly_path.stat().st_size,
+                     "native_manifest_sha256":assembly["manifest_sha256"],
                      "full_native_suite_qualified":False,"App_GUI_qualified":False,"public_stable_release":False}
             receipt = root/"evidence/EARLY_UNQUALIFIED.json"
             receipt.write_text(json.dumps(proof))
             with patch.dict(os.environ, {"GH_TOKEN":"synthetic","GITHUB_RUN_ID":"21"}):
+                with patch.object(early,"gh_json") as api:
+                    assembly_path.write_bytes(raw + b" ")
+                    with self.assertRaisesRegex(ValueError,"Exact original same-run assembly receipt required"):
+                        early.upload(CI,root,self.head,17)
+                    wrong = json.dumps({**assembly, "manifest_sha256":"b"*64}).encode()
+                    assembly_path.write_bytes(wrong)
+                    receipt.write_text(json.dumps({**proof,"normal_assembly_receipt_sha256":digest(assembly_path),
+                                                   "normal_assembly_receipt_size":len(wrong)}))
+                    with self.assertRaisesRegex(ValueError,"receipt differs from archive or manifest"):
+                        early.upload(CI,root,self.head,17)
+                    api.assert_not_called()
+                assembly_path.write_bytes(raw)
+                receipt.write_text(json.dumps(proof))
                 with patch.object(early,"gh_json",return_value={**self.state(),"draft":False}) as api:
                     with self.assertRaises(ValueError):
                         early.upload(CI,root,self.head,17)
@@ -60,14 +86,19 @@ class EarlyDraft(unittest.TestCase):
                     self.assertIn("label=EARLY_UNQUALIFIED",args[2])
                     source = Path(args[-1])
                     name = args[2].split("name=",1)[1].split("&",1)[0]
+                    if name == early.ASSEMBLY_ASSET:
+                        self.assertEqual(source,assembly_path)
+                        self.assertEqual(source.read_bytes(),raw)
                     row = {"id":100+len(uploaded),"name":name,"size":source.stat().st_size,
                            "digest":"sha256:"+digest(source)}
                     uploaded.append(row)
                     return row
                 with patch.object(early,"gh_json",side_effect=api), patch.object(early,"anonymous_hidden") as hidden:
                     early.upload(CI,root,self.head,17)
-                    self.assertEqual([x.args[0] for x in hidden.call_args_list],[100,101])
-                self.assertEqual(len(uploaded),2)
+                    self.assertEqual([x.args[0] for x in hidden.call_args_list],[100,101,102])
+                self.assertEqual(len(uploaded),3)
+                self.assertEqual(uploaded[1],{"id":101,"name":early.ASSEMBLY_ASSET,
+                    "size":len(raw),"digest":"sha256:"+hashlib.sha256(raw).hexdigest()})
 
     def test_packaging_failure_exposes_bounded_sanitized_raw_diagnostics_and_stays_failed(self):
         with tempfile.TemporaryDirectory() as directory:

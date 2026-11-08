@@ -17,6 +17,7 @@ import urllib.request
 REPO = Path(__file__).resolve().parents[2]
 REPOSITORY = "0xZoharHuang/codex-app-deepseek-gateway"
 LABEL = "EARLY_UNQUALIFIED"
+ASSEMBLY_ASSET = f"cadsg-p167-{LABEL}-assembly-result.json"
 ORIGINAL_RAW = "3bd9b092b342b728d59db3a92b4200d70b981ae3f9d047ad36fb55f3c0bb9f38"
 ORIGINAL_BUILD = "07f8f7bcf9fdc3247b62126e479734890c733e00af8665a8465b0c8e966a7575"
 
@@ -101,6 +102,7 @@ def assemble(ci, root, head):
     proof = {"status":"P167_EARLY_UNQUALIFIED_PRIVATE_SMOKE_ONLY", "label":LABEL,
              "head":head, "run":os.environ["GITHUB_RUN_ID"], "source_sha256":ci.SOURCE,
              "build_lock_sha256":ci.LOCK, "normal_assembly_receipt_sha256":ci.sha(assembly_path),
+             "normal_assembly_receipt_size":assembly_path.stat().st_size, "normal_assembly_receipt_asset":ASSEMBLY_ASSET,
              "native_manifest_sha256":d["manifest_sha256"],
              "archive_sha256":d["archive_identity"]["sha256"], "archive_size":d["archive_identity"]["size"],
              "original_normal_manifest_sha256":ORIGINAL_RAW, "retained_producer":retained,
@@ -178,16 +180,37 @@ def upload(ci, root, head, release):
             and proof["archive_sha256"] == ci.sha(archive) and proof["archive_size"] == archive.stat().st_size
             and proof["full_native_suite_qualified"] is False and proof["App_GUI_qualified"] is False
             and proof["public_stable_release"] is False, "Require exact unqualified archive proof")
+    assembly_path = root / "evidence/early-assembly/assembly-result.json"
+    require(proof["normal_assembly_receipt_asset"] == ASSEMBLY_ASSET
+            and proof["normal_assembly_receipt_sha256"] == ci.sha(assembly_path)
+            and proof["normal_assembly_receipt_size"] == assembly_path.stat().st_size,
+            "Exact original same-run assembly receipt required")
+    assembly = ci.load(assembly_path)
+    require(Path(assembly["archive"]) == archive and assembly["kind"] == "clean_source_assembly"
+            and assembly["status"] == "raw_native_assembled_not_App_qualified"
+            and assembly["raw_binary_count"] == 6 and assembly["no_compile_or_native_execution"] is True
+            and assembly["original_source_and_receipts_unchanged"] is True
+            and assembly["manifest_sha256"] == proof["native_manifest_sha256"]
+            and assembly["archive_identity"]["sha256"] == proof["archive_sha256"]
+            and assembly["archive_identity"]["size"] == proof["archive_size"],
+            "Same-run assembly receipt differs from archive or manifest")
     endpoint = f"repos/{REPOSITORY}/releases/{release}"
     uploaded = {}
-    assets = [(archive, f"cadsg-p167-{LABEL}-{proof['archive_sha256'][:20]}.tar.gz", "application/gzip"),
-              (proof_file, f"cadsg-p167-{LABEL}-provenance.json", "application/json")]
-    for path, name, content_type in assets:
+    assets = [
+        (archive, f"cadsg-p167-{LABEL}-{proof['archive_sha256'][:20]}.tar.gz", "application/gzip",
+         proof["archive_size"], proof["archive_sha256"]),
+        (assembly_path, ASSEMBLY_ASSET, "application/json",
+         proof["normal_assembly_receipt_size"], proof["normal_assembly_receipt_sha256"]),
+        (proof_file, f"cadsg-p167-{LABEL}-provenance.json", "application/json",
+         proof_file.stat().st_size, ci.sha(proof_file)),
+    ]
+    for path, name, content_type, size, checksum in assets:
         draft_state(gh_json(endpoint), release, head, uploaded)
+        require(path.stat().st_size == size and ci.sha(path) == checksum, "Draft input changed before upload")
         query = urllib.parse.urlencode({"name":name, "label":LABEL})
         url = f"https://uploads.github.com/{endpoint}/assets?{query}"
         asset = gh_json("--method", "POST", url, "-H", "Content-Type: "+content_type, "--input", str(path))
-        identity = {"id":asset["id"], "size":path.stat().st_size, "digest":"sha256:"+ci.sha(path)}
+        identity = {"id":asset["id"], "size":size, "digest":"sha256:"+checksum}
         require(type(asset["id"]) is int and asset["id"] > 0 and asset["name"] == name
                 and all(asset[k] == v for k,v in identity.items()), "Draft asset identity differs")
         uploaded[name] = identity
