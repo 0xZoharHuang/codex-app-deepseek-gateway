@@ -29,6 +29,7 @@ jobs:
       CI_P20_BUILD_JOBS: '2'
       CI_P167_RESUME: '1'
       CI_P167_TEST_RESUME: '1'
+      CI_P167_CORE_WARMUP: '1'
       CI_P167_APPROVED_LOCK_SHA256: ${{ inputs.lock_sha256 }}
       OTEL_SDK_DISABLED: 'true'
       VSCMD_SKIP_SENDTELEMETRY: '1'
@@ -71,7 +72,7 @@ jobs:
             C:/c167/cargo/registry
             C:/c167/cargo/git
             C:/c167/target
-          key: p167-native-v1-Windows-rust1.95.0-msvc14.44.35207-sdk10.0.26100.0-24dab591cfe8c61f3960f109f1a67c7d3e57d9dc371fe8ed09042d35cc695c6d-42504592572-1
+          key: p167-native-v1-Windows-rust1.95.0-msvc14.44.35207-sdk10.0.26100.0-24dab591cfe8c61f3960f109f1a67c7d3e57d9dc371fe8ed09042d35cc695c6d-42511450429-1
           fail-on-cache-miss: true
       - name: Verify original completed six sandbox and Git evidence
         shell: pwsh
@@ -92,6 +93,9 @@ jobs:
           CI_P167_CACHE_HIT: ${{ steps.original-cache.outputs.cache-hit }}
           CI_P167_CACHE_KEY: ${{ steps.original-cache.outputs.cache-matched-key }}
         run: python -I -B -u scripts/ci/p20-windows.py restore_producer --candidate P167 --root "$env:CI_P20_ROOT"
+      - name: Warm exact Core compile on the same runner
+        shell: pwsh
+        run: python -I -B -u scripts/ci/p20-windows.py warm_core --candidate P167 --root "$env:CI_P20_ROOT"
       - name: Exact native Guardian and request capacity tests
         shell: pwsh
         run: python -I -B -u scripts/ci/p20-windows.py extra_unit --candidate P167 --root "$env:CI_P20_ROOT"

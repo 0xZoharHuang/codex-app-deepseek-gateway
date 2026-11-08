@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from urllib.error import HTTPError
 from pathlib import Path, PureWindowsPath
@@ -352,6 +353,52 @@ class P167Gate(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "retains the exact original Git12"):
                 ci.git_unit(Path("unused"))
 
+    def test_core_warm_timeout_requires_exact_command_progress_and_no_survivors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "warm.log"
+            progress = '{"reason":"compiler-artifact","fresh":false}\n'
+            log.write_text(progress)
+            command = ci.unit_command(Path("toolchain"), 2, "codex-core")
+            raw = {"command":command, "fixed_timeout_seconds":1800, "passed":False, "timed_out":True,
+                   "returncode":1, "wrapper_minimum_available_memory_bytes":ci.FLOOR, "log_sha256":ci.sha(log)}
+            self.assertEqual(ci.admit_warm_result(raw, command, log), "warm_compile_timed_out_without_survivors")
+            for change in ({"command":["other"]}, {"fixed_timeout_seconds":3600}, {"unknown_live":[1]},
+                           {"remaining_before_cleanup":[1]}, {"remaining_after_cleanup":[1]},
+                           {"forced_cleanup":[1]}, {"resource_guard":{"minimum":1}}, {"timed_out":False}):
+                with self.subTest(change=change), self.assertRaises(ValueError):
+                    ci.admit_warm_result({**raw, **change}, command, log)
+            for output in ('{"reason":"compiler-message","message":{"level":"error"}}\n',
+                           '{"reason":"build-finished","success":false}\n', ""):
+                log.write_text((progress if output else "")+output)
+                with self.assertRaises(ValueError):
+                    ci.admit_warm_result({**raw,"log_sha256":ci.sha(log)}, command, log)
+            log.write_text(progress+'{"reason":"build-finished","success":true}\n')
+            success = {**raw,"passed":True,"timed_out":False,"returncode":0,"log_sha256":ci.sha(log)}
+            self.assertEqual(ci.admit_warm_result(success, command, log), "warm_compile_completed")
+
+    def test_core_warm_records_natural_mtime_changes_even_when_bytes_match(self):
+        builder = ci.load_module("p167_warm_mtime_builder", ci.REPO / "scripts/build_native.py")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / "source"
+            source.mkdir()
+            original = source / "fixture.rs"
+            original.write_bytes(b"same bytes")
+            v8file = root / "v8.lib.gz"
+            v8file.write_bytes(b"same V8")
+            v8 = {"files":[{"file":str(v8file),"size":v8file.stat().st_size,"sha256":ci.sha(v8file)}]}
+            state = builder.source_state(source)
+            lock = {"prepared_source_sha256":state["sha256"], "prepared_source_files":state["count"]}
+            first = ci.warm_inputs(builder, source, v8, lock)
+            time.sleep(.04)
+            original.write_bytes(b"same bytes")
+            second = ci.warm_inputs(builder, source, v8, lock)
+            self.assertEqual(first["source_sha256"], second["source_sha256"])
+            self.assertNotEqual(first["natural_source_mtimes_sha256"], second["natural_source_mtimes_sha256"])
+            v8file.write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "Core V8 input differs"):
+                ci.warm_inputs(builder, source, v8, lock)
+
     def test_workflow_read_only_no_rebuild_and_exact_cache_restore(self):
         text = (ci.REPO / ".github/workflows/p20-native-windows.yml").read_text()
         self.assertIn("runs-on: windows-2022", text)
@@ -368,7 +415,9 @@ class P167Gate(unittest.TestCase):
         self.assertEqual(text.count("p20-windows.py restore_producer --candidate P167"), 1)
         self.assertLess(text.index("p20-windows.py locked_fetch"), text.index("p20-windows.py restore_producer"))
         self.assertNotIn("p20-windows.py git_unit --candidate P167", text)
-        self.assertLess(text.index("p20-windows.py restore_producer"), text.index("p20-windows.py extra_unit"))
+        self.assertLess(text.index("p20-windows.py restore_producer"), text.index("p20-windows.py warm_core"))
+        self.assertLess(text.index("p20-windows.py warm_core"), text.index("p20-windows.py extra_unit"))
+        self.assertEqual(text.count("p20-windows.py warm_core --candidate P167"), 1)
         self.assertTrue(all(re.fullmatch(r"actions/(?:[a-z-]+|cache/(?:restore|save))@[a-f0-9]{40}", action)
                             for action in re.findall(r"uses: (\S+)", text)))
 

@@ -394,7 +394,7 @@ def observe(command, root, cwd, environment, name, timeout):
     result.update(command=command, fixed_timeout_seconds=timeout,
                   log_sha256=sha(log_path), build_controller_only=True)
     telemetry = None
-    compile_steps = {"normal-six-build", "native-unit-compile", "native-git-unit-compile"}
+    compile_steps = {"normal-six-build", "native-unit-compile", "native-git-unit-compile", "native-p167-core-warmup"}
     if CANDIDATE == "P167":
         compile_steps.update(f"native-p167-{name}-compile" for name in P167_CASES)
     if not result["observer_passed"] and name in compile_steps:
@@ -692,15 +692,7 @@ def exact_case_log(path, case):
     return sha(path)
 
 
-def unit(root, *, plugin_git=False, p167_group=None):
-    lock, builder, cases = plan()
-    require(load(root / "evidence/normal-six-build.json")["passed"], "Normal six-target producer required")
-    require(os.environ.get("CI_P167_TEST_RESUME") != "1" or plugin_git or p167_group is not None,
-            "Test continuation preserves the original sandbox18 without reexecution")
-    toolchain = Path(os.environ["CI_RUST_TOOLCHAIN_BIN"])
-    cache, target = cache_paths(root); jobs = build_jobs()
-    work = work_path(root)
-    source = work / "source"
+def unit_environment(root, lock, builder, work, toolchain, cache, target, jobs):
     environment = clean_environment(builder.build_environment(
         work, toolchain, cache, target_dir=target))
     if CANDIDATE == "P167":
@@ -712,7 +704,107 @@ def unit(root, *, plugin_git=False, p167_group=None):
         v8_directory = resume_controller().original_v8_directory(work)
         require(load(root / "evidence/p167-resume-v8-inputs.json")["directory"] == str(v8_directory),
                 "Native tests require the original V8 input directory used by the producer")
-    environment.update(builder.verified_rusty_v8_inputs(source, v8_directory, lock["target"])["environment"])
+    v8 = builder.verified_rusty_v8_inputs(work / "source", v8_directory, lock["target"])
+    environment.update(v8["environment"])
+    return environment, v8
+
+
+def unit_command(toolchain, jobs, package_name):
+    return [str(toolchain / "cargo.exe"), "test", "--locked", "--release", "--jobs", str(jobs),
+            "-p", package_name, "--lib", "--no-run", "--message-format=json-render-diagnostics"]
+
+
+def warm_inputs(builder, source, v8, lock):
+    state = builder.source_state(source)
+    require(state["sha256"] == lock["prepared_source_sha256"]
+            and state["count"] == lock["prepared_source_files"], "Core source identity differs")
+    extended = builder.extended(source)
+    times = {name: (extended / name).stat().st_mtime_ns for name in state["files"]}
+    files = []
+    for row in v8["files"]:
+        path = Path(row["file"])
+        require(path.stat().st_size == row["size"] and sha(path) == row["sha256"], "Core V8 input differs")
+        files.append({**row, "mtime_ns": path.stat().st_mtime_ns})
+    return {"source_path": str(source), "source_sha256": state["sha256"], "source_files": state["count"],
+            "natural_source_mtimes_sha256": hashlib.sha256(json.dumps(times, sort_keys=True).encode()).hexdigest(),
+            "v8_files": files}
+
+
+def admit_warm_result(raw, command, log):
+    require(raw["command"] == command and raw["fixed_timeout_seconds"] == 1800
+            and raw["wrapper_minimum_available_memory_bytes"] >= FLOOR
+            and not any(raw.get(k) for k in ("unknown_live", "remaining_after_cleanup", "resource_guard",
+                "wrapper_resource_guard", "observation_errors", "cleanup_errors"))
+            and raw["log_sha256"] == sha(log), "Core warm-up observer evidence differs")
+    progress = 0
+    finished = []
+    compiler_error = False
+    for line in log.read_text(encoding="utf8", errors="replace").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            compiler_error |= line.startswith("error:")
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("reason") == "compiler-artifact":
+            progress += 1
+        elif event.get("reason") == "build-finished":
+            finished.append(event.get("success"))
+        elif event.get("reason") == "compiler-message":
+            compiler_error |= event.get("message", {}).get("level") == "error"
+    require(progress and not compiler_error, "Core warm-up must show real Cargo progress without compiler error")
+    if raw["passed"] is True:
+        require(raw["returncode"] == 0 and raw["timed_out"] is False and finished == [True],
+                "Core warm-up did not genuinely finish")
+        return "warm_compile_completed"
+    require(raw["passed"] is False and raw["timed_out"] is True and raw["returncode"] != 0 and not finished
+            and not any(raw.get(k) for k in ("remaining_before_cleanup", "forced_cleanup", "error", "error_type")),
+            "Only a proven clean bounded Core warm-up timeout may continue")
+    return "warm_compile_timed_out_without_survivors"
+
+
+def warm_core(root):
+    require(CANDIDATE == "P167" and os.environ.get("CI_P167_CORE_WARMUP") == "1",
+            "Exact P167 Core warm-up workflow required")
+    retained = load(root / "evidence/p167-retained-producer.json")
+    require(retained["repeat_core_compile_sha256"] == resume_controller().CORE_REPEAT_SHA,
+            "Exact repeated Core timeout evidence required")
+    lock, builder, _ = plan()
+    toolchain = Path(os.environ["CI_RUST_TOOLCHAIN_BIN"])
+    cache, target = cache_paths(root); jobs = build_jobs()
+    work = work_path(root)
+    source = work / "source"
+    environment, v8 = unit_environment(root, lock, builder, work, toolchain, cache, target, jobs)
+    before = warm_inputs(builder, source, v8, lock)
+    command = unit_command(toolchain, jobs, "codex-core")
+    name = "native-p167-core-warmup"
+    try:
+        observe(command, root, source / "codex-rs", environment, name, 1800)
+    except ValueError:
+        # A failed observer stays failed. Only the specific clean timeout below
+        # authorizes the subsequent independent normal compile, never any tests.
+        pass
+    path = root / f"evidence/{name}.json"
+    log = root / f"evidence/{name}.log"
+    status = admit_warm_result(load(path), command, log)
+    after = warm_inputs(builder, source, v8, lock)
+    require(before == after, "Core warm-up changed the prepared source/V8 bytes or natural mtimes")
+    save(root / "evidence/p167-core-warmup.json", {"status": status, "command": command,
+        "run_id": os.environ["GITHUB_RUN_ID"], "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+        "inputs": after, "observer_sha256": sha(path), "log_sha256": sha(log), "cases_credited": 0})
+
+
+def unit(root, *, plugin_git=False, p167_group=None):
+    lock, builder, cases = plan()
+    require(load(root / "evidence/normal-six-build.json")["passed"], "Normal six-target producer required")
+    require(os.environ.get("CI_P167_TEST_RESUME") != "1" or plugin_git or p167_group is not None,
+            "Test continuation preserves the original sandbox18 without reexecution")
+    toolchain = Path(os.environ["CI_RUST_TOOLCHAIN_BIN"])
+    cache, target = cache_paths(root); jobs = build_jobs()
+    work = work_path(root)
+    source = work / "source"
+    environment, v8 = unit_environment(root, lock, builder, work, toolchain, cache, target, jobs)
     package_name = "codex-core-plugins" if plugin_git else "codex-windows-sandbox"
     if p167_group is not None:
         require(CANDIDATE == "P167" and p167_group in P167_CASES, "Unknown P167 test group")
@@ -732,9 +824,18 @@ def unit(root, *, plugin_git=False, p167_group=None):
         cases = [f"{module}::git_lifetime_windows_tests::{case}"
                  for module in ("startup_sync", "marketplace_upgrade::git")
                  for case in P21_GIT_CASES]
-    command = [str(toolchain / "cargo.exe"), "test", "--locked", "--release", "--jobs", str(jobs),
-               "-p", package_name, "--lib", "--no-run",
-               "--message-format=json-render-diagnostics"]
+    command = unit_command(toolchain, jobs, package_name)
+    if p167_group == "codex-core" and os.environ.get("CI_P167_CORE_WARMUP") == "1":
+        proof = load(root / "evidence/p167-core-warmup.json")
+        warm_raw = root / "evidence/native-p167-core-warmup.json"
+        warm_log = root / "evidence/native-p167-core-warmup.log"
+        require(proof["command"] == command and proof["cases_credited"] == 0
+                and proof["run_id"] == os.environ["GITHUB_RUN_ID"]
+                and proof["run_attempt"] == os.environ["GITHUB_RUN_ATTEMPT"]
+                and proof["observer_sha256"] == sha(warm_raw) and proof["log_sha256"] == sha(warm_log)
+                and proof["status"] == admit_warm_result(load(warm_raw), command, warm_log)
+                and proof["inputs"] == warm_inputs(builder, source, v8, lock),
+                "Normal Core compile must use the same runner, exact inputs and natural mtimes as warm-up")
     observe(command, root, source / "codex-rs", environment, compile_name, 1800)
     artifacts, finished = [], []
     for line in (root / "evidence" / f"{compile_name}.log").read_text(
@@ -876,6 +977,8 @@ def package(root):
         **({"p167_exact_native_receipts": p167_receipts} if CANDIDATE == "P167" else {}),
         **({"p167_retained_producer_receipt_sha256": sha(root / "evidence/p167-retained-producer.json")}
            if CANDIDATE == "P167" and os.environ.get("CI_P167_TEST_RESUME") == "1" else {}),
+        **({"p167_core_warmup_receipt_sha256": sha(root / "evidence/p167-core-warmup.json")}
+           if CANDIDATE == "P167" and os.environ.get("CI_P167_CORE_WARMUP") == "1" else {}),
         "App_GUI_qualified": False, "public_stable_release": False,
         "required_next": "Windows Limited Session3 helper/network migration and real official App acceptance"})
 
@@ -883,7 +986,7 @@ def main():
     global CANDIDATE, LOCK, SOURCE, SOURCE_FILES, RUST_VERSION, P167_CASES
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("check-only", "prepare", "resume_inputs", "locked_fetch", "restore_producer",
-                                         "build", "unit", "git_unit", "extra_unit", "package"))
+                                         "build", "unit", "git_unit", "warm_core", "extra_unit", "package"))
     parser.add_argument("--root", type=Path)
     parser.add_argument("--candidate", choices=("P20", "P21", "P167"), default="P20")
     args = parser.parse_args()
