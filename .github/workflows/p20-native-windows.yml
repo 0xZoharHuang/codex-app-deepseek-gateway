@@ -28,6 +28,7 @@ jobs:
       CI_REPOSITORY_VISIBILITY: public
       CI_P20_BUILD_JOBS: '2'
       CI_P167_RESUME: '1'
+      CI_P167_TEST_RESUME: '1'
       CI_P167_APPROVED_LOCK_SHA256: ${{ inputs.lock_sha256 }}
       OTEL_SDK_DISABLED: 'true'
       VSCMD_SKIP_SENDTELEMETRY: '1'
@@ -62,7 +63,7 @@ jobs:
       - name: Verify official source, V8 chain, and process observer inputs
         shell: pwsh
         run: python -I -B -u scripts/ci/p20-windows.py prepare --candidate P167 --root "$env:CI_P20_ROOT"
-      - name: Restore exact interrupted P167 build intermediates
+      - name: Restore exact completed P167 producer and test intermediates
         id: original-cache
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
@@ -70,9 +71,9 @@ jobs:
             C:/c167/cargo/registry
             C:/c167/cargo/git
             C:/c167/target
-          key: p167-native-v1-Windows-rust1.95.0-msvc14.44.35207-sdk10.0.26100.0-24dab591cfe8c61f3960f109f1a67c7d3e57d9dc371fe8ed09042d35cc695c6d-42458262916-1
+          key: p167-native-v1-Windows-rust1.95.0-msvc14.44.35207-sdk10.0.26100.0-24dab591cfe8c61f3960f109f1a67c7d3e57d9dc371fe8ed09042d35cc695c6d-42469680627-1
           fail-on-cache-miss: true
-      - name: Verify original interrupted producer evidence
+      - name: Verify original completed six and sandbox evidence
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -84,15 +85,13 @@ jobs:
           CI_P167_CACHE_HIT: ${{ steps.original-cache.outputs.cache-hit }}
           CI_P167_CACHE_KEY: ${{ steps.original-cache.outputs.cache-matched-key }}
         run: python -I -B -u scripts/ci/p20-windows.py locked_fetch --candidate P167 --root "$env:CI_P20_ROOT"
-      - name: Normal single locked Cargo invocation for all six targets
+      - name: Restore verified original six outputs and sandbox eighteen receipts
+        id: restore-producer
         shell: pwsh
         env:
           CI_P167_CACHE_HIT: ${{ steps.original-cache.outputs.cache-hit }}
           CI_P167_CACHE_KEY: ${{ steps.original-cache.outputs.cache-matched-key }}
-        run: python -I -B -u scripts/ci/p20-windows.py build --candidate P167 --root "$env:CI_P20_ROOT"
-      - name: Exact eighteen native sandbox component tests
-        shell: pwsh
-        run: python -I -B -u scripts/ci/p20-windows.py unit --candidate P167 --root "$env:CI_P20_ROOT"
+        run: python -I -B -u scripts/ci/p20-windows.py restore_producer --candidate P167 --root "$env:CI_P20_ROOT"
       - name: Exact twelve native Git lifetime tests
         shell: pwsh
         run: python -I -B -u scripts/ci/p20-windows.py git_unit --candidate P167 --root "$env:CI_P20_ROOT"
@@ -103,7 +102,7 @@ jobs:
         shell: pwsh
         run: python -I -B -u scripts/ci/p20-windows.py package --candidate P167 --root "$env:CI_P20_ROOT"
       - name: Preserve new P167 intermediates for exact packaging-only recovery if needed
-        if: ${{ always() && !cancelled() && steps.locked-fetch.outcome == 'success' }}
+        if: ${{ always() && !cancelled() && steps.restore-producer.outcome == 'success' }}
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |

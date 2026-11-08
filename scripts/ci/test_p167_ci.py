@@ -69,7 +69,7 @@ class P167Gate(unittest.TestCase):
                     "codex-guardian-v2": ("async_scorer::tests::fixture_guardian",)}
         with tempfile.TemporaryDirectory() as directory, patch.multiple(
             ci, CANDIDATE="P167", LOCK="1" * 64, SOURCE="2" * 64, P167_CASES=guardian,
-        ):
+        ), patch.dict(os.environ, {"CI_P167_TEST_RESUME": "0"}):
             root = Path(directory)
             (root / "evidence").mkdir()
             (root / "delivery/unit").mkdir(parents=True)
@@ -199,7 +199,7 @@ class P167Gate(unittest.TestCase):
                     ci.require_p167_dependency_checkout(root, lock, toolchain)
 
     def test_resume_cache_miss_and_wrong_artifact_fail_closed(self):
-        resume = ci.resume_controller()
+        resume = ci.load_module("p167_original_resume_tests", ci.REPO / "scripts/ci/p167-resume.py")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             cache = root / "c167"
@@ -214,7 +214,7 @@ class P167Gate(unittest.TestCase):
                 resume.verify_archive(artifact)
 
     def test_resume_v8_inputs_require_original_path_and_exact_bytes(self):
-        resume = ci.resume_controller()
+        resume = ci.load_module("p167_original_resume_tests", ci.REPO / "scripts/ci/p167-resume.py")
         builder = ci.load_module("p167_v8_copy_test_builder", ci.REPO / "scripts/build_native.py")
         with tempfile.TemporaryDirectory() as directory:
             fixture = Path(directory)
@@ -324,19 +324,48 @@ class P167Gate(unittest.TestCase):
                 self.assertEqual(http.call_count, 1)
                 self.assertFalse(dest.exists())
 
-    def test_workflow_read_only_one_build_and_exact_cache_restore(self):
+    def test_completed_producer_cache_requires_exact_six_bytes_before_copy(self):
+        resume = ci.load_module("p167_completed_cache_test", ci.REPO / "scripts/ci/p167-tests-resume.py")
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            release = target / "release"
+            release.mkdir()
+            rows = []
+            for name in sorted(ci.BINS):
+                path = release / name
+                path.write_bytes(name.encode())
+                rows.append({"file": name, "size": path.stat().st_size, "sha256": ci.sha(path)})
+            self.assertEqual(resume.cache_binaries(target, {"binaries": rows}, ci.BINS), rows)
+            with self.assertRaisesRegex(ValueError, "Exact six"):
+                resume.cache_binaries(target, {"binaries": rows[:-1]}, ci.BINS)
+            sample = release / rows[0]["file"]
+            sample.write_bytes(b"x" * rows[0]["size"])
+            with self.assertRaisesRegex(ValueError, "Cached producer differs"):
+                resume.cache_binaries(target, {"binaries": rows}, ci.BINS)
+            sample.unlink()
+            with self.assertRaisesRegex(ValueError, "Cached producer differs"):
+                resume.cache_binaries(target, {"binaries": rows}, ci.BINS)
+            self.assertFalse((target / "native-producer").exists())
+        with patch.dict(os.environ, {"CI_P167_TEST_RESUME": "1"}):
+            with self.assertRaisesRegex(ValueError, "must not compile the six"):
+                ci.build(Path("unused"))
+
+    def test_workflow_read_only_no_rebuild_and_exact_cache_restore(self):
         text = (ci.REPO / ".github/workflows/p20-native-windows.yml").read_text()
         self.assertIn("runs-on: windows-2022", text)
         self.assertIn("contents: read", text)
         self.assertIn("persist-credentials: false", text)
-        resume = ci.resume_controller()
+        resume = ci.load_module("p167_test_resume_tests", ci.REPO / "scripts/ci/p167-tests-resume.py")
         self.assertEqual(text.count("actions/cache/restore"), 1)
-        self.assertIn(f"key: {resume.CACHE_KEY}", text)
+        self.assertIn(f"key: {resume.KEY}", text)
         self.assertIn("fail-on-cache-miss: true", text)
         self.assertNotIn("restore-keys:", text)
         self.assertNotIn("secrets.", text)
-        self.assertEqual(text.count("p20-windows.py build --candidate P167"), 1)
-        self.assertLess(text.index("p20-windows.py locked_fetch"), text.index("p20-windows.py build"))
+        self.assertNotIn("p20-windows.py build --candidate P167", text)
+        self.assertNotIn("p20-windows.py unit --candidate P167", text)
+        self.assertEqual(text.count("p20-windows.py restore_producer --candidate P167"), 1)
+        self.assertLess(text.index("p20-windows.py locked_fetch"), text.index("p20-windows.py restore_producer"))
+        self.assertLess(text.index("p20-windows.py restore_producer"), text.index("p20-windows.py git_unit"))
         self.assertTrue(all(re.fullmatch(r"actions/(?:[a-z-]+|cache/(?:restore|save))@[a-f0-9]{40}", action)
                             for action in re.findall(r"uses: (\S+)", text)))
 

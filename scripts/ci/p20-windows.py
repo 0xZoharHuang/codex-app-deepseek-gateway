@@ -454,7 +454,8 @@ def work_path(root):
 
 
 def resume_controller():
-    return load_module("cadsg_p167_resume", REPO / "scripts/ci/p167-resume.py")
+    file = ("p167-tests-resume.py" if os.environ.get("CI_P167_TEST_RESUME") == "1" else "p167-resume.py")
+    return load_module("cadsg_p167_resume", REPO / "scripts/ci" / file)
 
 
 def verify_p21_cache(root):
@@ -622,7 +623,24 @@ def require_p167_dependency_checkout(root, lock, toolchain):
     return environment
 
 
+def restore_producer(root):
+    require(CANDIDATE == "P167" and os.environ.get("CI_P167_RESUME") == "1"
+            and os.environ.get("CI_P167_TEST_RESUME") == "1", "Exact P167 test continuation required")
+    lock, builder, _ = plan()
+    toolchain = Path(os.environ["CI_RUST_TOOLCHAIN_BIN"])
+    require_p167_dependency_checkout(root, lock, toolchain)
+    cached = load(root / "evidence/p167-dependency-checkout.json")["resume_cache"]
+    cache, target = cache_paths(root)
+    git = shutil.which("git.exe")
+    require(git is not None, "Native Git required to reconstruct the exact prepared source")
+    v8, receipt = resume_controller().restore(root, lock, builder, cache, target, BINS, cached, git)
+    verify_normal_outputs(root, load(root / "native-producer/manifest.json"))
+    save(root / "evidence/p167-resume-v8-inputs.json", v8)
+    save(root / "evidence/p167-retained-producer.json", receipt)
+
+
 def build(root):
+    require(os.environ.get("CI_P167_TEST_RESUME") != "1", "Test continuation must not compile the six producer targets")
     lock, builder, cases = plan()
     require((root / "evidence/inputs.json").is_file(), "Verified inputs required")
     work = work_path(root)
@@ -677,6 +695,8 @@ def exact_case_log(path, case):
 def unit(root, *, plugin_git=False, p167_group=None):
     lock, builder, cases = plan()
     require(load(root / "evidence/normal-six-build.json")["passed"], "Normal six-target producer required")
+    require(os.environ.get("CI_P167_TEST_RESUME") != "1" or plugin_git or p167_group is not None,
+            "Test continuation preserves the original sandbox18 without reexecution")
     toolchain = Path(os.environ["CI_RUST_TOOLCHAIN_BIN"])
     cache, target = cache_paths(root); jobs = build_jobs()
     work = work_path(root)
@@ -786,6 +806,14 @@ def verify_p167_unit_receipts(root, cases):
                     f"P167 test log differs: {row['name']}")
         executable = receipt["executable"]
         path_exe = Path(executable["path"])
+        if filename == "native-unit18.json" and os.environ.get("CI_P167_TEST_RESUME") == "1":
+            prior = load(root / "evidence/p167-retained-producer.json")
+            resume = resume_controller()
+            require(path_exe == resume.ORIGINAL_SANDBOX and sha(path) == resume.SANDBOX_SHA
+                    and prior["sandbox_receipt_sha256"] == resume.SANDBOX_SHA
+                    and prior["original_sandbox_executable"] == str(path_exe),
+                    "Retained sandbox receipt must name the exact original libtest path")
+            path_exe = root / "delivery/unit" / resume.LEAF
         require(path_exe.is_relative_to(root / "delivery/unit")
                 and sha(path_exe) == executable["sha256"] and executable["profile"]["test"] is True,
                 "Sealed P167 libtest executable differs")
@@ -846,13 +874,16 @@ def package(root):
         **({"native_git_unit12_sha256": sha(root / "evidence/native-git-unit12.json")}
            if CANDIDATE == "P21" else {}),
         **({"p167_exact_native_receipts": p167_receipts} if CANDIDATE == "P167" else {}),
+        **({"p167_retained_producer_receipt_sha256": sha(root / "evidence/p167-retained-producer.json")}
+           if CANDIDATE == "P167" and os.environ.get("CI_P167_TEST_RESUME") == "1" else {}),
         "App_GUI_qualified": False, "public_stable_release": False,
         "required_next": "Windows Limited Session3 helper/network migration and real official App acceptance"})
 
 def main():
     global CANDIDATE, LOCK, SOURCE, SOURCE_FILES, RUST_VERSION, P167_CASES
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("check-only", "prepare", "resume_inputs", "locked_fetch", "build", "unit", "git_unit", "extra_unit", "package"))
+    parser.add_argument("mode", choices=("check-only", "prepare", "resume_inputs", "locked_fetch", "restore_producer",
+                                         "build", "unit", "git_unit", "extra_unit", "package"))
     parser.add_argument("--root", type=Path)
     parser.add_argument("--candidate", choices=("P20", "P21", "P167"), default="P20")
     args = parser.parse_args()
