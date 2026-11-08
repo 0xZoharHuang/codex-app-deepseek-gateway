@@ -51,9 +51,13 @@ class P167Gate(unittest.TestCase):
                     ci.hosted_context({**env, key: "wrong"}, "nt")
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "must-not-be-created"
+            # The negative control represents a local invocation even when
+            # unittest itself runs inside the approved hosted job.
+            local = {key: value for key, value in os.environ.items()
+                     if key not in {"GITHUB_ACTIONS", "RUNNER_ENVIRONMENT", "GITHUB_REF", "GITHUB_EVENT_NAME"}}
             run = subprocess.run([sys.executable, "-I", "-B", str(SCRIPT), "prepare",
                                   "--candidate", "P167", "--root", str(target)],
-                                 text=True, capture_output=True, check=False)
+                                 text=True, capture_output=True, check=False, env=local)
             self.assertNotEqual(run.returncode, 0)
             self.assertIn("exact disposable GitHub-hosted branch", run.stderr)
             self.assertFalse(target.exists())
