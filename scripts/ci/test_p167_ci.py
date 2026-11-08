@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest.mock import patch
 
 SCRIPT = Path(__file__).with_name("p20-windows.py")
@@ -45,7 +45,7 @@ class P167Gate(unittest.TestCase):
                "CI_P20_BUILD_JOBS": "2"}
         with patch.multiple(ci, CANDIDATE="P167", LOCK="1" * 64):
             self.assertEqual(ci.hosted_context(env, "nt"), ("123", "1"))
-            self.assertEqual(ci.cache_paths(Path("C:/cagp167-123-1"))[0].name, "cagp167-native-cache-v1")
+            self.assertEqual(ci.cache_paths(Path("C:/cagp167-123-1"))[0].name, "c167")
             for key in env:
                 with self.subTest(key=key), self.assertRaises(ValueError):
                     ci.hosted_context({**env, key: "wrong"}, "nt")
@@ -119,6 +119,70 @@ class P167Gate(unittest.TestCase):
         self.assertEqual(checked, (ci.REPO / name).read_bytes())
         self.assertEqual(ci.sha(ci.REPO / name),
                          ci.load(ci.REPO / "scripts/ci/p167-review.json")["workflow_sha256"])
+
+    def test_scoped_git_reads_longpaths_and_short_cache_covers_observed_file(self):
+        git = shutil.which("git.exe") or shutil.which("git")
+        if git is None and os.name == "nt":
+            git = str(Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git/cmd/git.exe")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = ci.p167_git_config(root)
+            config.parent.mkdir(parents=True)
+            config.write_bytes(ci.P167_GIT_CONFIG)
+            supplied = {**os.environ, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.longpaths",
+                        "GIT_CONFIG_VALUE_0": "false", "GIT_CONFIG_GLOBAL": "foreign"}
+            environment = ci.p167_environment(root, supplied)
+            self.assertEqual(supplied["GIT_CONFIG_GLOBAL"], "foreign")
+            self.assertNotIn("GIT_CONFIG_COUNT", environment)
+            self.assertEqual(Path(environment["XDG_CONFIG_HOME"]) / "git/config", config)
+            value = subprocess.check_output([git, "config", "--global", "--bool", "--get", "core.longpaths"],
+                                            env=environment, text=True).strip()
+            self.assertEqual(value, "true")
+            config.write_bytes(b"[core]\n\tlongpaths = false\n")
+            with self.assertRaises(ValueError):
+                ci.p167_environment(root, supplied)
+        member = ci.P167_V8_CHECKOUT / ci.P167_LIBCXX / ci.P167_LONG_PATH
+        old = PureWindowsPath(r"C:\cagp167-native-cache-v1\cargo") / member.as_posix()
+        new = PureWindowsPath(r"C:\c167\cargo") / member.as_posix()
+        self.assertEqual((len(str(old)), len(str(new))), (262, 243))
+
+    def test_producer_refuses_missing_or_changed_dependency_evidence(self):
+        with tempfile.TemporaryDirectory() as directory, patch.multiple(
+            ci, CANDIDATE="P167", LOCK="1" * 64, SOURCE="2" * 64,
+        ):
+            root = Path(directory)
+            cache = root / "short-cache"
+            target = cache / "target"
+            target.mkdir(parents=True)
+            (root / "evidence").mkdir()
+            config = ci.p167_git_config(root)
+            config.parent.mkdir(parents=True)
+            config.write_bytes(ci.P167_GIT_CONFIG)
+            toolchain = root / "rust"
+            lock = {"cargo_lock_sha256": "3" * 64, "target": "x86_64-pc-windows-msvc"}
+            with patch.object(ci, "cache_paths", return_value=(cache, target)), patch.object(
+                ci, "p167_checkout_proof", return_value={"path": "observed"},
+            ):
+                with self.assertRaises(FileNotFoundError):
+                    ci.require_p167_dependency_checkout(root, lock, toolchain)
+                log = root / "evidence/p167-locked-fetch.log"
+                log.write_bytes(b"synthetic observer log")
+                observer = root / "evidence/p167-locked-fetch.json"
+                ci.save(observer, {"passed": True})
+                evidence = root / "evidence/p167-dependency-checkout.json"
+                ci.save(evidence, {
+                    "status": "LOCKED_FETCH_CHECKOUT_PROVEN", "build_lock_sha256": ci.LOCK,
+                    "source_sha256": ci.SOURCE, "cargo_lock_sha256": lock["cargo_lock_sha256"],
+                    "cargo_home": str(cache / "cargo"), "cargo": str(toolchain / "cargo.exe"),
+                    "target": lock["target"], "checkout": {"path": "observed"},
+                    "git_configuration_sha256": ci.sha(config), "fetch_log_sha256": ci.sha(log),
+                    "fetch_observer_sha256": ci.sha(observer),
+                })
+                self.assertEqual(ci.require_p167_dependency_checkout(root, lock, toolchain)["CARGO_NET_OFFLINE"],
+                                 "true")
+                log.write_bytes(b"mutated receipt")
+                with self.assertRaises(ValueError):
+                    ci.require_p167_dependency_checkout(root, lock, toolchain)
 
     def test_workflow_read_only_one_cold_build_and_no_restore(self):
         text = (ci.REPO / ".github/workflows/p20-native-windows.yml").read_text()

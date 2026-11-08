@@ -13,6 +13,14 @@ P167_UPSTREAM = "c40729ea5cf8e947481b130c59807273eda2f8e9"
 P167_ARCHIVE = "473fbbe3523605050abd0606b28d88b06f194b42653a66c23ca2d5f86043725a"
 P167_LOCK_NAME = "build-lock.O167-P167-source.json"
 P167_V8_VERSION = "152.2.0"
+P167_V8_COMMIT = "350c5a859a9b3c84ab8701b3ad51e3b7699b30c0"
+P167_V8_CHECKOUT = Path("git/checkouts/rusty_v8-1c356b58a53d1d98/350c5a8")
+P167_LIBCXX = Path("third_party/libc++/src")
+P167_LONG_PATH = Path(
+    "test/std/thread/thread.mutex/thread.mutex.requirements/"
+    "thread.sharedtimedmutex.requirements/thread.sharedtimedmutex.class/"
+    "try_lock_until_deadlock_bug.pass.cpp")
+P167_GIT_CONFIG = b"[core]\n\tlongpaths = true\n"
 P167_V8_MANIFEST_SHA = "e16bf2d7bc4b64a96a89e87048d61b9c466040e4c82ae64cfe9f7f2052ef3179"
 P167_V8_FILES = {
     "rusty_v8_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.lib.gz": "cd829415695b30ad61b306b23a381e11276f14bb0b46815ac5ed8b96711d002d",
@@ -385,7 +393,7 @@ def clean_environment(environment=None):
 
 def cache_paths(root):
     # Source, build-owner records, final outputs and evidence stay fresh per run.
-    cache_name = "cagp167-native-cache-v1" if CANDIDATE == "P167" else "cagp20-native-cache-v1"
+    cache_name = "c167" if CANDIDATE == "P167" else "cagp20-native-cache-v1"
     cache = Path(root.anchor) / cache_name
     return cache, cache / "target"
 
@@ -441,6 +449,117 @@ def verify_p21_cache(root):
         "old_output_sha256": outputs, "cache_is_build_input_only": True})
 
 
+def p167_git_config(root):
+    return root / "inputs/git-config/git/config"
+
+
+def p167_environment(root, environment=None):
+    result = clean_environment(environment)
+    config = p167_git_config(root)
+    require(config.is_file() and config.read_bytes() == P167_GIT_CONFIG,
+            "Exact disposable P167 Git configuration required")
+    for key in tuple(result):
+        if key.upper() == "GIT_CONFIG" or key.upper().startswith("GIT_CONFIG_"):
+            result.pop(key)
+    # Git for Windows honors the explicit file. Libgit2 finds the same file
+    # through its Windows XDG config search, without changing the user profile.
+    result.update(GIT_CONFIG_GLOBAL=str(config), XDG_CONFIG_HOME=str(config.parent.parent),
+                  GIT_CONFIG_NOSYSTEM="1", GIT_TERMINAL_PROMPT="0")
+    return result
+
+
+def p167_checkout_proof(cargo_home, git, environment):
+    checkout = cargo_home / P167_V8_CHECKOUT
+    submodule = checkout / P167_LIBCXX
+    member = submodule / P167_LONG_PATH
+    require((checkout / ".cargo-ok").is_file() and member.is_file() and len(str(member)) < 248,
+            "Cargo did not materialize the exact V8/libc++ path in the short cache")
+    def read(where, *args):
+        return subprocess.check_output([git, "-C", str(where), *args],
+                                       env=environment, text=True, timeout=15).strip()
+    require(read(checkout, "rev-parse", "HEAD") == P167_V8_COMMIT,
+            "Cargo V8 checkout revision differs from the locked source")
+    row = read(checkout, "ls-tree", "HEAD", "--", P167_LIBCXX.as_posix())
+    match = re.fullmatch(r"160000 commit ([0-9a-f]{40})\tthird_party/libc\+\+/src", row)
+    require(match is not None and read(submodule, "rev-parse", "HEAD") == match[1],
+            "Cargo libc++ submodule revision differs from the locked Git tree")
+    blob = read(submodule, "rev-parse", f"HEAD:{P167_LONG_PATH.as_posix()}")
+    require(re.fullmatch(r"[0-9a-f]{40}", blob)
+            and read(submodule, "hash-object", "--no-filters", P167_LONG_PATH.as_posix()) == blob,
+            "Materialized libc++ bytes differ from the pinned Git blob")
+    return {"v8_commit": P167_V8_COMMIT, "libcxx_commit": match[1], "libcxx_blob": blob,
+            "path": str(member), "path_length": len(str(member)), "file_sha256": sha(member),
+            "cargo_ready_marker_present": True}
+
+
+def locked_fetch(root):
+    require(CANDIDATE == "P167", "Locked pre-build dependency checkout is P167 only")
+    lock, builder, _ = plan()
+    require((root / "evidence/inputs.json").is_file(), "Verified public inputs required")
+    cache, target = cache_paths(root)
+    cargo_home = cache / "cargo"
+    require(cargo_home.is_dir() and not any(cargo_home.iterdir()) and target.is_dir()
+            and not any(target.iterdir()), "P167 fetch needs the fresh, empty producer cache")
+    config = p167_git_config(root)
+    config.parent.mkdir(parents=True)
+    with config.open("xb") as stream:
+        stream.write(P167_GIT_CONFIG)
+    environment = p167_environment(root)
+    git = shutil.which("git.exe")
+    require(git is not None and subprocess.check_output(
+        [git, "config", "--global", "--bool", "--get", "core.longpaths"],
+        env=environment, text=True, timeout=15).strip() == "true",
+        "Git for Windows did not read the scoped long-path setting")
+    archive = root / "inputs/upstream.tar.gz"
+    source = root / "dependency-preflight/source"
+    require(not source.exists() and sha(archive) == lock["archive_sha256"],
+            "Locked preflight requires fresh source and the reviewed archive")
+    builder.prepare_source(archive, source, lock, git)
+    before = builder.source_state(source)
+    cargo_lock = source / "codex-rs/Cargo.lock"
+    require(before["sha256"] == SOURCE and before["count"] == SOURCE_FILES
+            and sha(cargo_lock) == lock["cargo_lock_sha256"],
+            "Dependency preflight source differs from the normal producer")
+    toolchain = Path(os.environ["CI_RUST_TOOLCHAIN_BIN"])
+    environment = p167_environment(root, builder.build_environment(
+        source.parent, toolchain, cache, target_dir=target))
+    environment.update(CARGO_NET_OFFLINE="false", CARGO_NET_GIT_FETCH_WITH_CLI="false")
+    result = observe([str(toolchain / "cargo.exe"), "fetch", "--locked", "--target", lock["target"]],
+                     root, source / "codex-rs", environment, "p167-locked-fetch", 1200)
+    require(builder.source_state(source) == before and sha(cargo_lock) == lock["cargo_lock_sha256"],
+            "Cargo fetch changed the reviewed source or Cargo.lock")
+    require(not any(target.iterdir()), "Cargo fetch unexpectedly created build artifacts")
+    checkout = p167_checkout_proof(cargo_home, git, environment)
+    save(root / "evidence/p167-dependency-checkout.json", {
+        "status": "LOCKED_FETCH_CHECKOUT_PROVEN", "source_sha256": SOURCE, "build_lock_sha256": LOCK,
+        "cargo_lock_sha256": lock["cargo_lock_sha256"], "cargo_home": str(cargo_home),
+        "cargo": str(toolchain / "cargo.exe"), "target": lock["target"], "checkout": checkout,
+        "git_configuration_sha256": sha(config), "fetch_log_sha256": result["log_sha256"],
+        "fetch_observer_sha256": sha(root / "evidence/p167-locked-fetch.json"),
+        "compiled_native_targets": 0, "global_git_config_changed": False,
+    })
+
+
+def require_p167_dependency_checkout(root, lock, toolchain):
+    cache, target = cache_paths(root)
+    cargo_home = cache / "cargo"
+    receipt = load(root / "evidence/p167-dependency-checkout.json")
+    environment = p167_environment(root)
+    require(receipt["status"] == "LOCKED_FETCH_CHECKOUT_PROVEN"
+            and receipt["build_lock_sha256"] == LOCK and receipt["source_sha256"] == SOURCE
+            and receipt["cargo_lock_sha256"] == lock["cargo_lock_sha256"]
+            and receipt["cargo_home"] == str(cargo_home) and receipt["target"] == lock["target"]
+            and receipt["cargo"] == str(toolchain / "cargo.exe")
+            and receipt["git_configuration_sha256"] == sha(p167_git_config(root))
+            and receipt["fetch_log_sha256"] == sha(root / "evidence/p167-locked-fetch.log")
+            and receipt["fetch_observer_sha256"] == sha(root / "evidence/p167-locked-fetch.json")
+            and load(root / "evidence/p167-locked-fetch.json")["passed"] is True
+            and receipt["checkout"] == p167_checkout_proof(cargo_home, shutil.which("git.exe"), environment)
+            and not any(target.iterdir()), "Verified exact dependency checkout required before native build")
+    environment.update(CARGO_NET_OFFLINE="true", CARGO_NET_GIT_FETCH_WITH_CLI="false")
+    return environment
+
+
 def build(root):
     lock, builder, cases = plan()
     require((root / "evidence/inputs.json").is_file(), "Verified inputs required")
@@ -458,7 +577,9 @@ def build(root):
                "--build-lock", str(native_lock_path()),
                "--jobs", str(jobs), "--rusty-v8-dir", str(root / "inputs/rusty-v8"),
                "--output", str(root / "native-producer")]
-    observe(command, root, REPO, clean_environment(), "normal-six-build", 7200)
+    environment = (require_p167_dependency_checkout(root, lock, toolchain)
+                   if CANDIDATE == "P167" else clean_environment())
+    observe(command, root, REPO, environment, "normal-six-build", 7200)
     report = load(work / "build-report.json")
     require(report["status"] == "passed" and report["build_lock_sha256"] == LOCK
             and report["effective_build_jobs"] == jobs, "Normal producer did not pass")
@@ -492,6 +613,9 @@ def unit(root, *, plugin_git=False, p167_group=None):
     source = work / "source"
     environment = clean_environment(builder.build_environment(
         work, toolchain, cache, target_dir=target))
+    if CANDIDATE == "P167":
+        environment = p167_environment(root, environment)
+        environment.update(CARGO_NET_OFFLINE="true", CARGO_NET_GIT_FETCH_WITH_CLI="false")
     environment["CARGO_BUILD_JOBS"] = str(jobs)
     environment.update(builder.verified_rusty_v8_inputs(
         source, root / "inputs/rusty-v8", lock["target"])["environment"])
@@ -609,7 +733,7 @@ def package(root):
                  "P20_NATIVE_COMPONENT18_PASSED_NOT_APP_QUALIFIED"), "Build and exact unit gates required")
     toolchain = Path(os.environ["CI_RUST_TOOLCHAIN_BIN"])
     manifest = root / "native-producer/manifest.json"
-    if CANDIDATE in {"P21", "P167"}:
+    if CANDIDATE == "P21":
         # Cargo metadata may require locked sources that compilation did not fetch.
         # Reuse the original resumed assembler's target-specific source prefetch.
         env = clean_environment()
@@ -654,7 +778,7 @@ def package(root):
 def main():
     global CANDIDATE, LOCK, SOURCE, SOURCE_FILES, RUST_VERSION, P167_CASES
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("check-only", "prepare", "build", "unit", "git_unit", "extra_unit", "package"))
+    parser.add_argument("mode", choices=("check-only", "prepare", "locked_fetch", "build", "unit", "git_unit", "extra_unit", "package"))
     parser.add_argument("--root", type=Path)
     parser.add_argument("--candidate", choices=("P20", "P21", "P167"), default="P20")
     args = parser.parse_args()
