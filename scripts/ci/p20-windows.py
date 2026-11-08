@@ -606,15 +606,21 @@ def build(root):
         verify_p21_cache(root)
     toolchain = Path(os.environ["CI_RUST_TOOLCHAIN_BIN"])
     cache, target = cache_paths(root); jobs = build_jobs()
+    environment = (require_p167_dependency_checkout(root, lock, toolchain)
+                   if CANDIDATE == "P167" else clean_environment())
+    v8_directory = root / "inputs/rusty-v8"
+    if CANDIDATE == "P167" and os.environ.get("CI_P167_RESUME") == "1":
+        restored = load(root / "evidence/p167-dependency-checkout.json")["resume_cache"]
+        staged = resume_controller().stage_v8_inputs(root, builder, lock["target"], restored)
+        v8_directory = Path(staged["directory"])
+        save(root / "evidence/p167-resume-v8-inputs.json", staged)
     command = [sys.executable, "-I", "-B", str(REPO / "scripts/build_native.py"),
                "--archive", str(root / "inputs/upstream.tar.gz"),
                "--work-dir", str(work), "--toolchain-bin", str(toolchain),
                "--cache-dir", str(cache), "--target-dir", str(target),
                "--build-lock", str(native_lock_path()),
-               "--jobs", str(jobs), "--rusty-v8-dir", str(root / "inputs/rusty-v8"),
+               "--jobs", str(jobs), "--rusty-v8-dir", str(v8_directory),
                "--output", str(root / "native-producer")]
-    environment = (require_p167_dependency_checkout(root, lock, toolchain)
-                   if CANDIDATE == "P167" else clean_environment())
     observe(command, root, REPO, environment, "normal-six-build", 7200)
     report = load(work / "build-report.json")
     require(report["status"] == "passed" and report["build_lock_sha256"] == LOCK
@@ -655,8 +661,12 @@ def unit(root, *, plugin_git=False, p167_group=None):
         environment = p167_environment(root, environment)
         environment.update(CARGO_NET_OFFLINE="true", CARGO_NET_GIT_FETCH_WITH_CLI="false")
     environment["CARGO_BUILD_JOBS"] = str(jobs)
-    environment.update(builder.verified_rusty_v8_inputs(
-        source, root / "inputs/rusty-v8", lock["target"])["environment"])
+    v8_directory = root / "inputs/rusty-v8"
+    if CANDIDATE == "P167" and os.environ.get("CI_P167_RESUME") == "1":
+        v8_directory = resume_controller().original_v8_directory(work)
+        require(load(root / "evidence/p167-resume-v8-inputs.json")["directory"] == str(v8_directory),
+                "Native tests require the original V8 input directory used by the producer")
+    environment.update(builder.verified_rusty_v8_inputs(source, v8_directory, lock["target"])["environment"])
     package_name = "codex-core-plugins" if plugin_git else "codex-windows-sandbox"
     if p167_group is not None:
         require(CANDIDATE == "P167" and p167_group in P167_CASES, "Unknown P167 test group")

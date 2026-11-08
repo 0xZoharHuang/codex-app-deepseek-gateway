@@ -211,6 +211,55 @@ class P167Gate(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "artifact bytes required"):
                 resume.verify_archive(artifact)
 
+    def test_resume_v8_inputs_require_original_path_and_exact_bytes(self):
+        resume = ci.resume_controller()
+        builder = ci.load_module("p167_v8_copy_test_builder", ci.REPO / "scripts/build_native.py")
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory)
+            root = fixture / "new-run"
+            old_work = fixture / "original-run/work"
+            original = resume.original_v8_directory(old_work)
+            downloaded = root / "inputs/rusty-v8"
+            downloaded.mkdir(parents=True)
+            source = root / "dependency-preflight/source"
+            (source / "codex-rs").mkdir(parents=True)
+            (source / "codex-rs/Cargo.lock").write_text('[[package]]\nname="v8"\nversion="152.2.0"\n')
+            lock_pin = source / "third_party/v8/rusty_v8_152_2_0_release_manifests.sha256"
+            lock_pin.parent.mkdir(parents=True)
+            target = "x86_64-pc-windows-msvc"
+            suffix = f"ptrcomp_sandbox_release_{target}"
+            archive = downloaded / f"rusty_v8_{suffix}.lib.gz"
+            binding = downloaded / f"src_binding_{suffix}.rs"
+            archive.write_bytes(b"fixture V8 library")
+            binding_bytes = b"fixture bindings"
+            binding.write_bytes(binding_bytes)
+            manifest = downloaded / f"rusty_v8_{suffix}.sha256"
+            manifest.write_text("".join(f"{ci.sha(p)}  {p.name}\n" for p in (archive, binding)))
+            lock_pin.write_text(f"{ci.sha(manifest)}  {manifest.name}\n")
+            with patch.object(resume, "original_work", return_value=old_work):
+                with self.assertRaisesRegex(ValueError, "original V8 directory"):
+                    resume.stage_v8_inputs(root, builder, target, {"original_v8_directory": str(downloaded)})
+                self.assertFalse(old_work.parent.exists())
+                admitted = {"original_v8_directory": str(original)}
+                binding.write_bytes(b"tampered")
+                with self.assertRaisesRegex(ValueError, "Official V8 checksum mismatch"):
+                    resume.stage_v8_inputs(root, builder, target, admitted)
+                self.assertFalse(old_work.parent.exists())
+                binding.write_bytes(binding_bytes)
+                source_times = {p: p.stat().st_mtime_ns for p in (archive, binding, manifest, lock_pin)}
+                receipt = resume.stage_v8_inputs(root, builder, target, admitted)
+                self.assertEqual(receipt["directory"], str(original))
+                self.assertEqual(receipt["environment"], {
+                    "RUSTY_V8_ARCHIVE": str(original / archive.name),
+                    "RUSTY_V8_SRC_BINDING_PATH": str(original / binding.name),
+                })
+                self.assertFalse(old_work.exists())
+                for p in (archive, binding, manifest):
+                    self.assertEqual(ci.sha(original / p.name), ci.sha(p))
+                self.assertEqual(source_times, {p: p.stat().st_mtime_ns for p in source_times})
+                with self.assertRaises(FileExistsError):
+                    resume.stage_v8_inputs(root, builder, target, admitted)
+
     def test_workflow_read_only_one_build_and_exact_cache_restore(self):
         text = (ci.REPO / ".github/workflows/p20-native-windows.yml").read_text()
         self.assertIn("runs-on: windows-2022", text)

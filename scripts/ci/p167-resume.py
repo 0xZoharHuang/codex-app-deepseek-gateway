@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import zipfile
 
@@ -33,6 +34,31 @@ def digest(data):
 
 def original_work(root):
     return Path(root.anchor) / f"cagp167-{RUN}-1" / "work"
+
+
+def original_v8_directory(work):
+    return work.parent / "inputs/rusty-v8"
+
+
+def stage_v8_inputs(root, builder, target, restored):
+    work = original_work(root)
+    directory = original_v8_directory(work)
+    require(restored.get("original_v8_directory") == str(directory),
+            "Resume receipt does not bind the original V8 directory")
+    source = root / "dependency-preflight/source"
+    downloaded = root / "inputs/rusty-v8"
+    verified = builder.verified_rusty_v8_inputs(source, downloaded, target)
+    work.parent.mkdir(exist_ok=False)
+    directory.mkdir(parents=True)
+    for row in verified["files"]:
+        original = Path(row["file"])
+        with original.open("rb") as src, (directory / original.name).open("xb") as dst:
+            shutil.copyfileobj(src, dst, 1024 * 1024)
+    copied = builder.verified_rusty_v8_inputs(source, directory, target)
+    def identities(record):
+        return {(Path(row["file"]).name, row["size"], row["sha256"]) for row in record["files"]}
+    require(identities(copied) == identities(verified), "Restaged V8 input identity differs")
+    return {"directory": str(directory), "files": copied["files"], "environment": copied["environment"]}
 
 
 def original_archive(root):
@@ -101,8 +127,10 @@ def verify_original_evidence(archive, current_evidence, work, cache, target,
                 "remaining_after_cleanup", "unknown_live", "observation_errors")),
             "Original pinned timeout, process readback and resource evidence differ")
     command = observer["command"]
+    v8_directory = original_v8_directory(work)
     for flag, value in (("--work-dir", str(work)), ("--cache-dir", str(cache)),
-                        ("--target-dir", str(target)), ("--jobs", "2")):
+                        ("--target-dir", str(target)), ("--jobs", "2"),
+                        ("--rusty-v8-dir", str(v8_directory))):
         require(command.count(flag) == 1 and command[command.index(flag) + 1] == value,
                 f"Original producer command differs at {flag}")
     current_toolchain = json.loads((current_evidence / "toolchain.json").read_bytes())
@@ -116,6 +144,7 @@ def verify_original_evidence(archive, current_evidence, work, cache, target,
             "Original locked dependency checkout does not match this producer")
     return {"original_run": RUN, "original_artifact_sha256": ARTIFACT_SHA256,
             "original_observer_sha256": OBSERVER_SHA256, "original_checkout_sha256": CHECKOUT_SHA256,
-            "original_absolute_work": str(work), "cache_key": CACHE_KEY, "checkout": checkout["checkout"],
+            "original_absolute_work": str(work), "original_v8_directory": str(v8_directory),
+            "cache_key": CACHE_KEY, "checkout": checkout["checkout"],
             "original_producer_passed": False, "original_timed_out": True,
             "original_cleanup_errors": observer["cleanup_errors"], "cache_is_build_input_only": True}
