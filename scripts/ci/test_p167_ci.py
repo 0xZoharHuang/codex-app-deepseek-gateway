@@ -175,11 +175,23 @@ class P167Gate(unittest.TestCase):
                     "source_sha256": ci.SOURCE, "cargo_lock_sha256": lock["cargo_lock_sha256"],
                     "cargo_home": str(cache / "cargo"), "cargo": str(toolchain / "cargo.exe"),
                     "target": lock["target"], "checkout": {"path": "observed"},
+                    "fetch_metadata_dir": str(root / "dependency-preflight/target-metadata"),
                     "git_configuration_sha256": ci.sha(config), "fetch_log_sha256": ci.sha(log),
                     "fetch_observer_sha256": ci.sha(observer),
                 })
                 self.assertEqual(ci.require_p167_dependency_checkout(root, lock, toolchain)["CARGO_NET_OFFLINE"],
                                  "true")
+                good = evidence.read_bytes()
+                wrong = json.loads(good)
+                wrong["fetch_metadata_dir"] = str(target)
+                evidence.write_text(json.dumps(wrong))
+                with self.assertRaises(ValueError):
+                    ci.require_p167_dependency_checkout(root, lock, toolchain)
+                evidence.write_bytes(good)
+                (target / ".rustc_info.json").write_bytes(b"simulated leaked metadata")
+                with self.assertRaises(ValueError):
+                    ci.require_p167_dependency_checkout(root, lock, toolchain)
+                (target / ".rustc_info.json").unlink()
                 log.write_bytes(b"mutated receipt")
                 with self.assertRaises(ValueError):
                     ci.require_p167_dependency_checkout(root, lock, toolchain)

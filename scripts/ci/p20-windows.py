@@ -521,19 +521,26 @@ def locked_fetch(root):
             and sha(cargo_lock) == lock["cargo_lock_sha256"],
             "Dependency preflight source differs from the normal producer")
     toolchain = Path(os.environ["CI_RUST_TOOLCHAIN_BIN"])
+    # Cargo fetch probes rustc and may cache target metadata. Keep those writes
+    # outside the empty producer target while preserving the exact Cargo home.
+    metadata_target = source.parent / "target-metadata"
+    metadata_target.mkdir(exist_ok=False)
     environment = p167_environment(root, builder.build_environment(
-        source.parent, toolchain, cache, target_dir=target))
-    environment.update(CARGO_NET_OFFLINE="false", CARGO_NET_GIT_FETCH_WITH_CLI="false")
+        source.parent, toolchain, cache, target_dir=metadata_target))
+    environment.update(CARGO_BUILD_BUILD_DIR=str(metadata_target),
+                       CARGO_NET_OFFLINE="false", CARGO_NET_GIT_FETCH_WITH_CLI="false")
     result = observe([str(toolchain / "cargo.exe"), "fetch", "--locked", "--target", lock["target"]],
                      root, source / "codex-rs", environment, "p167-locked-fetch", 1200)
     require(builder.source_state(source) == before and sha(cargo_lock) == lock["cargo_lock_sha256"],
             "Cargo fetch changed the reviewed source or Cargo.lock")
-    require(not any(target.iterdir()), "Cargo fetch unexpectedly created build artifacts")
+    require(not any(target.iterdir()), "Cargo fetch changed the empty producer target directory")
     checkout = p167_checkout_proof(cargo_home, git, environment)
     save(root / "evidence/p167-dependency-checkout.json", {
         "status": "LOCKED_FETCH_CHECKOUT_PROVEN", "source_sha256": SOURCE, "build_lock_sha256": LOCK,
         "cargo_lock_sha256": lock["cargo_lock_sha256"], "cargo_home": str(cargo_home),
         "cargo": str(toolchain / "cargo.exe"), "target": lock["target"], "checkout": checkout,
+        "fetch_metadata_dir": str(metadata_target),
+        "fetch_metadata_entries": sorted(entry.name for entry in metadata_target.iterdir()),
         "git_configuration_sha256": sha(config), "fetch_log_sha256": result["log_sha256"],
         "fetch_observer_sha256": sha(root / "evidence/p167-locked-fetch.json"),
         "compiled_native_targets": 0, "global_git_config_changed": False,
@@ -550,6 +557,7 @@ def require_p167_dependency_checkout(root, lock, toolchain):
             and receipt["cargo_lock_sha256"] == lock["cargo_lock_sha256"]
             and receipt["cargo_home"] == str(cargo_home) and receipt["target"] == lock["target"]
             and receipt["cargo"] == str(toolchain / "cargo.exe")
+            and receipt["fetch_metadata_dir"] == str(root / "dependency-preflight/target-metadata")
             and receipt["git_configuration_sha256"] == sha(p167_git_config(root))
             and receipt["fetch_log_sha256"] == sha(root / "evidence/p167-locked-fetch.log")
             and receipt["fetch_observer_sha256"] == sha(root / "evidence/p167-locked-fetch.json")
