@@ -1,5 +1,6 @@
 """Offline admission and receipt checks. This suite never starts Cargo or an App."""
 import importlib.util
+import io
 import json
 import os
 import re
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from urllib.error import HTTPError
 from pathlib import Path, PureWindowsPath
 from unittest.mock import patch
 
@@ -259,6 +261,68 @@ class P167Gate(unittest.TestCase):
                 self.assertEqual(source_times, {p: p.stat().st_mtime_ns for p in source_times})
                 with self.assertRaises(FileExistsError):
                     resume.stage_v8_inputs(root, builder, target, admitted)
+
+    def test_p167_v8_download_uses_exact_official_public_asset_requests(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(ci, "CANDIDATE", "P167"):
+            root = Path(directory)
+            for name, (asset_id, size) in ci.P167_V8_ASSETS.items():
+                with self.subTest(name=name), patch.object(ci, "download", return_value={"bytes": size}) as download:
+                    digest = ci.P167_V8_FILES.get(name, ci.P167_V8_MANIFEST_SHA)
+                    result = ci.download_v8(ci.P167_V8_RELEASE, root / name, digest)
+                    url = f"https://api.github.com/repos/openai/codex/releases/assets/{asset_id}"
+                    download.assert_called_once_with(url, root / name, digest, expected_size=size, headers={
+                        "Accept": "application/octet-stream", "X-GitHub-Api-Version": "2022-11-28",
+                        "Cache-Control": "no-cache",
+                    })
+                    self.assertEqual(result["asset_id"], asset_id)
+                    self.assertEqual(result["release_url"], f"{ci.P167_V8_RELEASE}/{name}")
+                    self.assertEqual(result["transport"], "github-release-asset-api")
+            name = next(iter(ci.P167_V8_ASSETS))
+            with patch.object(ci, "download") as download:
+                for base, file, digest in ((ci.P167_V8_RELEASE, name, "wrong digest"),
+                    (ci.P167_V8_RELEASE, "other.sha256", ci.P167_V8_MANIFEST_SHA),
+                    ("https://example.invalid", name, ci.P167_V8_MANIFEST_SHA)):
+                    with self.assertRaises(ValueError):
+                        ci.download_v8(base, root / file, digest)
+                download.assert_not_called()
+        with patch.object(ci, "CANDIDATE", "P21"), patch.object(ci, "download") as download:
+            ci.download_v8("https://example.invalid/historical", Path("inputs/test.sha256"), "old digest")
+            download.assert_called_once_with("https://example.invalid/historical/test.sha256",
+                                             Path("inputs/test.sha256"), "old digest")
+
+    def test_p167_v8_rest_accepts_exact_manifest_and_rejects_invalid_stream_once(self):
+        manifest = next(name for name in ci.P167_V8_ASSETS if name.endswith(".sha256"))
+        data = "".join(f"{value}  {name}\n" for name, value in ci.P167_V8_FILES.items()).encode()
+        class Response(io.BytesIO):
+            url = "https://release-assets.githubusercontent.com/pinned"
+        with tempfile.TemporaryDirectory() as directory, patch.object(ci, "CANDIDATE", "P167"):
+            root = Path(directory)
+            for label, response, error in (
+                ("valid", Response(data), None),
+                ("truncated", Response(data[:-1]), "byte count"),
+                ("same_size_bad_digest", Response(b"x" + data[1:]), "SHA256"),
+            ):
+                dest = root / label / manifest
+                with self.subTest(label=label), patch.object(ci.urllib.request, "urlopen", return_value=response) as http:
+                    if error is None:
+                        record = ci.download_v8(ci.P167_V8_RELEASE, dest, ci.P167_V8_MANIFEST_SHA)
+                        self.assertEqual(record["sha256"], ci.P167_V8_MANIFEST_SHA)
+                        self.assertEqual(dest.read_bytes(), data)
+                    else:
+                        with self.assertRaisesRegex(ValueError, error):
+                            ci.download_v8(ci.P167_V8_RELEASE, dest, ci.P167_V8_MANIFEST_SHA)
+                        self.assertFalse(dest.exists())
+                    self.assertEqual(http.call_count, 1)
+                    request = http.call_args.args[0]
+                    self.assertEqual(request.get_header("Accept"), "application/octet-stream")
+                    self.assertIsNone(request.get_header("Authorization"))
+            dest = root / "http504" / manifest
+            failure = HTTPError("https://api.github.com", 504, "Gateway Timeout", {}, None)
+            with patch.object(ci.urllib.request, "urlopen", side_effect=failure) as http:
+                with self.assertRaises(HTTPError):
+                    ci.download_v8(ci.P167_V8_RELEASE, dest, ci.P167_V8_MANIFEST_SHA)
+                self.assertEqual(http.call_count, 1)
+                self.assertFalse(dest.exists())
 
     def test_workflow_read_only_one_build_and_exact_cache_restore(self):
         text = (ci.REPO / ".github/workflows/p20-native-windows.yml").read_text()

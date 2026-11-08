@@ -22,6 +22,12 @@ P167_LONG_PATH = Path(
     "try_lock_until_deadlock_bug.pass.cpp")
 P167_GIT_CONFIG = b"[core]\n\tlongpaths = true\n"
 P167_V8_MANIFEST_SHA = "e16bf2d7bc4b64a96a89e87048d61b9c466040e4c82ae64cfe9f7f2052ef3179"
+P167_V8_RELEASE = f"https://github.com/openai/codex/releases/download/rusty-v8-v{P167_V8_VERSION}"
+P167_V8_ASSETS = {
+    "rusty_v8_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.sha256": (567976816, 257),
+    "rusty_v8_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.lib.gz": (567976807, 41630799),
+    "src_binding_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.rs": (567976819, 39400),
+}
 P167_V8_FILES = {
     "rusty_v8_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.lib.gz": "cd829415695b30ad61b306b23a381e11276f14bb0b46815ac5ed8b96711d002d",
     "src_binding_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.rs": "572ed16ff09bb7944f4b35c659ff62dcd3faf43a0351e3f94f011e01b2f92a62",
@@ -183,19 +189,39 @@ def hosted_root(path):
             "Run hosted-only preflight first")
     return path
 
-def download(url, destination, expected):
+def download(url, destination, expected, *, headers=None, expected_size=None):
     destination = Path(destination)
     require(url.startswith("https://") and not destination.exists(), "Fresh HTTPS input required")
     temporary = destination.with_name(destination.name + ".part")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    request = urllib.request.Request(url, headers={"User-Agent": "CADSG-pinned-native-CI"})
+    request = urllib.request.Request(url, headers={"User-Agent": "CADSG-pinned-native-CI", **(headers or {})})
     with urllib.request.urlopen(request, timeout=90) as response, temporary.open("xb") as stream:
         require(response.url.startswith("https://"), "HTTPS redirect required")
         shutil.copyfileobj(response, stream, 1024 * 1024)
+    require(expected_size is None or temporary.stat().st_size == expected_size,
+            "Pinned public input byte count mismatch")
     actual = sha(temporary)
     require(actual == expected, "Pinned public input SHA256 mismatch")
     temporary.rename(destination)
     return {"url": url, "path": str(destination), "sha256": actual, "bytes": destination.stat().st_size}
+
+def download_v8(base, destination, expected):
+    url = f"{base}/{destination.name}"
+    if CANDIDATE != "P167":
+        return download(url, destination, expected)
+    asset = P167_V8_ASSETS.get(destination.name)
+    pin = (P167_V8_MANIFEST_SHA if destination.name.endswith(".sha256")
+           else P167_V8_FILES.get(destination.name))
+    require(base == P167_V8_RELEASE and asset is not None and expected == pin,
+            "Exact official P167 V8 release asset and source checksum required")
+    asset_id, size = asset
+    api = f"https://api.github.com/repos/openai/codex/releases/assets/{asset_id}"
+    record = download(api, destination, expected, expected_size=size, headers={
+        "Accept": "application/octet-stream", "X-GitHub-Api-Version": "2022-11-28",
+        "Cache-Control": "no-cache",
+    })
+    return {**record, "release_url": url, "asset_id": asset_id, "transport": "github-release-asset-api"}
+
 
 def checksum_lines(data):
     result = {}
@@ -253,14 +279,14 @@ def prepare(root):
     if CANDIDATE == "P167":
         require(trusted.get(manifest_name) == P167_V8_MANIFEST_SHA,
                 "Exact official P167 Windows V8 manifest pin required")
-    records.append(download(f"{base}/{manifest_name}", v8 / manifest_name, trusted[manifest_name]))
+    records.append(download_v8(base, v8 / manifest_name, trusted[manifest_name]))
     pair = checksum_lines((v8 / manifest_name).read_bytes())
     require(set(pair) == {f"rusty_v8_{suffix}.lib.gz", f"src_binding_{suffix}.rs"},
             "Only the official sandbox V8 archive and binding are admitted")
     if CANDIDATE == "P167":
         require(pair == P167_V8_FILES, "Exact official P167 V8 archive and binding pins required")
     for name, digest in pair.items():
-        records.append(download(f"{base}/{name}", v8 / name, digest))
+        records.append(download_v8(base, v8 / name, digest))
     observer = root / "inputs/build-observer"
     for name, digest in OBSERVER_FILES.items():
         records.append(download(
