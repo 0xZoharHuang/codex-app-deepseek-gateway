@@ -1,6 +1,6 @@
 """Installed, one-shot App entrypoints. No App supervisor or agent runtime."""
 from __future__ import annotations
-from .paths import _is_link_or_reparse
+from .paths import _is_link_or_reparse, canonical_path
 from dataclasses import dataclass
 import json
 import hashlib
@@ -19,9 +19,10 @@ from . import native_app_tools as tools
 
 LAUNCHER_SHA256 = "586b96f7f2df599f6b1bca7befbbb7f329900a4ab068fb95db1eb3b5dceeb31a"
 AUTH_ARGS = ("-I", "-m", "codex_app_deepseek.cli", "auth-token")
-# Only this previously shipped, retained cohort is eligible for an explicit
+# Only these retained cohorts are eligible for an explicit
 # upgrade. Normal reads still require the current baseline exactly.
 PRIOR_APP_BASELINES = {
+    "725d53f2db45d33efbe4f5babe9b8a4479887c4d18434d6d9f6fd836dc5b9536": ("26.1023.6621.0", "0.165.0-alpha.1.2"),
     "a67ef1480c1a526f56b4cd84e8a2e87c8fa26b3868aa4baf5a3fbf8586c53325":
         ("26.1016.8120.0", "0.163.0-alpha.11.1"),
 }
@@ -37,19 +38,6 @@ class Installation:
     directory: Path
     data: Path
     receipt: dict
-
-
-def canonical_path(path):
-    """Normalize Win32 extended spelling after resolving the actual filesystem path."""
-    resolved = Path(path).resolve()
-    text = str(resolved)
-    if os.name == "nt":
-        if text.startswith("\\\\?\\UNC\\"):
-            text = "\\\\" + text[8:]
-        elif (text.startswith("\\\\?\\") and len(text) >= 7
-              and "A" <= text[4].upper() <= "Z" and text[5:7] == ":\\"):
-            text = text[4:]
-    return Path(text)
 
 
 def verify_installed_context(directory, executable, module_path):

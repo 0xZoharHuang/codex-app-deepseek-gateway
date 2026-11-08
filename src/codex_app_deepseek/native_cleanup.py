@@ -17,7 +17,7 @@ import time
 import uuid
 
 from . import lifecycle as lc
-from .paths import _is_link_or_reparse
+from .paths import _is_link_or_reparse, canonical_path
 
 # The -m lifecycle entry has a distinct __main__ class. Expose only this known,
 # safe diagnostic type for conversion at that entry, never arbitrary exceptions.
@@ -154,6 +154,7 @@ def _drained(home, executable, namespace, backend):
     rows = _process_owners(backend)
     if any(row["sid"] in principals for row in rows):
         raise lc.LifecycleError("This namespace still has a live sandbox workload; quit its work before uninstall")
+    home, executable = canonical_path(home), canonical_path(executable)
     for row in rows:
         name = row["name"].casefold()
         helper = name.startswith(("codex-command-runner", "codex-windows-sandbox-setup",
@@ -169,12 +170,12 @@ def _drained(home, executable, namespace, backend):
             identity = backend.identity(process.pid)
             environment = process.environ()
             selected = environment.get("CODEX_HOME")
-            if selected and Path(selected).resolve() == home.resolve():
+            if selected and canonical_path(selected) == home:
                 raise lc.LifecycleError("This App home still has a live frontend or native backend/helper; quit it before uninstall")
-            image = Path(identity["exe"]).resolve()
-            if selected is None and ((name == "codex.exe" and image == executable.resolve())
-                                     or (helper and (image.parent == executable.resolve().parent
-                                                     or image.is_relative_to(home.resolve())))):
+            image = canonical_path(identity["exe"])
+            if selected is None and ((name == "codex.exe" and image == executable)
+                                     or (helper and (image.parent == executable.parent
+                                                     or image.is_relative_to(home)))):
                 raise lc.LifecycleError("Bound native process has no verifiable home; uninstall refused")
         except psutil.NoSuchProcess:
             continue

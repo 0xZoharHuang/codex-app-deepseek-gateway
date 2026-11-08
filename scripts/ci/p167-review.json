@@ -1,10 +1,21 @@
 {
-  "status": "pending",
-  "lock_sha256": null,
-  "source_sha256": null,
-  "source_files": null,
-  "builder_sha256": null,
-  "packager_sha256": null,
-  "capacity_cases": null,
-  "workflow_sha256": "bbc47c836aa9a640dcedac944a78a415f54b7e8da894c557df7954f924bdd6ff"
+  "status": "sealed",
+  "lock_sha256": "24dab591cfe8c61f3960f109f1a67c7d3e57d9dc371fe8ed09042d35cc695c6d",
+  "source_sha256": "3e9c98401f8219c05fad52ddd701db58137c6b942d91ccb606d1ccdc1b1602dc",
+  "source_files": 9837,
+  "builder_sha256": "809876af3ef31e779e2a6bb8d98774b8cc63e7c0e04b5c96b24b12262e79202c",
+  "packager_sha256": "87ef2981f4f56dc61f9ca3d62885d30a3da52c9705f13e8deb52b35a625d97f8",
+  "capacity_cases": [
+    "compact::tests::persisted_local_manual_413_compacts_only_the_completed_pair_safe_prefix",
+    "compact_capacity_projection::tests::projected_image_views_keep_atomic_labels_and_positional_provenance",
+    "compact_capacity_projection::tests::projected_completed_tool_pair_keeps_ids_and_utf8_coverage",
+    "session::capacity_recovery::tests::recovery_cut_does_not_consume_current_input_or_split_a_tool_pair",
+    "session::capacity_recovery::tests::translated_reset_receipt_preserves_epoch_fence_and_excludes_live_suffix",
+    "session::capacity_recovery::tests::reset_old_gap_proof_checks_typed_bytes_and_exact_metadata_and_excludes_current",
+    "session::capacity_recovery::tests::native_image_proof_preserves_position_reference_and_detail",
+    "session::capacity_recovery::tests::completed_manual_prefix_creates_cold_genesis_then_translates_existing_lineage",
+    "session::request_capacity::tests::cold_owned_checkpoint_revalidates_typed_image_metadata_and_delete_fences_late_writer",
+    "session::tests::capacity_install_append_failure_fences_session_and_preserves_exact_pending_suffix"
+  ],
+  "workflow_sha256": "7503540f1a79e033639052709ee36bf35f3139912917e554805a002f66c1fe1f"
 }

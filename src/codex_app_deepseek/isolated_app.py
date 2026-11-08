@@ -3,7 +3,7 @@ No runtime loop, setup, App replacement, global environment edits, restart or fa
 The DesktopPackage transport requires separate actual App acceptance.
 """
 from __future__ import annotations
-from .paths import _is_link_or_reparse
+from .paths import _is_link_or_reparse, paths_overlap
 import argparse, base64, ctypes, hashlib, json, ntpath, os, re, shutil, subprocess, sys, time, tomllib, uuid
 from contextlib import ExitStack, contextmanager
 from ctypes import wintypes
@@ -11,7 +11,7 @@ from pathlib import Path
 import psutil
 from .app_config import _atomic_write, _private
 
-BASELINE_SHA256 = "725d53f2db45d33efbe4f5babe9b8a4479887c4d18434d6d9f6fd836dc5b9536"
+BASELINE_SHA256 = "f598079edf49e4398aae925ebe5874ce7e0b3fe1218931d165df4676261e3dcc"
 CONTROLLED = {"CODEX_HOME", "CODEX_CLI_PATH", "CODEX_ELECTRON_USER_DATA_PATH", "CODEX_APP_SERVER_FORCE_CLI"}
 REMOVED = {
     "OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENROUTER_API_KEY",
@@ -86,7 +86,7 @@ def validated_trace_root(value, paths, backend, owner_sid):
     protected = [Path(paths[key]).resolve() for key in ("home", "frontend", "launches")]
     protected.extend([(Path.home() / ".codex").resolve(),
                       (Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "codex-deepseek").resolve()])
-    require(not any(path == p or path.is_relative_to(p) or p.is_relative_to(path) for p in protected),
+    require(not any(paths_overlap(path, protected_path) for protected_path in protected),
             "trace root must not overlap App, CDS, or launch state")
     require(path.parent.is_dir(), "trace root parent must already exist")
     if path.exists():
@@ -198,7 +198,9 @@ def baseline(path):
 def verify_package(observed, expected):
     package = observed["package"]
     for actual, fixed in [("full_name", "package_full_name"), ("family", "package_family_name"), ("version", "version"), ("publisher", "publisher")]:
-        require(package.get(actual) == expected[fixed], "installed App identity differs from the qualified baseline")
+        require(package.get(actual) == expected[fixed],
+                "installed App identity differs from the qualified baseline "
+                f"(installed {package.get('version')!r}, required {expected['version']!r})")
     require(package.get("status") == "Ok" and package.get("signature_kind") == expected["required_signature_kind"] and package.get("development") is False, "App package is not a healthy signed production installation")
     require(observed["exe_signature"]["status"] == "Valid" and observed["exe_signature"]["thumbprint"].upper() == expected["executable_signer_thumbprint"], "App executable signature differs")
     require(observed["package_signature_status"] == "Valid", "App package signature is not valid")

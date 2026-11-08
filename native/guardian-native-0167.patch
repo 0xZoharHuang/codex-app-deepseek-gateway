@@ -1,0 +1,253 @@
+diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
+index 7bd869f2c0770ea1ac9858998302e2002bc77b6b..6b10166e9df53093511839d54bb3c71e4a24631d 100644
+--- a/codex-rs/core/src/thread_manager.rs
++++ b/codex-rs/core/src/thread_manager.rs
+@@ -1077,6 +1077,25 @@ impl ThreadManager {
+         self.state.get_thread(thread_id).await
+     }
+ 
++    /// Resolves a Guardian callback using its exact live host scope.
++    ///
++    /// Internal threads stay hidden from ID-based public lookup.
++    pub async fn guardian_thread_for_scope(
++        &self,
++        thread_id: ThreadId,
++        scope: &codex_extension_api::ExtensionData,
++    ) -> Option<Arc<CodexThread>> {
++        self.state
++            .threads
++            .read()
++            .await
++            .get(&thread_id)
++            .filter(|thread| {
++                thread.is_running() && std::ptr::eq(scope, thread.thread_extension_data())
++            })
++            .cloned()
++    }
++
+     /// Checks the full registry without exposing any replacement runtime.
+     pub async fn thread_registration(
+         &self,
+diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
+index 54e06778a38b0ce4b30ecbf6cfe230bf1ed04f4a..512bbafb1dd3000c15ff1673ade2c66f4b2a5724 100644
+--- a/codex-rs/core/src/thread_manager_tests.rs
++++ b/codex-rs/core/src/thread_manager_tests.rs
+@@ -642,11 +642,25 @@ async fn thread_id_generator_does_not_replace_resumed_thread_id() {
+         .rollout_path()
+         .expect("source rollout path should exist");
+     assert_eq!(original.thread_id, original_thread_id);
++    let original_scope = original.thread.thread_extension_data();
++    assert!(Arc::ptr_eq(
++        &original_manager
++            .guardian_thread_for_scope(original_thread_id, original_scope)
++            .await
++            .expect("live original Guardian scope"),
++        &original.thread,
++    ));
+     original
+         .thread
+         .shutdown_and_wait()
+         .await
+         .expect("shut down source thread");
++    assert!(
++        original_manager
++            .guardian_thread_for_scope(original_thread_id, original_scope)
++            .await
++            .is_none()
++    );
+     let _ = original_manager.remove_thread(&original_thread_id).await;
+ 
+     let resumed_manager = ThreadManager::with_models_provider_and_home_for_tests(
+@@ -668,6 +682,20 @@ async fn thread_id_generator_does_not_replace_resumed_thread_id() {
+         .expect("resume existing source thread");
+ 
+     assert_eq!(resumed.thread_id, original_thread_id);
++    let resumed_scope = resumed.thread.thread_extension_data();
++    assert!(Arc::ptr_eq(
++        &resumed_manager
++            .guardian_thread_for_scope(resumed.thread_id, resumed_scope)
++            .await
++            .expect("live resumed Guardian scope"),
++        &resumed.thread,
++    ));
++    assert!(
++        resumed_manager
++            .guardian_thread_for_scope(resumed.thread_id, original_scope)
++            .await
++            .is_none()
++    );
+     resumed
+         .thread
+         .shutdown_and_wait()
+@@ -1306,13 +1334,45 @@ async fn start_thread_keeps_internal_threads_hidden_from_normal_lookups() {
+                 InternalSessionSource::MemoryConsolidation,
+             )),
+             environments: Some(Vec::new()),
+-            ..StartThreadOptions::new(config)
++            ..StartThreadOptions::new(config.clone())
+         })
+         .await
+         .expect("internal thread should start");
++    let sibling = manager
++        .start_thread(StartThreadOptions {
++            session_source: Some(SessionSource::Internal(
++                InternalSessionSource::MemoryConsolidation,
++            )),
++            environments: Some(Vec::new()),
++            ..StartThreadOptions::new(config)
++        })
++        .await
++        .expect("sibling internal thread should start");
+ 
+     assert_eq!(manager.list_thread_ids().await, Vec::new());
+     assert!(manager.get_thread(thread.thread_id).await.is_err());
++    assert!(Arc::ptr_eq(
++        &manager
++            .guardian_thread_for_scope(thread.thread_id, thread.thread.thread_extension_data())
++            .await
++            .expect("genuine internal Guardian scope"),
++        &thread.thread,
++    ));
++    let forged_scope = codex_extension_api::ExtensionData::new(thread.thread_id.to_string());
++    for foreign_scope in [sibling.thread.thread_extension_data(), &forged_scope] {
++        assert!(
++            manager
++                .guardian_thread_for_scope(thread.thread_id, foreign_scope)
++                .await
++                .is_none()
++        );
++    }
++    sibling
++        .thread
++        .shutdown_and_wait()
++        .await
++        .expect("shut down the sibling thread");
++    manager.remove_thread(&sibling.thread_id).await;
+     assert!(
+         codex_diagnostics::snapshot()
+             .gauges
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/approval.rs b/codex-rs/ext/guardian-v2/src/async_scorer/approval.rs
+index 12a62619fba6b305dba2e4dbb2a20e502ab14a3d..d2cd3b2752451afedec4ac7b2ccc8aae65f859e0 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/approval.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/approval.rs
+@@ -39,7 +39,10 @@ impl ApprovalReviewContributor for GuardianApprovalReviewer {
+         Box::pin(async move {
+             // If the scorer is unavailable, the reviewer extension runs its synchronous fallback.
+             let manager = self.thread_manager.upgrade()?;
+-            let Ok(thread) = manager.get_thread(input.thread_id).await else {
++            let Some(thread) = manager
++                .guardian_thread_for_scope(input.thread_id, input.thread_store)
++                .await
++            else {
+                 record_fast_decision(input.metrics.as_deref(), "deferred", "scoring_failure");
+                 return None;
+             };
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/observation.rs b/codex-rs/ext/guardian-v2/src/async_scorer/observation.rs
+index d71e2ad8b96e1d0ffc778831605ee6331312f497..747d7e1c57e10f2749c7696f5197744a8d75226b 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/observation.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/observation.rs
+@@ -198,9 +198,9 @@ impl GuardianV2Extension {
+                 .upgrade()
+                 .ok_or_else(|| "thread manager is unavailable".to_string())?;
+             let thread = manager
+-                .get_thread(parsed_thread_id)
++                .guardian_thread_for_scope(parsed_thread_id, input.thread_store)
+                 .await
+-                .map_err(|error| error.to_string())?;
++                .ok_or_else(|| "native Guardian thread context is no longer valid".to_string())?;
+             let config = thread.config().await;
+             Ok((manager, thread, config))
+         }
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs
+index 23165a419f0b382af8d56edee3076142707be9fe..a9059fabde7c64709d969e85eb744b6448a3f695 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool.rs
+@@ -148,6 +148,9 @@ impl ConnectionPool {
+     }
+ 
+     fn start_refill(self: &Arc<Self>, guard: OwnedMutexGuard<()>) -> Option<JoinHandle<()>> {
++        if !self.config.provider.info().supports_websockets {
++            return None;
++        }
+         let mut retry_after = self
+             .retry_after
+             .lock()
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs
+index 86bd03dfd25b9a7008076bae2defa9d89763c744..b53e39166508d8a2511246941b6b24c89a52eb80 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/connection_pool_tests.rs
+@@ -88,6 +88,74 @@ impl Drop for Gateway {
+     }
+ }
+ 
++#[tokio::test]
++async fn provider_without_websockets_scores_over_http_without_opening_pool() -> Result<()> {
++    // This is a real local transport test: no model, account, skip macro, or
++    // forced cooldown substitutes for the provider's configured capability.
++    let http = responses::start_mock_server().await;
++    let events = vec![
++        responses::ev_output_text_delta("low"),
++        responses::ev_completed("http-only-score"),
++    ];
++    let http_mock =
++        responses::mount_sse_sequence(&http, vec![responses::sse(events.clone()); 2]).await;
++    let ws =
++        responses::start_websocket_server(vec![Vec::new(); INITIAL_WEBSOCKET_CONNECTIONS]).await;
++    let gateway = Gateway::new(&http.uri(), ws.uri()).await?;
++    gateway.allowed_opens.store(usize::MAX, Ordering::SeqCst);
++
++    let mut config = sampler_config(format!("{}/v1", gateway.url));
++    let mut info = config.provider.info().clone();
++    // The existing factory fixture is websocket-capable. Keep this explicit so
++    // a future fixture-default change cannot silently disable the true controls.
++    assert!(info.supports_websockets);
++    info.name = "Owned HTTP-only native provider".to_owned();
++    info.supports_websockets = false;
++    config.provider = create_model_provider(info, config.provider.auth_manager());
++    assert!(!config.provider.info().supports_websockets);
++    let sampler = LunaSampler::new(config);
++
++    assert!(sampler.connections.replenish().is_none());
++    tokio::time::timeout(Duration::from_secs(5), sampler.prewarm()).await?;
++    assert!(
++        sampler
++            .connections
++            .idle_connections
++            .lock()
++            .unwrap()
++            .is_empty()
++    );
++
++    for turn in ["http-only-first", "http-only-second"] {
++        assert_eq!(
++            tokio::time::timeout(Duration::from_secs(5), sampler.sample(sample_request(turn)))
++                .await??,
++            "low",
++        );
++        assert!(sampler.connections.replenish().is_none());
++        assert!(
++            sampler
++                .connections
++                .idle_connections
++                .lock()
++                .unwrap()
++                .is_empty()
++        );
++        assert_eq!(gateway.opens.load(Ordering::SeqCst), 0);
++    }
++    let requests = http_mock.requests();
++    assert_eq!(requests.len(), 2);
++    for request in requests {
++        assert_eq!(request.path(), "/v1/responses");
++        assert_eq!(
++            request.header("x-openai-subagent").as_deref(),
++            Some("guardian")
++        );
++    }
++    ws.shutdown().await;
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn stalled_handshake_does_not_delay_other_warm_sockets() -> Result<()> {
+     skip_if_no_network!(Ok(()));

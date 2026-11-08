@@ -290,7 +290,8 @@ class ProtocolState:
         # Additive structured receipt inside schema3 adaptations. This owns no
         # model history or resource lifecycle and contains no image/file IDs.
         allowed = {'preparation', 'consumption_status', 'provider_terminal',
-                   'provider_response_id', 'upstream_http_status', 'release_error_type', 'generation_header_candidate'}
+                   'provider_response_id', 'upstream_http_status', 'release_error_type',
+                   'generation_header_candidate', 'budget_failure'}
         if not set(updates) <= allowed:
             raise ValueError('Unsupported image transport receipt field')
         with self.db:

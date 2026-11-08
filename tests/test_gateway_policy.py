@@ -22,7 +22,9 @@ def test_versioned_app_default_covers_actual_pinned_prepare_routes(tmp_path):
     config, receipt = gp.ensure_app_policy(tmp_path / "new")
     assert receipt["status"] == "created_fixed_app_policy"
     assert config.policy_origin["provider_reasons"]["primeintellect"] == "explicit_parallel_tool_calls_false"
-    assert config.policy_origin["protocol_commit"] == "6d6ccd32c92d06fc52ecd72712140f24496c30a2"
+    lock = Path(__file__).resolve().parents[1] / "release/dependencies.windows-py313.json"
+    pinned_commit = json.loads(lock.read_text(encoding="utf-8"))["protocol_boundary"]["source_commit"]
+    assert config.policy_origin["protocol_commit"] == pinned_commit
 
 
 def test_config_snapshot_parses_and_hashes_same_single_read(tmp_path, monkeypatch):

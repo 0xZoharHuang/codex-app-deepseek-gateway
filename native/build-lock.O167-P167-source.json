@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "upstream_commit": "c40729ea5cf8e947481b130c59807273eda2f8e9",
+  "archive_sha256": "473fbbe3523605050abd0606b28d88b06f194b42653a66c23ca2d5f86043725a",
+  "native_version": "0.167.0-alpha.3.2",
+  "rust_version": "1.95.0",
+  "target": "x86_64-pc-windows-msvc",
+  "patches": [
+    {
+      "file": "windows-native-0167.patch",
+      "sha256": "9bfdbde49da226ee394dad2c9ac7aafcae3040187593b2b7849fbd8560b04f04"
+    },
+    {
+      "file": "guardian-native-0167.patch",
+      "sha256": "e87624996d54999eeabb728c9fe916b4027336f49bc30a51c48de60d9a0e6118"
+    },
+    {
+      "file": "request-capacity-0167.patch",
+      "sha256": "60b63bd79b8f1d15e0a6d0718db0291b822e1e73eb865b7de89763bf79bf18fc"
+    }
+  ],
+  "prepared_source_sha256": "3e9c98401f8219c05fad52ddd701db58137c6b942d91ccb606d1ccdc1b1602dc",
+  "prepared_source_files": 9837,
+  "cargo_lock_sha256": "edcd5f467a4248cc041376e20f89657a8a3223851d968d89dcf3d6495e711bf7",
+  "release_environment": {
+    "CARGO_BUILD_JOBS": "2",
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_PROFILE_RELEASE_INCREMENTAL": "false",
+    "CARGO_PROFILE_RELEASE_DEBUG": "0",
+    "CARGO_PROFILE_RELEASE_STRIP": "symbols",
+    "CARGO_PROFILE_RELEASE_LTO": "false",
+    "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16"
+  },
+  "binaries": [
+    "codex.exe",
+    "codex-command-runner.exe",
+    "codex-windows-sandbox-setup.exe",
+    "codex-windows-managed-deny-probe.exe",
+    "codex-windows-sandbox-service.exe",
+    "codex-code-mode-host.exe"
+  ],
+  "candidate_revision": "O167",
+  "package_mode": "cadsg-native-msix"
+}

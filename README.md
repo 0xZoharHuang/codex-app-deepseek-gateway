@@ -24,7 +24,7 @@ CADSG 面向桌面 App。[CDS](https://github.com/0xZoharHuang/codex-deepseek-ru
 | 网关 Python | 本组合使用独立 CPython 3.13.3 x64 |
 | 模型请求 ID | `deepseek/deepseek-v4.1-flash-1017` |
 | OpenRouter 版本身份 | `deepseek/deepseek-v4.1-flash-20261017` |
-| 协议代码 | CDS 0.6.10 的固定提交 `6d6ccd32c92d06fc52ecd72712140f24496c30a2` |
+| 协议代码 | CDS 0.7.0 源码的固定提交 `e83b4b3fa79714fa77b66ba4e96ae10abb9d6aad` |
 
 App 和内置 runtime 改版后需要重新核验。启动入口会检查官方包身份、签名、关键文件及实际后端。P20 的 Windows 改动覆盖旧回环过滤规则的升级、明确允许的本机连接和沙箱 helper 的内容校验。[Windows 原生修复](docs/windows-loopback-reconciliation.md) · [资格与版本记录](docs/qualification-status.md)
 
@@ -33,7 +33,7 @@ App 和内置 runtime 改版后需要重新核验。启动入口会检查官方�
 1. 从同一发行页下载网关 ZIP、原生 tar.gz 和独立的 `SHA256SUMS.json`，核对两个归档的 SHA-256。[0.2.0 发行页](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/releases/tag/v0.2.0)
 2. 用独立 Python 执行网关包中的 `Install`，再显式 `Activate`。运行 `setup-credentials`，在 Windows 的项目专用凭据存储中设置 OpenRouter key。App 使用另一份本机认证。
 3. 将已校验的 P20 原生包解压到永久的版本目录。依次运行 `app-prepare-runtime`、`app-bind` 和 `app-configure`，选择与这版 App 对应的模型目录。
-4. 启动本机网关，通过 `app-check` 后运行 `app-launch`。进入真实 App 后，`app-status` 可回读当前实际加载的原生程序。日常安装使用预编译包。[完整 PowerShell 步骤](docs/windows-quickstart.md)
+4. 启动本机网关，通过 `app-check` 后运行 `app-launch`。进入真实 App 后，`app-status` 可回读当前实际加载的原生程序。日常安装使用预编译包。已有图片缓存升级时，先停止该安装的 App 和网关，再按维护步骤迁移格式。[完整 PowerShell 步骤](docs/windows-quickstart.md) · [图片缓存迁移与回滚](docs/image-cache-format.md)
 
 如果工程由另一个应用创建在私有目录里，除了工作区权限，还应核对私有父目录的元数据权限。宿主可以在自己创建目录时给已核验的沙箱组设置非继承的 `READ_ATTRIBUTES | SYNCHRONIZE`。[私有工程与错误 267](docs/windows-private-workspace.md)
 

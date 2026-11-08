@@ -10,7 +10,7 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE", "licenses/*"]
 requires-python = ">=3.11"
-dependencies = ["codex-deepseek-runtime @ https://codeload.github.com/0xZoharHuang/codex-deepseek-runtime/tar.gz/6d6ccd32c92d06fc52ecd72712140f24496c30a2#sha256=ae97e8a81363a9b9f54205d46a4912e87438ff63d8c7916f816dadb4c3cb1a4a", "aiohttp==3.13.2", "tomlkit==0.15.2", "truststore==0.10.5", "psutil==7.2.2", "beautifulsoup4==4.15.0", "pypdfium2==5.14.0", "Pillow==13.0.0"]
+dependencies = ["codex-deepseek-runtime @ https://codeload.github.com/0xZoharHuang/codex-deepseek-runtime/tar.gz/e83b4b3fa79714fa77b66ba4e96ae10abb9d6aad#sha256=6f4fed84a3e4e65dd405d3a90e62b3d9ecb2a10d863f0ddbbfc82b51a35064a3", "aiohttp==3.13.2", "tomlkit==0.15.2", "truststore==0.10.5", "psutil==7.2.2", "beautifulsoup4==4.15.0", "pypdfium2==5.14.0", "Pillow==13.0.0"]
 
 [project.optional-dependencies]
 test = ["pytest==9.0.2", "pytest-asyncio==1.3.0", "mcp==2.3.0", "PyYAML==6.0.3"]

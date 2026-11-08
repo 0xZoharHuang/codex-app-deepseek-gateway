@@ -1,6 +1,7 @@
 import copy
 from contextlib import nullcontext
 import json
+import os
 from pathlib import Path
 import pytest
 from codex_app_deepseek import isolated_app as app
@@ -1106,6 +1107,19 @@ def test_trace_root_cannot_overlap_product_state(fixture, which):
     with pytest.raises(app.LaunchError, match="overlap"):
         app.prepare_launch(request, backend)
     assert not backend.spawned
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Win32 extended path")
+def test_trace_root_cannot_use_unprefixed_alias_of_cds_home(fixture, tmp_path, monkeypatch):
+    paths, _, _, _, _, backend = fixture
+    local = tmp_path / "local"
+    cds = local / "codex-deepseek"
+    cds.mkdir(parents=True)
+    monkeypatch.setenv("LOCALAPPDATA", "\\\\?\\" + str(local))
+    trace = cds / "trace"
+    with pytest.raises(app.LaunchError, match="overlap"):
+        app.validated_trace_root(str(trace), paths, backend, "S-1-5-21-fixture")
+    assert not trace.exists()
 
 
 def test_trace_root_reparse_rejected_before_any_directory_write(fixture, tmp_path, monkeypatch):

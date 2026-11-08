@@ -90,7 +90,11 @@ def test_run_timeout_has_bounded_redacted_cause(monkeypatch):
 def cds_boundary_fixture(tmp_path, version="0.6.9"):
     modules = {name: ("fixture-" + name).encode() for name in
                ["protocol.py", "formats.py", "structured.py", "protocol_errors.py", "search.py", "__init__.py"]}
-    helper = b"fixture-reviewed-helper"
+    helpers = {"windows_asyncio.py": b"fixture-reviewed-helper"}
+    if version == "0.7.0":
+        modules["image_selection.py"] = b"fixture-reviewed-pure-image-selector"
+        helpers.update({name: ("fixture-" + name).encode()
+                        for name in ("image_transport.py", "platforms.py", "processes.py")})
     dist_info = f"codex_deepseek_runtime-{version}.dist-info"
     license_path = dist_info + "/licenses/licenses/cpython-proactor-PSF.txt"
     license_bytes = b"fixture-complete-PSF-license"
@@ -102,15 +106,24 @@ def cds_boundary_fixture(tmp_path, version="0.6.9"):
             "protocol_boundary": {"source_commit": "fixed", "pure_files": {
                 name: hashlib.sha256(value).hexdigest() for name, value in modules.items()}},
             "transport_compatibility": {"source_commit": "fixed", "files": {
-                "windows_asyncio.py": hashlib.sha256(helper).hexdigest()}, "license_files": {
+                name: hashlib.sha256(data).hexdigest() for name, data in helpers.items()}, "license_files": {
                 license_path: hashlib.sha256(license_bytes).hexdigest()}}}
     members = {"codex_deepseek/" + name: value for name, value in modules.items()}
-    members["codex_deepseek/windows_asyncio.py"] = helper
+    members.update({"codex_deepseek/" + name: data for name, data in helpers.items()})
     members[license_path] = license_bytes
     members[dist_info + "/METADATA"] = (
         "Metadata-Version: 2.4\nName: codex-deepseek-runtime\n"
         f"Version: {version}\n\nOffline boundary fixture.\n").encode()
     return lock, members
+
+
+@pytest.mark.parametrize("missing", ["image_selection.py", "image_transport.py"])
+def test_07_pin_requires_both_image_implementation_boundaries(tmp_path, missing):
+    lock, members = cds_boundary_fixture(tmp_path, "0.7.0")
+    table = lock["protocol_boundary"]["pure_files"] if missing=="image_selection.py" else lock["transport_compatibility"]["files"]
+    del table[missing]
+    with pytest.raises(ValueError, match="image selector is missing|Unexpected CDS transport helper boundary"):
+        builder.verify_cds_dependency(write_cds_fixture(tmp_path, lock, members), lock)
 
 
 def write_cds_fixture(tmp_path, lock, members):
@@ -123,13 +136,13 @@ def write_cds_fixture(tmp_path, lock, members):
     return wheel
 
 
-@pytest.mark.parametrize("version", ["0.6.9", "0.6.10"])
+@pytest.mark.parametrize("version", ["0.6.9", "0.6.10", "0.7.0"])
 def test_protocol_and_single_transport_helper_and_license_are_all_verified(tmp_path, version):
     lock, members = cds_boundary_fixture(tmp_path, version)
     builder.verify_cds_dependency(write_cds_fixture(tmp_path, lock, members), lock)
 
 
-@pytest.mark.parametrize("version", ["0.6.9", "0.6.10"])
+@pytest.mark.parametrize("version", ["0.6.9", "0.6.10", "0.7.0"])
 @pytest.mark.parametrize("change", ["protocol", "helper", "license", "missing_helper", "missing_license",
                                   "empty_license_boundary", "extra_helper", "source_commit"])
 def test_transport_boundary_rejects_tampering_or_missing_licensing(tmp_path, change, version):

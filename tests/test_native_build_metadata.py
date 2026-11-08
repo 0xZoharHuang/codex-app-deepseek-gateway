@@ -154,7 +154,7 @@ def test_replay_overlay_changes_only_checkpoint_hash_and_native_regressions():
     # Their Rust and App execution receipts remain separate acceptance evidence.
 
 
-def test_current_0165_recipe_is_a_single_four_target_native_producer():
+def test_historical_0165_recipe_is_a_single_four_target_native_producer():
     native = Path(__file__).parents[1] / "native"
     raw = (native / "build-lock.json").read_bytes()
     lock = json.loads(raw)
@@ -189,9 +189,6 @@ def test_current_0165_recipe_is_a_single_four_target_native_producer():
     command, = build.build_commands(Path("pinned-rust"),lock["binaries"])
     assert command.count("-p") == 2 and command.count("--bin") == 4
     assert "--bins" not in command
-    baseline = json.loads((native / "app-launch-baseline.json").read_bytes())
-    assert baseline["native_version"] == lock["native_version"]
-    assert baseline["native_upstream_commit"] == lock["upstream_commit"]
 
 
 def test_cache_default_keeps_existing_work_layout_and_release_environment(tmp_path,monkeypatch):
@@ -674,7 +671,7 @@ def test_p12_own_runtime_service_source_keeps_normal_profile_and_release_gate_cl
     spec = importlib.util.spec_from_file_location("p12_release_boundary", Path(__file__).parents[1] / "scripts/package_native_release.py")
     pack = importlib.util.module_from_spec(spec); spec.loader.exec_module(pack)
     # Historical P12 is rejected at the newer six-program exact-lock admission.
-    with pytest.raises(ValueError, match=r"^Six-target source bundle must match an explicitly reviewed P16 lock or reviewed P17 lock or reviewed P18 lock or reviewed P19 lock or reviewed P20 lock or reviewed P21 lock$"):
+    with pytest.raises(ValueError, match=r"^Six-target source bundle must match an explicitly reviewed P16 lock or reviewed P17 lock or reviewed P18 lock or reviewed P19 lock or reviewed P20 lock or reviewed P21 lock or reviewed P167 lock$"):
         pack.single_graph(p12, native)
     # Reducing the output declaration cannot bypass the independent source gate.
     with pytest.raises(ValueError, match="patch topology"):

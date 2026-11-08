@@ -31,12 +31,14 @@ P18_LOCK_SHA256 = "16033bf6d16dedf440b3d9355445a87f8098f340958c2cd7685028330a528
 P19_LOCK_SHA256 = "163f6e61d605adf7d7698835f33b99d48c5cb25f017b8231f5062bd0ffb0a543"
 P20_LOCK_SHA256 = "3736e573e634180a1443b0c3e2cdbbf3d28304cf17d76fd3752aab344356b44c"
 P21_LOCK_SHA256 = "1a80f6e1e4fdb2f5b255a416f70350b5fd764493322bc463137381900374cdab"
+P167_LOCK_SHA256 = "24dab591cfe8c61f3960f109f1a67c7d3e57d9dc371fe8ed09042d35cc695c6d"
 REVIEWED_SOURCE_LOCKS = (("build-lock.O165-P16-source.json", P16_LOCK_SHA256),
                          ("build-lock.O165-P17-source.json", P17_LOCK_SHA256),
                          ("build-lock.O165-P18-source.json", P18_LOCK_SHA256),
                          ("build-lock.O165-P19-source.json", P19_LOCK_SHA256),
                          ("build-lock.O165-P20-source.json", P20_LOCK_SHA256),
-                         ("build-lock.O165-P21-source.json", P21_LOCK_SHA256))
+                         ("build-lock.O165-P21-source.json", P21_LOCK_SHA256),
+                         ("build-lock.O167-P167-source.json", P167_LOCK_SHA256))
 
 
 def binary_names(manifest):
@@ -140,11 +142,10 @@ def indexed_sources(raw, index, index_digest, references_digest, n_lock, j_lock)
 
 
 def single_graph(lock, native_dir):
-    """One source/recipe produces all four current binaries; no N/J inference."""
-    require(lock["candidate_revision"] == "O165"
-            and lock["upstream_commit"] == "720fec862a608ae1e5878d1eecb04fb93192e93c"
-            and lock["native_version"] == "0.165.0-alpha.1.2"
-            and lock["target"] == TARGET, "Unsupported single-producer baseline")
+    """One exact reviewed source and recipe produces the entire native bundle."""
+    revision = lock["candidate_revision"]
+    require(revision in ("O165", "O167") and lock["target"] == TARGET,
+            "Unsupported single-producer baseline")
     names = set(lock["binaries"])
     require(len(lock["binaries"]) == len(names) and names in (BINARIES, SOURCE_BINARIES),
             "Single producer must build the exact four or six native targets")
@@ -158,7 +159,12 @@ def single_graph(lock, native_dir):
                 if sha(pinned) == digest and load(pinned) == lock:
                     reviewed.append(name)
         require(len(reviewed) == 1,
-                "Six-target source bundle must match an explicitly reviewed P16 lock or reviewed P17 lock or reviewed P18 lock or reviewed P19 lock or reviewed P20 lock or reviewed P21 lock")
+                "Six-target source bundle must match an explicitly reviewed P16 lock or reviewed P17 lock or reviewed P18 lock or reviewed P19 lock or reviewed P20 lock or reviewed P21 lock or reviewed P167 lock")
+    else:
+        require(revision == "O165"
+                and lock["upstream_commit"] == "720fec862a608ae1e5878d1eecb04fb93192e93c"
+                and lock["native_version"] == "0.165.0-alpha.1.2",
+                "Unsupported single-producer baseline")
     base_patches = [
         "windows-home-namespace-0165.patch", "mcp-keyring-isolation-0165.patch",
         "guardian-thread-context-0165.patch", "windows-cwd-ancestor-metadata-0165.patch"]
@@ -173,7 +179,7 @@ def single_graph(lock, native_dir):
                 "Single-producer native patch checksum differs")
     return {"method":"One exact source fingerprint, Cargo.lock, compiler/profile and locked native target invocation.",
             "Cargo_lock_sha256":lock["cargo_lock_sha256"],
-            "producer_sources_remain_separate":False, "producer_id":"O165"}
+            "producer_sources_remain_separate":False, "producer_id":revision}
 
 
 def single_sources(raw, lock, lock_digest, raw_digest, build):
@@ -212,22 +218,23 @@ def single_sources(raw, lock, lock_digest, raw_digest, build):
         target = Path(raw["target"])
         require(build.target_directory(cache, Path(raw["source"]), Path(raw["output"]), target) == target,
                 "Independent target differs from the standard builder path policy")
-    rows = [{"name":name, "size":row["size"], "sha256":row["sha256"], "producer_id":"O165"}
+    revision = lock["candidate_revision"]
+    rows = [{"name":name, "size":row["size"], "sha256":row["sha256"], "producer_id":revision}
             for name,row in sorted(outputs.items())]
     refs = {"schema_version":1, "kind":"single_source_native_producer",
             "original_raw_manifest_sha256":raw_digest,
-            "producer_id":"O165", "build_lock_sha256":lock_digest,
+            "producer_id":revision, "build_lock_sha256":lock_digest,
             "source_sha256":lock["prepared_source_sha256"], "source_files":lock["prepared_source_files"],
             "upstream_commit":lock["upstream_commit"], "archive_sha256":lock["archive_sha256"],
             "cargo_lock_sha256":lock["cargo_lock_sha256"], "target":lock["target"],
             "rust_version":lock["rust_version"], "release_environment":lock["release_environment"],
             "binaries":rows}
     index = {"schema_version":1, "kind":"single_source_native_index",
-             "source_sha256":lock["prepared_source_sha256"], "producer_id":"O165", "binary_producers":rows}
+             "source_sha256":lock["prepared_source_sha256"], "producer_id":revision, "binary_producers":rows}
     public = {"schema_version":1, "status":"built-not-app-qualified",
               "native_version":lock["native_version"], "upstream_commit":lock["upstream_commit"],
               "source_sha256":lock["prepared_source_sha256"], "build_lock_sha256":lock_digest,
-              "candidate_revision":"O165", "outputs":rows}
+              "candidate_revision":revision, "outputs":rows}
     if set(lock["binaries"]) == SOURCE_BINARIES:
         public.update(kind=SOURCE_BUNDLE_KIND, runtime_mode="legacy")
         refs["runtime_layout"] = "unpackaged native Legacy; no OS package identity asserted"
@@ -598,7 +605,8 @@ def validate_tree(root, *, build_lock=None):
     root = Path(root); inventory = {}
     manifest = load(root / "manifest.json")
     names = binary_names(manifest)
-    single = manifest.get("candidate_revision") == "O165"
+    revision = manifest.get("candidate_revision")
+    single = revision in ("O165", "O167")
     if build_lock is not None:
         # Honor the exact explicitly selected producer lock through staging and
         # archiving too; an unpromoted candidate must not borrow the active lock.
@@ -611,6 +619,7 @@ def validate_tree(root, *, build_lock=None):
     else:
         cohort_lock = "build-lock.json" if single else "build-lock.N.json"
         cohort = load(REPO / "native" / cohort_lock)
+    require(not single or cohort.get("candidate_revision") == revision, "Staged producer revision differs from the build lock")
     admitted_patches = {row["file"]: row["sha256"] for row in cohort["patches"]}
     for p in sorted(root.rglob("*")):
         require(not p.is_symlink() and not (hasattr(p, "is_junction") and p.is_junction()),
@@ -622,7 +631,7 @@ def validate_tree(root, *, build_lock=None):
                           "native-source-index.json",
                           "dependency-graph.json", "source.json", "Cargo.lock",
                           "distribution-inventory.json"}
-        metadata_names.update({"O165-original-build-lock.json"} if single else {
+        metadata_names.update({f"{revision}-original-build-lock.json"} if single else {
             "N-original-build-lock.json", "J17-original-build-lock.json", "M-original-baseline-lock.json"})
         provenance = name.startswith("provenance/") and name[len("provenance/"):] in metadata_names
         patch = name.startswith("provenance/patches/") and name[len("provenance/patches/"):] in admitted_patches
@@ -646,7 +655,7 @@ def validate_tree(root, *, build_lock=None):
     if build_lock is not None:
         require({"provenance/patches/" + name for name in admitted_patches} <= inventory.keys(),
                 "Staged native patch set is incomplete for the explicit build lock")
-        original = plain(root / "provenance/O165-original-build-lock.json")
+        original = plain(root / "provenance" / f"{revision}-original-build-lock.json")
         require(sha(original) == sha(selected),
                 "Staged original build lock differs from the explicit build lock")
     return inventory
@@ -705,7 +714,8 @@ def main():
     raw = load(raw_path); native = REPO / "native"
     lock_path = plain(args.build_lock)
     n_lock = load(lock_path)
-    single = n_lock.get("candidate_revision") == "O165"
+    revision = n_lock.get("candidate_revision")
+    single = revision in ("O165", "O167")
     spec = importlib.util.spec_from_file_location("cag_native_build", REPO / "scripts/build_native.py")
     build = importlib.util.module_from_spec(spec); spec.loader.exec_module(build)
     lock_digest = sha(lock_path)
@@ -791,7 +801,7 @@ def main():
         write(output / "provenance/producer-references.json", producers)
         write(output / "provenance/native-source-index.json", index)
         write(output / "provenance/original-raw-manifest.json", public_raw)
-        copy_bytes(lock_path, output / "provenance/O165-original-build-lock.json", lock_digest)
+        copy_bytes(lock_path, output / "provenance" / f"{revision}-original-build-lock.json", lock_digest)
     else:
         copy_bytes(references, output / "provenance/producer-references.json", args.producer_references_sha256)
         copy_bytes(raw_path, output / "provenance/original-raw-manifest.json", args.native_manifest_sha256)
@@ -808,7 +818,7 @@ def main():
         "native_archive_sha256":n_lock["archive_sha256"],
         "native_archive_url":"https://codeload.github.com/openai/codex/tar.gz/" + n_lock["upstream_commit"],
         "prepared_source_sha256":before["sha256"],
-        "producer_layout":"single_O165" if single else "mixed_N_J",
+        "producer_layout":f"single_{revision}" if single else "mixed_N_J",
         "historical_J_source_sha256":None if single else j_lock["prepared_source_sha256"],
         "original_raw_manifest_sha256":args.native_manifest_sha256,
         "packager_sha256":sha(__file__), "no_native_compile_or_execution":True,

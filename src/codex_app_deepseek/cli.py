@@ -240,6 +240,10 @@ def main(argv=None):
     command.add_argument("--multi-agent-version", choices=("v1", "v2"), default="v2", help=agent_version_help)
     command=sub.add_parser("restore-app");command.add_argument("manifest",type=Path)
     sub.add_parser("auth-token",help="Official command-backed App authentication; stdout contains only the local gateway token")
+    command = sub.add_parser("image-cache-format", help="Offline, keyless cache-format maintenance after normal App/gateway shutdown")
+    command.add_argument("--install-root", type=Path, required=True)
+    command.add_argument("--target-version", type=int, choices=(2, 3), required=True)
+    command.add_argument("--enroll-empty-legacy", action="store_true")
     for name in ("image-cache-status", "image-cache-cleanup", "image-cache-reconcile-uploads", "image-cache-reconcile-calls"):
         command = sub.add_parser(name)
         command.add_argument("--home", type=Path, default=default_home())
@@ -316,6 +320,15 @@ def main(argv=None):
                 print(json.dumps({"error": type(error).__name__, "detail": str(error) if known else
                                   "Installed App operation failed; inspect its owned local receipts"}), file=sys.stderr)
                 return 2
+        if args.command == "image-cache-format":
+            import asyncio
+            from .image_cache_format import maintain
+            result = asyncio.run(maintain(args.install_root, args.target_version,
+                                         enroll_empty_legacy=args.enroll_empty_legacy))
+            if not isinstance(result, dict) or type(result.get("complete")) is not bool:
+                raise ServiceConfigError("Cache-format maintenance returned no definite completion status")
+            print(json.dumps(result))
+            return 0 if result["complete"] else 3
         if args.command.startswith("image-cache-"):
             import asyncio
             result = asyncio.run(image_cache_operation(args.home, args.command,

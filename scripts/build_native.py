@@ -1,7 +1,7 @@
 """Build the pinned Windows native candidate in a private working directory.
 
-Run from an x64 MSVC Developer shell with Python 3.11+, Git and the specified
-Rust 1.99.1 toolchain installed. This script never installs or starts an App,
+Run from an x64 MSVC Developer shell with Python 3.11+, Git and the Rust
+toolchain from the build lock. This script never installs or starts an App,
 runtime, setup helper, service or scheduled task. --dry-run writes nothing.
 """
 from __future__ import annotations
@@ -427,7 +427,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--archive", type=Path, required=True, help="Fixed upstream source tar.gz")
     parser.add_argument("--work-dir", type=Path, required=True, help="New directory, or a matching owned build directory")
-    parser.add_argument("--toolchain-bin", type=Path, required=True, help="Installed Rust 1.99.1 bin directory")
+    parser.add_argument("--toolchain-bin", type=Path, required=True, help="Installed Rust bin directory matching the build lock")
     parser.add_argument("--output", type=Path, help="Empty candidate output directory; defaults to WORK/candidate")
     parser.add_argument("--cache-dir", type=Path, help="Explicit existing owned Cargo/target cache root; defaults to WORK")
     parser.add_argument("--target-dir", type=Path, help="Explicit existing owned CARGO_TARGET_DIR, separate from Cargo home")

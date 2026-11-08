@@ -36,7 +36,7 @@ def test_missing_path_is_allowed_but_unreadable_identity_does_not_fail_open(monk
 
 def actual_dir_redirect(link,target):
  if os.name=="nt":
-  q=subprocess.run([r"C:\Windows\System32\cmd.exe","/d","/c","mklink","/J",str(link),str(target)],capture_output=True,text=True)
+  q=subprocess.run([r"C:\Windows\System32\cmd.exe","/d","/c","mklink","/J",str(link),str(target)],capture_output=True)  # cmd emits the active OEM code page, not necessarily UTF-8
   assert q.returncode==0,q.stderr
   assert not link.is_symlink()  # A real junction is exactly the old fallback gap.
   assert os.lstat(link).st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT

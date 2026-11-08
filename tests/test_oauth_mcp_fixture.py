@@ -189,7 +189,8 @@ def test_deny_csrf_plain_pkce_state_and_exact_redirect(fixture):
               "Invalid authorization binding was accepted")
         check("/fixture/" not in response.headers.get("location",""),"Invalid authorization reached consent")
 
-def test_pkce_client_redirect_resource_single_use_and_real_mcp(fixture):
+@pytest.mark.asyncio
+async def test_pkce_client_redirect_resource_single_use_and_real_mcp(fixture):
     info,redirect=register(fixture)
     other,_=register(fixture)
     code,verifier=grant(fixture,info,redirect)
@@ -204,14 +205,15 @@ def test_pkce_client_redirect_resource_single_use_and_real_mcp(fixture):
     check(successful.status_code==200,"Valid PKCE grant failed")
     token=successful.json()
     check(exchange(fixture,info,redirect,code,verifier).status_code==400,"Authorization code was replayed")
-    asyncio.run(call_mcp(fixture[0]["mcp_url"],token["access_token"]))
+    await call_mcp(fixture[0]["mcp_url"],token["access_token"])
     safe=fixture[1].get(fixture[0]["events_url"]).text
     check(all(value not in safe for value in [code,verifier,token["access_token"],token["refresh_token"]]),
           "Safe diagnostics exposed OAuth material")
     events=json.loads(safe)["events"]
     check(all(set(event)=={"event","at","nonce_sha256"} for event in events),"Unexpected diagnostic fields")
 
-def test_expiry_refresh_rotation_revocation_and_unknown_token(fixture):
+@pytest.mark.asyncio
+async def test_expiry_refresh_rotation_revocation_and_unknown_token(fixture):
     info,redirect=register(fixture)
     code,verifier=grant(fixture,info,redirect)
     result=exchange(fixture,info,redirect,code,verifier)
@@ -228,7 +230,7 @@ def test_expiry_refresh_rotation_revocation_and_unknown_token(fixture):
     check(second["access_token"]!=first["access_token"] and second["refresh_token"]!=first["refresh_token"],
           "Refresh did not rotate both tokens")
     check(refresh(fixture,info,first["refresh_token"]).status_code==400,"Rotated refresh token was replayed")
-    asyncio.run(call_mcp(fixture[0]["mcp_url"],second["access_token"]))
+    await call_mcp(fixture[0]["mcp_url"],second["access_token"])
     revoked=fixture[1].post(fixture[0]["base"]+"/revoke",data={"token":second["refresh_token"],
         "token_type_hint":"refresh_token","client_id":info["client_id"],"client_secret":""})
     check(revoked.status_code==200,"Standard revocation failed")
@@ -239,7 +241,8 @@ def test_expiry_refresh_rotation_revocation_and_unknown_token(fixture):
         "client_id":info["client_id"],"client_secret":""})
     check(unknown.status_code==200,"Unknown token revocation was not idempotent")
 
-def test_real_loopback_callback_and_no_implicit_redirect(fixture):
+@pytest.mark.asyncio
+async def test_real_loopback_callback_and_no_implicit_redirect(fixture):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     import threading
     received = []
@@ -263,7 +266,7 @@ def test_real_loopback_callback_and_no_implicit_redirect(fixture):
         check(received[0].get("state")==[state],"State did not arrive unchanged")
         token=exchange(fixture,info,redirect,received[0]["code"][0],verifier)
         check(token.status_code==200,"Code from real callback failed exchange")
-        asyncio.run(call_mcp(fixture[0]["mcp_url"],token.json()["access_token"]))
+        await call_mcp(fixture[0]["mcp_url"],token.json()["access_token"])
     finally:
         callback.shutdown();callback.server_close();thread.join(timeout=3)
         check(not thread.is_alive(),"Owned callback server did not stop")
@@ -304,7 +307,8 @@ def test_expired_access_revocation_removes_paired_refresh(fixture):
           "Revoking known expired access did not revoke its paired refresh")
 
 
-def test_provider_expired_code_and_refresh_and_nonce_independence():
+@pytest.mark.asyncio
+async def test_provider_expired_code_and_refresh_and_nonce_independence():
     spec=importlib.util.spec_from_file_location("oauth_fixture_unit",SERVER)
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
     from mcp.server.auth.provider import AuthorizationCode, TokenError
@@ -328,10 +332,11 @@ def test_provider_expired_code_and_refresh_and_nonce_independence():
         record.expires_at=int(time.time())-1
         with pytest.raises(TokenError):
             await first.exchange_refresh_token(client,record,["fixture:read"])
-    asyncio.run(scenario())
+    await scenario()
 
 @pytest.mark.parametrize("method", ["client_secret_post", "client_secret_basic"])
-def test_sdk_confidential_client_authentication(fixture, method):
+@pytest.mark.asyncio
+async def test_sdk_confidential_client_authentication(fixture, method):
     descriptor, client = fixture
     redirect = "http://127.0.0.1:43219/callback"
     registration=client.post(descriptor["base"]+"/register",json={
@@ -351,11 +356,12 @@ def test_sdk_confidential_client_authentication(fixture, method):
     check(wrong.status_code==401,"Incorrect client secret was accepted")
     check(correct.status_code==200,"Valid standard client authentication failed")
     token=correct.json()
-    asyncio.run(call_mcp(descriptor["mcp_url"],token["access_token"]))
+    await call_mcp(descriptor["mcp_url"],token["access_token"])
     safe=client.get(descriptor["events_url"]).text
     check(info["client_secret"] not in safe,"Diagnostics exposed client secret")
 
-def test_concurrent_consent_consumes_ticket_once_with_explicit_error():
+@pytest.mark.asyncio
+async def test_concurrent_consent_consumes_ticket_once_with_explicit_error():
     spec=importlib.util.spec_from_file_location("oauth_fixture_race",SERVER)
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
     from mcp.shared.auth import OAuthClientInformationFull
@@ -388,11 +394,12 @@ def test_concurrent_consent_consumes_ticket_once_with_explicit_error():
         check(sorted(r.status_code for r in results)==[302,400],"Concurrent consent did not fail explicitly")
         check(len(provider.codes)==1 and not provider.pending,"Consent ticket produced duplicate grants")
         check(any(e["event"]=="consent_replay_rejected" for e in provider.events),"Replay evidence missing")
-    asyncio.run(scenario())
+    await scenario()
 
 
 
-def test_owned_receipts_control_only_synthetic_fixture(tmp_path):
+@pytest.mark.asyncio
+async def test_owned_receipts_control_only_synthetic_fixture(tmp_path):
     receipt_dir = tmp_path / "owned-oauth"
     receipt_dir.mkdir()
     process = subprocess.Popen([sys.executable, "-I", "-X", "utf8", str(SERVER),
@@ -420,7 +427,7 @@ def test_owned_receipts_control_only_synthetic_fixture(tmp_path):
             info, redirect = register(fixture)
             code, verifier = grant(fixture, info, redirect)
             token = exchange(fixture, info, redirect, code, verifier).json()
-            asyncio.run(call_mcp(descriptor["mcp_url"], token["access_token"]))
+            await call_mcp(descriptor["mcp_url"], token["access_token"])
             check(any(x["event"] == "tool_called" for x in client.get(descriptor["events_url"]).json()["events"]),
                   "Actual MCP call did not reach the fixture tool")
             (receipt_dir / "revoke.request").touch()
@@ -497,7 +504,8 @@ def test_real_browser_form_origin_policy_and_fixed_reject_diagnostics(fixture):
           'Fixed diagnostic classification missing')
 
 
-def test_consent_window_does_not_extend_code_or_token_boundaries():
+@pytest.mark.asyncio
+async def test_consent_window_does_not_extend_code_or_token_boundaries():
     spec = importlib.util.spec_from_file_location('oauth_fixture_consent_window', SERVER)
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     from mcp.shared.auth import OAuthClientInformationFull
@@ -535,7 +543,7 @@ def test_consent_window_does_not_extend_code_or_token_boundaries():
         result = await provider.consent(ExpiredRequest())
         check(result.status_code==400 and expired not in provider.pending, 'Expired consent survived')
         check(provider.events[-1]['event']=='consent_unknown_or_expired', 'Expired consent was not diagnosed safely')
-    asyncio.run(scenario())
+    await scenario()
 
 
 def test_consent_csp_allows_only_its_registered_exact_callback_origin(fixture):

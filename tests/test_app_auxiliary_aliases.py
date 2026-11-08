@@ -18,10 +18,10 @@ def test_fixed_desktop_aliases_use_actual_deepseek_runtime_metadata_without_wild
     before = deepcopy(source)
     result = catalog.build_catalog(source, native_version=catalog.NATIVE_VERSION)["models"]
     assert [item["slug"] for item in result] == [
-        catalog.PINNED_MODEL, "gpt-5.6-luna", "gpt-6-luna", "gpt-6.1-sol"]
+        catalog.PINNED_MODEL, "gpt-5.6-luna", "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra"]
     assert source == before
     by_id = {item["slug"]: item for item in result}
-    for alias in ("gpt-6-luna", "gpt-6.1-sol"):
+    for alias in ("gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra"):
         model = by_id[alias]
         assert model["visibility"] == "hide" and model["supported_in_api"] is True
         assert "not an OpenAI model" in model["description"]
@@ -50,6 +50,26 @@ def test_old_two_model_policy_is_refused_and_never_silently_rewritten(tmp_path):
     assert path.read_bytes() == raw
 
 
+def test_previous_full_policy_requires_explicit_terra_alias(tmp_path):
+    policy = gp.default_app_policy()
+    policy["policy_origin"] = gp.LEGACY_POLICY_ORIGIN_E83
+    policy["accepted_models"].remove("gpt-6.1-terra")
+    path = tmp_path / "gateway.json"
+    old = json.dumps(policy, indent=2).encode()
+    path.write_bytes(old)
+    assert gp.load_service_config(tmp_path).policy_origin == gp.LEGACY_POLICY_ORIGIN_E83
+    with pytest.raises(gp.ServiceConfigError, match="gpt-6.1-terra"):
+        gp.ensure_app_policy(tmp_path)
+    assert path.read_bytes() == old
+
+    policy["accepted_models"].append("gpt-6.1-terra")
+    edited = json.dumps(policy, indent=2).encode()
+    path.write_bytes(edited)
+    _, receipt = gp.ensure_app_policy(tmp_path)
+    assert receipt["status"] == "existing_policy_preserved"
+    assert path.read_bytes() == edited
+
+
 def test_new_explicit_policy_and_catalog_must_have_the_same_exact_ids(tmp_path):
     home = tmp_path / "home"; home.mkdir()
     raw = (json.dumps(gp.default_app_policy()) + "\n").encode()
@@ -65,7 +85,7 @@ def test_new_explicit_policy_and_catalog_must_have_the_same_exact_ids(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("alias", ["gpt-6-luna", "gpt-6.1-sol"])
+@pytest.mark.parametrize("alias", ["gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra"])
 async def test_helper_structured_request_maps_only_explicit_alias_to_fixed_deepseek(tmp_path, alias):
     requests = []
     async def handler(request):

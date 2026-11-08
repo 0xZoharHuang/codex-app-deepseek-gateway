@@ -14,6 +14,35 @@ from codex_app_deepseek import cli
 from codex_deepseek.protocol import MODEL, PROVIDER, SERIAL_PROVIDER, STRUCTURED_PROVIDER
 
 
+@pytest.fixture(autouse=True)
+def isolated_cli_loop_policy():
+    """Model a fresh CLI process without clearing pytest's restored old loop.
+
+    These are synchronous CLI entrypoint tests. asyncio.run correctly clears its
+    process/thread policy loop on exit; it must not discard pytest-asyncio's
+    separate restored loop in this in-process unit harness.
+    """
+    previous = asyncio.get_event_loop_policy()
+    created = []
+    class CLIPolicy(asyncio.DefaultEventLoopPolicy):
+        def new_event_loop(self):
+            loop = super().new_event_loop()
+            created.append(loop)
+            return loop
+    asyncio.set_event_loop_policy(CLIPolicy())
+    try:
+        yield
+    finally:
+        pending = [loop for loop in created if not loop.is_closed()]
+        try:
+            assert not pending, "A CLI-created loop was not closed by the tested operation"
+        finally:
+            for loop in pending:
+                assert not loop.is_running()
+                loop.close()
+            asyncio.set_event_loop_policy(previous)
+
+
 def write_config(home, config):
     home.mkdir(parents=True, exist_ok=True)
     (home / "gateway.json").write_text(json.dumps(config), encoding="utf-8")
@@ -236,10 +265,17 @@ def protected_homes(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("selection", ["app", "cds", "app-child", "cds-child", "app-parent", "cds-parent"])
-def test_protected_home_overlap_rejected_before_config_read(protected_homes, no_service_side_effects, monkeypatch, selection):
+@pytest.mark.parametrize("extended", [
+    False, pytest.param(True, marks=pytest.mark.skipif(os.name != "nt", reason="Win32 extended path")),
+])
+def test_protected_home_overlap_rejected_before_config_read(
+    protected_homes, no_service_side_effects, monkeypatch, selection, extended,
+):
     user, local, app, cds = protected_homes
     candidate = {"app": app, "cds": cds, "app-child": app / "gateway", "cds-child": cds / "gateway",
                  "app-parent": user, "cds-parent": local}[selection]
+    if extended:
+        candidate = Path("\\\\?\\" + str(candidate))
     monkeypatch.setattr(Path, "read_text", lambda *args, **kwargs: pytest.fail("Must reject protected home before reading any files"))
     with pytest.raises(cli.ServiceConfigError, match="overlap"):
         cli.serve(candidate, 42817)
@@ -516,3 +552,30 @@ def test_managed_agent_selection_keeps_supplied_trusted_sha(tmp_path, monkeypatc
     assert cli.main(["app-configure", "--catalog", str(path), "--catalog-sha256", "0" * 64,
                      "--multi-agent-version", "v1"]) == 2
     assert "SHA256 mismatch" in capsys.readouterr().err
+
+
+def test_gateway_upgrade_accepts_original_0610_policy_without_rewriting(tmp_path):
+    from codex_app_deepseek import gateway_policy
+    home = tmp_path / "prior-installation-data"
+    payload = gateway_policy.default_app_policy()
+    payload["policy_origin"].update(
+        policy_id="codex-app-680c4-full-runtime-v1",
+        native_version="0.165.0-alpha.1.2",
+        protocol_commit="6d6ccd32c92d06fc52ecd72712140f24496c30a2",
+    )
+    payload["accepted_models"].remove("gpt-6.1-terra")
+    write_config(home, payload)
+    path = home / "gateway.json"
+    raw = path.read_bytes()
+    assert gateway_policy.load_service_config(home).policy_origin == payload["policy_origin"]
+    with pytest.raises(gateway_policy.ServiceConfigError, match="gpt-6.1-terra"):
+        gateway_policy.ensure_app_policy(home)
+    assert path.read_bytes() == raw
+
+    payload["accepted_models"].append("gpt-6.1-terra")
+    write_config(home, payload)
+    edited = path.read_bytes()
+    config, outcome = gateway_policy.ensure_app_policy(home)
+    assert config.policy_origin == payload["policy_origin"]
+    assert outcome["status"] == "existing_policy_preserved"
+    assert path.read_bytes() == edited

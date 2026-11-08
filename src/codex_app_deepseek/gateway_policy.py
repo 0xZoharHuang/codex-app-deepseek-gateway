@@ -9,6 +9,7 @@ import re
 import tempfile
 from urllib.parse import urlsplit
 from .catalog import NATIVE_VERSION, PINNED_MODEL, REQUEST_MODEL_IDS
+from .paths import paths_overlap
 MODEL = PINNED_MODEL
 PROVIDER, STRUCTURED_PROVIDER, SERIAL_PROVIDER = "deepseek", "morph/fp8", "primeintellect"
 
@@ -70,8 +71,7 @@ def resolve_service_home(home: Path) -> Path:
                      (local / "codex-app-deepseek-app").resolve()]
         if resolved.exists() and not resolved.is_dir():
             raise ServiceConfigError("Gateway home must be a directory")
-        if any(resolved == path or resolved.is_relative_to(path) or path.is_relative_to(resolved)
-               for path in protected):
+        if any(paths_overlap(resolved, path) for path in protected):
             raise ServiceConfigError("Gateway home must not overlap the current user's App or CDS home")
         return resolved
     except ServiceConfigError:
@@ -162,7 +162,7 @@ def load_service_config(home: Path) -> ServiceConfig:
         except (TypeError, ValueError):
             raise ServiceConfigError("image_transport has missing or invalid policy fields") from None
     origin = config.get("policy_origin")
-    if origin is not None and origin not in (DEFAULT_POLICY_ORIGIN, LEGACY_POLICY_ORIGIN_069, LEGACY_POLICY_ORIGIN_068_PUBLISHED, LEGACY_POLICY_ORIGIN_068, LEGACY_POLICY_ORIGIN_067):
+    if origin is not None and origin not in (DEFAULT_POLICY_ORIGIN, LEGACY_POLICY_ORIGIN_E83, LEGACY_POLICY_ORIGIN_0610, LEGACY_POLICY_ORIGIN_069, LEGACY_POLICY_ORIGIN_068_PUBLISHED, LEGACY_POLICY_ORIGIN_068, LEGACY_POLICY_ORIGIN_067):
         raise ServiceConfigError("gateway.json has an unrecognized policy_origin")
     return ServiceConfig(models, providers, proxy, **metadata,
                          image_search_backend=image_search, web_search_backend=web_search,
@@ -178,9 +178,9 @@ def load_service_config(home: Path) -> ServiceConfig:
 # It is metadata, not a second routing implementation.
 DEFAULT_PROVIDERS = ("deepseek", "morph/fp8", "primeintellect")
 DEFAULT_POLICY_ORIGIN = {
-    "policy_id": "codex-app-680c4-full-runtime-v1",
+    "policy_id": "codex-app-c40729e-full-runtime-v1",
     "native_version": NATIVE_VERSION,
-    "protocol_commit": "6d6ccd32c92d06fc52ecd72712140f24496c30a2",
+    "protocol_commit": "e83b4b3fa79714fa77b66ba4e96ae10abb9d6aad",
     "provider_reasons": {
         "deepseek": "official_default",
         "morph/fp8": "strict_json_schema_or_native_peer_history_with_hosted_tools",
@@ -188,20 +188,32 @@ DEFAULT_POLICY_ORIGIN = {
     },
 }
 
+# An upgrade retains previously initialized policy bytes and still checks the
+# complete explicit model allowlist before binding the new App.
+LEGACY_POLICY_ORIGIN_E83 = {
+    **DEFAULT_POLICY_ORIGIN,
+    "policy_id": "codex-app-680c4-full-runtime-v1",
+    "native_version": "0.165.0-alpha.1.2",
+}
+
+LEGACY_POLICY_ORIGIN_0610 = {
+    **LEGACY_POLICY_ORIGIN_E83, "protocol_commit": "6d6ccd32c92d06fc52ecd72712140f24496c30a2",
+}
+
 # Exact previous 0.6.9 policy bytes remain valid; existing configuration is not rewritten.
 LEGACY_POLICY_ORIGIN_069 = {
-    **DEFAULT_POLICY_ORIGIN, "protocol_commit": "a70417460d823a906ebc7274834e2412be1ebe53",
+    **LEGACY_POLICY_ORIGIN_E83, "protocol_commit": "a70417460d823a906ebc7274834e2412be1ebe53",
 }
 
 # Exact published 0.6.8 initialization remains valid with its original bytes.
 LEGACY_POLICY_ORIGIN_068_PUBLISHED = {
-    **DEFAULT_POLICY_ORIGIN, "protocol_commit": "1684b7f136b59b04ca7a1895d0754f30f88f5a45",
+    **LEGACY_POLICY_ORIGIN_E83, "protocol_commit": "1684b7f136b59b04ca7a1895d0754f30f88f5a45",
 }
 
 # Exact previous initialization metadata remains valid; no existing file is rewritten.
 LEGACY_POLICY_ORIGIN_068 = {
     "policy_id": "codex-app-680c4-full-runtime-v1",
-    "native_version": NATIVE_VERSION,
+    "native_version": "0.165.0-alpha.1.2",
     "protocol_commit": "4d99981baaa493b0c4e7b1febbdb167e6c44de91",
     "provider_reasons": {
         "deepseek": "official_default",

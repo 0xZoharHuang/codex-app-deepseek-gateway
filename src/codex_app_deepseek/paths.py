@@ -1,6 +1,36 @@
-"""Standard-library path redirect checks across supported Python versions."""
+"""Standard-library path identity and redirect checks."""
 import os
+from pathlib import Path
 import stat
+
+
+def canonical_path(path):
+    """Normalize Win32 extended spelling after resolving the actual filesystem path."""
+    resolved = Path(path).resolve()
+    text = str(resolved)
+    if os.name == "nt":
+        if text.startswith("\\\\?\\UNC\\"):
+            text = "\\\\" + text[8:]
+        elif (text.startswith("\\\\?\\") and len(text) >= 7
+              and "A" <= text[4].upper() <= "Z" and text[5:7] == ":\\"):
+            text = text[4:]
+    return Path(text)
+
+
+def paths_overlap(first, second):
+    """Check resolved containment and accessible Windows filesystem aliases."""
+    first, second = canonical_path(first), canonical_path(second)
+    if first.is_relative_to(second) or second.is_relative_to(first):
+        return True
+    if os.name == "nt":
+        for path, target in ((first, second), (second, first)):
+            for ancestor in (path, *path.parents):
+                try:
+                    if ancestor.samefile(target):
+                        return True
+                except OSError:
+                    continue
+    return False
 
 
 def _is_link_or_reparse(path):
@@ -31,6 +61,5 @@ def _sqlite_filename(path, *, read_only=False):
             from urllib.parse import quote
             return "file:" + quote(value, safe="") + "?mode=ro"
     elif read_only:
-        from pathlib import Path
         return Path(value).absolute().as_uri() + "?mode=ro"
     return value

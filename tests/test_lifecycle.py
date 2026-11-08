@@ -93,6 +93,17 @@ def activate(bundle):
     return result, runner
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Win32 extended path")
+def test_extended_persistent_data_path_cannot_be_inside_install_root(bundle):
+    data = Path("\\\\?\\" + str(bundle.install / "persistent"))
+    runner = FakeRunner()
+    with pytest.raises(lc.LifecycleError, match="must not contain"):
+        lc.install(bundle.manifest, lc.digest(bundle.manifest), bundle.wheels, bundle.python,
+                   bundle.install, data, run=runner)
+    assert runner.calls == []
+    assert not bundle.install.exists()
+
+
 def test_complete_manifest_hash_checks_happen_before_any_execution(bundle):
     bundle.wheel.write_bytes(b"tampered")
     runner=FakeRunner()
@@ -907,6 +918,7 @@ def test_nonisolated_or_false_launcher_proof_is_rejected(bundle, mutation):
 @pytest.mark.parametrize("native_sha,expected_version", [
     ("e757246b4de87359e660647fa9514955a0971ff6a30affdd8c145d1d5ece7b84", "0.163.0-alpha.11.1"),
     ("0c09e45bc76433756eb2d492f6db0ce6f269967e6618f4a6ae73e2fa239694b8", "0.165.0-alpha.1.2"),
+    ("4b3286e35d7fe866c6b0eb3f07d7a4cdb5e96489576170dfd6b3a15aa1c67382", "0.167.0-alpha.3.2"),
     ("0c09e45bc76433756eb2d492f6db0ce6f269967e6618f4a6ae73e2fa239694b9", None),
 ])
 def test_fixed_official_hash_mapping_never_infers_version_from_app_label(tmp_path, monkeypatch, native_sha, expected_version):

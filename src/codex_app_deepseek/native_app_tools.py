@@ -15,8 +15,8 @@ import tomlkit
 from . import app_config as ac
 from .paths import _is_link_or_reparse
 
-INVENTORY_NAME = "app-bundled-resources-26.1023.6621.0.json"
-INVENTORY_SHA256 = "505c30885686a194c82b6c9875673244a023da4ed61d15841b4bad6bf81e22c2"
+INVENTORY_NAME = "app-bundled-resources-26.1103.4239.0.json"
+INVENTORY_SHA256 = "b93fbbca15c1c5aafe8e1b3822c37b96f62296ce0d5a5b974d3fb89b463b7b10"
 MARKETPLACE = "openai-bundled"
 PLUGIN = "codex-app-tools"
 PLUGIN_ID = PLUGIN + "@" + MARKETPLACE

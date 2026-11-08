@@ -689,3 +689,25 @@ def test_p21_source_graph_admits_only_exact_git_overlay_lock(tmp_path, problem):
             pack.single_graph(lock, native)
     else:
         assert pack.single_graph(lock, native)["producer_id"] == "O165"
+
+
+def test_new_revision_requires_an_explicitly_reviewed_source_lock():
+    native = ROOT / "native"
+    old = pack.load(native / "build-lock.O165-P21-source.json")
+    unreviewed = dict(old, candidate_revision="O167", native_version="0.167.0-alpha.3.2",
+                      upstream_commit="c40729ea5cf8e947481b130c59807273eda2f8e9")
+    with pytest.raises(ValueError, match="explicitly reviewed"):
+        pack.single_graph(unreviewed, native)
+
+
+def test_reviewed_p167_source_lock_matches_current_signed_app_baseline():
+    native = ROOT / "native"
+    path = native / "build-lock.O167-P167-source.json"
+    lock = pack.load(path)
+    baseline = pack.load(native / "app-launch-baseline.json")
+    assert pack.sha(path) == pack.P167_LOCK_SHA256
+    assert lock["native_version"] == baseline["native_version"]
+    assert lock["upstream_commit"] == baseline["native_upstream_commit"]
+    assert lock["rust_version"] == "1.95.0"
+    assert set(lock["binaries"]) == pack.SOURCE_BINARIES
+    assert pack.single_graph(lock, native)["producer_id"] == "O167"

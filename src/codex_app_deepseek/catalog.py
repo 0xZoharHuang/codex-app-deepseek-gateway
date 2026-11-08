@@ -8,20 +8,18 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Mapping, Sequence
 
-NATIVE_VERSION = "0.165.0-alpha.1.2"
-NATIVE_COMMIT = "720fec862a608ae1e5878d1eecb04fb93192e93c"
+NATIVE_VERSION = "0.167.0-alpha.3.2"
+NATIVE_COMMIT = "c40729ea5cf8e947481b130c59807273eda2f8e9"
 PINNED_MODEL = "deepseek/deepseek-v4.1-flash-1017"
 TEMPLATE_MODEL = "gpt-6.1-sol"
 CONTEXT_WINDOW = 1_048_576
 AUTO_COMPACT_TOKEN_LIMIT = 650_000
-# Native Guardian V2 async_scorer/sampler.rs MODEL at NATIVE_COMMIT.
+# Guardian V2 samples with gpt-5.6-luna. Its decision model also uses the
+# gpt-6-luna alias shared with the App's generation and ambient defaults.
 NATIVE_AUXILIARY_ALIASES = ("gpt-5.6-luna",)
-# Official App 26.1023.6621.0 ASAR src-D0VLwrLy.js codex-app-model-routing
-# defaults: metadata/ambient helpers use gpt-6-luna; local automation and
-# visualization defaults use gpt-6.1-sol. Normal helper forks do not implement
-# startThread's provider-model fallback. These exact aliases all infer with
-# PINNED_MODEL; no wildcard OpenAI alias or alternate backend is admitted.
-APP_AUXILIARY_ALIASES = ("gpt-6-luna", "gpt-6.1-sol")
+# Signed App 26.1103.4239.0, early-bootstrap-339 module 80096. Automation
+# defaults to Sol and ephemeral visualization defaults to Terra.
+APP_AUXILIARY_ALIASES = ("gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra")
 REQUIRED_AUXILIARY_ALIASES = (*NATIVE_AUXILIARY_ALIASES, *APP_AUXILIARY_ALIASES)
 REQUEST_MODEL_IDS = (PINNED_MODEL, *REQUIRED_AUXILIARY_ALIASES)
 

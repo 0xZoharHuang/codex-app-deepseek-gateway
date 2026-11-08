@@ -277,12 +277,16 @@ def test_custom_gateway_with_unrelated_checkpoint_is_still_gateway_only(bundle, 
 @pytest.mark.parametrize("name", ["codex-windows-sandbox-setup.exe",
                                   "codex-windows-sandbox-setup-0.163.0-alpha.11.1.exe",
                                   "codex-code-mode-host.exe"])
-def test_native_setup_and_support_helpers_are_not_mistaken_for_drained(tmp_path, monkeypatch, name):
+@pytest.mark.parametrize("extended", [
+    False, pytest.param(True, marks=pytest.mark.skipif(os.name != "nt", reason="Win32 extended path")),
+])
+def test_native_setup_and_support_helpers_are_not_mistaken_for_drained(tmp_path, monkeypatch, name, extended):
     import psutil
     backend=Backend();backend.identity=lambda pid: {"exe":str(tmp_path/name),"sid":backend.current()["sid"]}
     monkeypatch.setattr(nc,"_account_sid",lambda *args:None)
     monkeypatch.setattr(nc,"_process_owners",lambda b:[{"pid":123,"name":name,"sid":b.current()["sid"]}])
-    monkeypatch.setattr(psutil,"Process",lambda pid:SimpleNamespace(pid=pid,environ=lambda:{"CODEX_HOME":str(tmp_path)}))
+    home = "\\\\?\\" + str(tmp_path) if extended else str(tmp_path)
+    monkeypatch.setattr(psutil,"Process",lambda pid:SimpleNamespace(pid=pid,environ=lambda:{"CODEX_HOME":home}))
     with pytest.raises(lc.LifecycleError,match="backend/helper"):
         nc._drained(tmp_path,tmp_path/"codex.exe",namespace(tmp_path),backend)
 

@@ -67,7 +67,7 @@ class CatalogTests(unittest.TestCase):
         result = build_catalog(bundled(), native_version=NATIVE_VERSION)["models"]
         self.assertEqual([model["slug"] for model in result if model["visibility"] == "list"], [PINNED_MODEL])
         self.assertEqual([model["slug"] for model in result if model["visibility"] == "hide"],
-                         ["gpt-5.6-luna", "gpt-6-luna", "gpt-6.1-sol"])
+                         ["gpt-5.6-luna", "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra"])
         self.assertEqual(result[0]["visibility"], "list")
         self.assertEqual(result[0]["service_tiers"], [])
         self.assertNotIn("comp_hash", result[0])
@@ -84,7 +84,7 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(result[1]["auto_review_model_override"], PINNED_MODEL)
 
     def test_rejects_unsupported_binary_and_duplicate_source(self):
-        for older in ("0.164.0", "0.163.0-alpha.11.1"):
+        for older in ("0.165.0-alpha.1.2", "0.164.0", "0.163.0-alpha.11.1"):
             with self.assertRaises(CatalogCompatibilityError):
                 build_catalog(bundled(), native_version=older)
         source = bundled()

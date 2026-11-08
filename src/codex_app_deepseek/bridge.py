@@ -26,7 +26,10 @@ from codex_deepseek.structured import StructuredOutput
 from codex_deepseek.request_metadata import native_request_metadata
 
 from .protocol_state import ProtocolState, incoming_native_history_metadata
-from .image_transport import ImageTransportError, PayloadBudgetExceeded, FileOperationError
+from .image_transport import (
+    FileOperationError, ImageTransportError, MAX_REFERENCED_FILE_BYTES,
+    PayloadBudgetExceeded, _safe_budget_diagnostics,
+)
 from .image_maintenance import ImageMaintenance
 
 OPENROUTER_RESPONSES = "https://openrouter.ai/api/v1/responses"
@@ -302,7 +305,9 @@ def _public_image_receipt(value):
         raise ProtocolError('Image transport receipt must be an object')
     result = {}
     integer_fields = {'before_bytes','after_bytes','image_occurrences','uploads','reused',
-                      'converted_image_occurrences','remaining_inline_images','existing_file_references'}
+                      'converted_image_occurrences', 'remaining_inline_images',
+                      'existing_file_references', 'referenced_file_bytes',
+                      'max_referenced_file_bytes', 'owned_existing_file_references'}
     for name in integer_fields:
         if name in value:
             if type(value[name]) is not int or value[name] < 0:
@@ -313,6 +318,18 @@ def _public_image_receipt(value):
     if scope is not None and (not isinstance(scope,str) or len(scope)!=64 or any(c not in '0123456789abcdef' for c in scope)):
         raise ProtocolError('Image transport receipt has an invalid credential scope')
     result['credential_scope'] = scope
+    managed = value.get('consumption_managed')
+    converted = result.get('converted_image_occurrences')
+    owned = result.get('owned_existing_file_references')
+    existing = result.get('existing_file_references')
+    file_bytes = result.get('referenced_file_bytes')
+    if (type(managed) is not bool or None in (converted, owned, existing, file_bytes)
+            or owned > existing or managed != bool(converted or owned)
+            or (managed and scope is None)
+            or result.get('max_referenced_file_bytes') != MAX_REFERENCED_FILE_BYTES
+            or file_bytes > MAX_REFERENCED_FILE_BYTES):
+        raise ProtocolError('Image transport receipt has inconsistent private-file consumption metadata')
+    result['consumption_managed'] = managed
     for name in ('native_history_modified','raw_images_persisted'):
         if value.get(name) is not False:
             raise ProtocolError('Image transport did not preserve the native history/storage boundary')
@@ -604,6 +621,7 @@ def create_app(
         key = None
         image_stack = AsyncExitStack()
         image_prepared = None
+        preparation = None
         image_refs = False
         image_started = False
         image_terminal = False
@@ -677,7 +695,7 @@ def create_app(
                 transport = image_transport_factory(request.app[session_key], credential_provider)
                 image_prepared = await image_stack.enter_async_context(transport.prepare(payload, credential=key))
                 preparation = _public_image_receipt(image_prepared.receipt(private=False))
-                image_refs = preparation.get('converted_image_occurrences', 0) > 0
+                image_refs = preparation['consumption_managed']
                 state.image_transport(receipt, preparation=preparation,
                                       consumption_status='prepared' if image_refs else 'not_applicable')
                 request_bytes = image_prepared.body
@@ -789,7 +807,7 @@ def create_app(
                 state.delivery(receipt, "delivered")
                 return response
         except asyncio.CancelledError:
-            if image_transport_factory is not None and not image_terminal:
+            if image_transport_factory is not None and not image_terminal and (preparation is None or image_refs):
                 state.image_transport(receipt, consumption_status='unknown' if image_started else 'not_sent')
             state.finish(receipt, "cancelled", upstream_status, events)
             state.delivery(receipt, "disconnected")
@@ -797,8 +815,12 @@ def create_app(
         except Exception as exc:
             # Provider shape errors and credential callbacks must also close the receipt.
             # Cancellation is handled separately and is never converted into success.
-            if image_transport_factory is not None and not image_terminal:
+            if image_transport_factory is not None and not image_terminal and (preparation is None or image_refs):
                 state.image_transport(receipt, consumption_status='unknown' if image_started else 'not_sent')
+            if isinstance(exc, ImageTransportError) and not image_started:
+                budget = _safe_budget_diagnostics(getattr(exc, 'diagnostics', None))
+                if budget is not None:
+                    state.image_transport(receipt, budget_failure=budget)
             detail = str(exc)
             secrets = [settings.token]
             if isinstance(key, str) and key:

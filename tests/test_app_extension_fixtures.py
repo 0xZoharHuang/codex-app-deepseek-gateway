@@ -1,5 +1,4 @@
 from __future__ import annotations
-import asyncio
 import hashlib
 import json
 from pathlib import Path
@@ -16,7 +15,8 @@ def snapshot():
     return {str(p.relative_to(BUNDLE)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in BUNDLE.rglob("*") if p.is_file() and "__pycache__" not in p.parts}
 
-def test_real_stdio_sdk_discovery_calls_resources_and_boundaries():
+@pytest.mark.asyncio
+async def test_real_stdio_sdk_discovery_calls_resources_and_boundaries():
     before = snapshot()
     async def scenario():
         parameters = StdioServerParameters(command=sys.executable,
@@ -63,7 +63,7 @@ def test_real_stdio_sdk_discovery_calls_resources_and_boundaries():
                 assert missing.value.code == -32602
                 healthy = await session.read_resource("cdag-acceptance://baseline")
                 assert json.loads(healthy.contents[0].text)["fixture_record"] is True
-    asyncio.run(scenario())
+    await scenario()
     assert snapshot() == before, "The read-only MCP fixture must not rewrite its data"
 
 

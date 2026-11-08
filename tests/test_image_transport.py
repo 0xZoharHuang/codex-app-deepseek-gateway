@@ -8,6 +8,19 @@ from codex_app_deepseek.image_transport import (
     FileOperationError,FileMetadata,encode_body,image_plan,OpenRouterFilesBackend)
 
 
+def source_child(script, *arguments):
+    # Both the App facade and pinned pure cache must match the current process.
+    # Isolated children must never silently use an ambient older installation.
+    from codex_deepseek import image_transport as shared
+    own = Path(sys.modules[ImageTransport.__module__].__file__).resolve().parents[1]
+    roots = [str(own), str(Path(shared.__file__).resolve().parents[1])]
+    wrapper = ("import sys,json,runpy;sys.path[:0]=json.loads(sys.argv[1]);"
+               "script=sys.argv[2];sys.argv=sys.argv[2:];"
+               "runpy.run_path(script,run_name='__main__')")
+    return [sys.executable, "-I", "-B", "-X", "utf8", "-c", wrapper,
+            json.dumps(roots), str(script), *map(str, arguments)]
+
+
 def png(color=(0,20,240)):
     def chunk(kind,data):return struct.pack('!I',len(data))+kind+data+struct.pack('!I',zlib.crc32(kind+data)&0xffffffff)
     return b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('!2I5B',16,16,8,2,0,0,0))+chunk(b'IDAT',zlib.compress((b'\0'+bytes(color)*16)*16))+chunk(b'IEND',b'')
@@ -106,11 +119,19 @@ async def test_lossless_order_detail_namespace_and_duplicate_identity(tmp_path):
 @pytest.mark.asyncio
 async def test_foreign_url_and_existing_file_id_not_owned_or_deleted(tmp_path):
     backend=FakeFiles();tr=transport(tmp_path,backend)
+    file_id='or_file_external111'
     original=payload([{'type':'input_image','detail':'high','image_url':'https://example.invalid/a.png'},
-                      {'type':'input_image','detail':'original','file_id':'or_file_external111'}])
-    async with tr.prepare(original) as value:assert value.payload==original and value.references==()
+                      {'type':'input_image','detail':'original','file_id':file_id}])
+    with pytest.raises(ImageTransportError, match='metadata is unavailable'):
+        async with tr.prepare(original):
+            pytest.fail('An unknown referenced size must not pass preparation')
+    backend.files[file_id]=FileMetadata(file_id,'external.png','image/png',4096)
+    async with tr.prepare(original) as value:
+        assert value.payload==original and value.references==()
+        assert value.referenced_file_bytes==4096 and not value.manages_consumption
     result=await tr.cleanup(all_unpinned=True)
-    assert result['deleted']==0 and not backend.gets and not backend.deleted
+    assert result['deleted']==0 and backend.gets==[('test-key-a',file_id)]*2
+    assert not backend.deleted and file_id in backend.files
 
 
 @pytest.mark.parametrize('bad',[
@@ -274,7 +295,7 @@ async def test_os_lock_across_real_processes_deduplicates(tmp_path):
     # This launches only Python transport clients, no native Codex/runtime/setup.
     script=tmp_path/'transport_client.py'
     script.write_text("""import asyncio,base64,hashlib,json,sys,time\nfrom pathlib import Path\nfrom codex_app_deepseek.image_transport import *\nroot=Path(sys.argv[1])\nclass SharedFiles:\n async def upload(self,key,data,mime,filename):\n  await asyncio.sleep(.15)\n  with (root/'uploads.txt').open('a') as f:f.write(hashlib.sha256(data).hexdigest()+'\\n')\n  meta=FileMetadata('or_file_concurrent001',filename,mime,len(data))\n  (root/'remote.json').write_text(json.dumps({'id':meta.file_id,'filename':filename,'mime_type':mime,'size_bytes':len(data)}))\n  return meta\n async def get(self,key,fid):return FileMetadata.parse(json.loads((root/'remote.json').read_text()))\n async def delete(self,key,fid):raise AssertionError('not part of concurrency test')\nasync def run():\n tr=ImageTransport(root/'cache',lambda:'shared-test-key',SharedFiles(),TransportPolicy(1,verify_after_seconds=0))\n p={'input':[{'role':'user','content':[{'type':'input_image','detail':'original','image_url':'data:image/png;base64,'+base64.b64encode(b'fixed synthetic bytes').decode()}]}]}\n async with tr.prepare(p) as result:await asyncio.sleep(.2);print(result.uploads)\nasyncio.run(run())\n""",encoding='utf-8')
-    processes=[await asyncio.create_subprocess_exec(sys.executable,str(script),str(tmp_path),stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE) for _ in range(2)]
+    processes=[await asyncio.create_subprocess_exec(*source_child(script,tmp_path),stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE) for _ in range(2)]
     outputs=await asyncio.gather(*(p.communicate() for p in processes))
     assert all(p.returncode==0 for p in processes),outputs
     assert sorted(out.decode().strip() for out,_ in outputs)==['0','1']
@@ -344,7 +365,7 @@ async def test_real_process_crash_releases_os_lock_but_upload_stays_unknown(tmp_
     p=payload();data=json.dumps(p)
     script=tmp_path/'crash_client.py'
     script.write_text("""import asyncio,json,os,sys\nfrom pathlib import Path\nfrom codex_app_deepseek.image_transport import *\nroot=Path(sys.argv[1])\nclass CrashFiles:\n async def upload(self,key,data,mime,filename):\n  (root/'upload-started.json').write_text(json.dumps({'filename':filename,'bytes':len(data)}))\n  os._exit(73)\n async def get(self,key,fid):raise AssertionError()\n async def delete(self,key,fid):raise AssertionError()\nasync def run():\n tr=ImageTransport(root/'cache',lambda:'test-key-a',CrashFiles(),TransportPolicy(1))\n async with tr.prepare(json.loads(sys.stdin.read())):pass\nasyncio.run(run())\n""",encoding='utf-8')
-    child=await asyncio.create_subprocess_exec(sys.executable,str(script),str(tmp_path),stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE)
+    child=await asyncio.create_subprocess_exec(*source_child(script,tmp_path),stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE)
     out,err=await asyncio.wait_for(child.communicate(data.encode()),15)
     assert child.returncode==73,(out,err)
     tr=transport(tmp_path)
@@ -483,12 +504,16 @@ async def test_mixed_selects_largest_net_savings_without_reordering(tmp_path):
 async def test_existing_caller_owned_references_reserve_slots(tmp_path):
     from codex_app_deepseek.image_transport import count_file_references
     backend=FakeFiles();tr=transport(tmp_path,backend)
-    original=payload([{'type':'input_file','file_id':'or_file_owned_elsewhere'}]+[part() for _ in range(20)])
+    file_id='or_file_owned_elsewhere'
+    backend.files[file_id]=FileMetadata(file_id,'external.png','image/png',4096)
+    original=payload([{'type':'input_file','file_id':file_id}]+[part() for _ in range(20)])
     async with tr.prepare(original) as result:
         assert result.converted_occurrences==15 and result.existing_file_references==1
         assert count_file_references(result.payload)==16
+        assert result.referenced_file_bytes==4096+15*len(png())
+        assert result.owned_existing_file_references==0
         assert result.payload['input'][0]['content'][1]==original['input'][0]['content'][1]
-    assert not backend.gets and not backend.deleted
+    assert backend.gets==[('test-key-a',file_id)] and not backend.deleted
 
 
 @pytest.mark.asyncio
@@ -661,15 +686,19 @@ async def test_local_readonly_before_id_persist_never_deletes_and_is_recoverable
 async def test_sqlite_failure_after_remote_delete_recovers_get_first_without_second_delete(tmp_path,monkeypatch):
     from contextlib import asynccontextmanager
     backend=PagedFiles();tr=transport(tmp_path,backend);await unknown_upload(tr,backend)
-    normal_db=tr._db;normal_delete=backend.delete;holder={}
+    normal_db=tr._db;normal_delete=backend.delete;holder={'after_delete':False,'injections':0}
     @asynccontextmanager
     async def capture(directory):
-        async with normal_db(directory) as db:holder['db']=db;yield db
+        async with normal_db(directory) as db:
+            if holder['after_delete']:
+                db.execute('PRAGMA query_only=ON');holder['injections']+=1
+            yield db
     async def delete_then_disk_failure(key,fid):
-        await normal_delete(key,fid);holder['db'].execute('PRAGMA query_only=ON')
+        await normal_delete(key,fid);holder['after_delete']=True
     monkeypatch.setattr(tr,'_db',capture);monkeypatch.setattr(backend,'delete',delete_then_disk_failure)
     result=await tr.reconcile_unknown_uploads()
     assert result['state']=='cleanup_state_failure' and len(backend.deleted)==1 and not backend.files
+    assert holder['injections']>=2, 'Fault must reach both actual post-delete ledger/compensation writes'
     monkeypatch.setattr(tr,'_db',normal_db);monkeypatch.setattr(backend,'delete',normal_delete)
     recovered=await tr.reconcile_unknown_uploads()
     assert recovered['complete'] and recovered['known_cleanup_count']==1 and len(backend.deleted)==1

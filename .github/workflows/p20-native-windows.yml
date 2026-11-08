@@ -44,7 +44,7 @@ jobs:
         run: |
           python -I -B -u scripts/ci/p20-windows.py check-only --candidate P167
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $hash = (Get-FileHash -Algorithm SHA256 native/build-lock.O167-source.json).Hash.ToLowerInvariant()
+          $hash = (Get-FileHash -Algorithm SHA256 native/build-lock.O167-P167-source.json).Hash.ToLowerInvariant()
           if ($hash -cne $env:CI_P167_APPROVED_LOCK_SHA256) { throw 'Dispatch lock SHA differs from reviewed native lock.' }
           python -I -B -m unittest discover -s scripts/ci -p test_p167_ci.py -v
       - name: Check disposable runner space

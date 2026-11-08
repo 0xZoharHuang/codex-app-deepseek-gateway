@@ -1,6 +1,6 @@
 """Explicit per-user gateway installation and lifecycle; never owns the App runtime."""
 from __future__ import annotations
-from .paths import _is_link_or_reparse
+from .paths import _is_link_or_reparse, canonical_path
 
 import argparse
 from contextlib import ExitStack, contextmanager
@@ -77,7 +77,7 @@ def _home(path: Path) -> Path:
 
 def _roots(install_root: Path, data_home: Path) -> tuple[Path, Path]:
     install, data = _home(install_root), _home(data_home)
-    if data == install or data.is_relative_to(install):
+    if canonical_path(data).is_relative_to(canonical_path(install)):
         raise LifecycleError("Install root must not contain the persistent data home")
     return install, data
 
@@ -359,7 +359,7 @@ def _runtime_proof(directory: Path, bootstrap_python: Path) -> dict:
     base = Path(bootstrap_python)
     executable = directory / "venv/Scripts/python.exe"
     config = directory / "venv/pyvenv.cfg"
-    if not base.is_absolute() or base.resolve().is_relative_to(directory.parent.resolve()):
+    if not base.is_absolute() or canonical_path(base).is_relative_to(canonical_path(directory.parent)):
         raise LifecycleError("Independent Python must remain outside managed releases")
     try:
         _runtime_regular_file(base)
@@ -412,7 +412,7 @@ def install(manifest_path: Path, manifest_sha256: str, wheelhouse: Path, python_
     if not python.is_file():
         raise LifecycleError("An independent existing Python executable is required")
     # Python must survive removal of any managed release and must not be App/CDS bundled.
-    if python.is_relative_to(install_root / "releases"):
+    if canonical_path(python).is_relative_to(canonical_path(install_root / "releases")):
         raise LifecycleError("Bootstrap Python cannot belong to a managed release")
     from .cli import resolve_service_home
     resolve_service_home(python.parent)
@@ -544,6 +544,7 @@ def _activate_locked(install_root: Path, release_id: str) -> dict:
 # Version provenance is the previously verified official signed binary, never
 # the caller's requested baseline. Unknown updates require fresh qualification.
 KNOWN_OFFICIAL_NATIVE_VERSIONS = {
+    "4b3286e35d7fe866c6b0eb3f07d7a4cdb5e96489576170dfd6b3a15aa1c67382": "0.167.0-alpha.3.2",
     "0c09e45bc76433756eb2d492f6db0ce6f269967e6618f4a6ae73e2fa239694b8": "0.165.0-alpha.1.2",
     "e757246b4de87359e660647fa9514955a0971ff6a30affdd8c145d1d5ece7b84": "0.163.0-alpha.11.1",
 }
@@ -1175,7 +1176,7 @@ def finalize_uninstall(install_root: Path, proof_sha256: str) -> dict:
             active_path.unlink()
         proof["stage"] = "retired"; _write(proof_path, proof)
     if proof["stage"] == "prepared":
-        if Path(sys.executable).resolve().is_relative_to(directory.resolve()):
+        if canonical_path(sys.executable).is_relative_to(canonical_path(directory)):
             raise LifecycleError("Final removal requires independent Python, not the venv being removed")
         if digest(root / "active.json") != proof["active_sha256"] or (Path(proof["data_home"]) / "service.json").exists():
             raise LifecycleError("Installation or service changed after uninstall preparation")

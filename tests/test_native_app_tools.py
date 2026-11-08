@@ -143,7 +143,7 @@ def test_packaged_inventory_is_hash_only_exact_qualified_source():
     asset = Path(tools.__file__).parent / "assets" / tools.INVENTORY_NAME
     assert asset.read_bytes() == (root / "native" / tools.INVENTORY_NAME).read_bytes()
     inventory = tools.load_inventory()
-    assert inventory["files_count"] == 827 and inventory["total_bytes"] == 31440505
+    assert inventory["files_count"] == 860 and inventory["total_bytes"] == 35191141
     assert not any(key in inventory for key in ["source", "credentials", "contents"])
 
 

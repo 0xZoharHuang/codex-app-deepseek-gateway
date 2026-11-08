@@ -206,7 +206,12 @@ def verify_cds_dependency(path, lock):
         compatibility = lock["transport_compatibility"]
         require(compatibility["source_commit"] == lock["protocol_boundary"]["source_commit"],
                 "Transport helper source differs from pinned protocol source")
-        require(set(compatibility["files"]) == {"windows_asyncio.py"},
+        transport_files = {"windows_asyncio.py"}
+        if versions[0] == "0.7.0":
+            transport_files |= {"image_transport.py", "platforms.py", "processes.py"}
+            require("image_selection.py" in lock["protocol_boundary"]["pure_files"],
+                    "Pinned pure CDS image selector is missing")
+        require(set(compatibility["files"]) == transport_files,
                 "Unexpected CDS transport helper boundary")
         for name, expected in compatibility["files"].items():
             require(hashlib.sha256(archive.read("codex_deepseek/" + name)).hexdigest() == expected,
