@@ -232,3 +232,111 @@ def test_explicit_Git_executable_works_without_PATH_git(tmp_path, monkeypatch):
         item=json.loads((output/"index.json").read_bytes())["packages"][0]
         notice=next(x for x in item["upstream_notice_files"]if x["source_file"]=="LICENSE")
         assert (output/notice["file"]).read_bytes()==FULL
+
+
+def gitlink_checkout(tmp_path, *, alias=None):
+    repo = tmp_path / "outer"; repo.mkdir()
+    child_source = tmp_path / "child-source"; child_source.mkdir()
+    leaf_source = tmp_path / "leaf-source"; leaf_source.mkdir()
+    for root in (repo, child_source, leaf_source):
+        git(root, "init", "-q")
+        git(root, "config", "core.symlinks", "false")
+    (repo / "Cargo.toml").write_bytes(b'[package]\nname="fixture"\nversion="1.0.0"\n')
+    (repo / "LICENSE").write_bytes(FULL)
+    (leaf_source / "COPYING").write_bytes(FULL + b"deep nested upstream notice")
+    git(leaf_source, "add", "--all")
+    git(leaf_source, "commit", "-q", "-m", "leaf repository")
+    git(child_source, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(leaf_source), "vendor/leaf")
+    (child_source / "LICENSE").write_bytes(alias.encode() if alias is not None else FULL + b"nested upstream notice")
+    git(child_source, "add", "--all")
+    if alias is not None:
+        blob = git(child_source, "hash-object", "-w", "--stdin", input=alias.encode()).strip().decode()
+        git(child_source, "update-index", "--cacheinfo", "120000", blob, "LICENSE")
+    git(child_source, "commit", "-q", "-m", "child repository")
+    git(repo, "-c", "protocol.file.allow=always", "-c", "core.symlinks=false",
+        "submodule", "add", "-q", str(child_source), "build")
+    git(repo, "-c", "protocol.file.allow=always", "-c", "core.symlinks=false",
+        "submodule", "update", "--init", "--recursive", "-q")
+    git(repo, "add", "--all")
+    git(repo, "commit", "-q", "-m", "locked Cargo checkout")
+    revision = git(repo, "rev-parse", "HEAD").strip().decode()
+    package = {"id": "git+https://example.invalid/fixture#fixture@1.0.0", "name": "fixture", "version": "1.0.0",
+               "source": "git+https://example.invalid/fixture?rev=" + revision + "#" + revision,
+               "manifest_path": str(repo / "Cargo.toml"), "license": "MIT"}
+    return repo, package
+
+
+@pytest.mark.skipif(not IS_CAG, reason="normal CADSG native packager")
+def test_gitlink_notice_publishes_exact_nested_blobs_and_every_lock(tmp_path):
+    repo, package = gitlink_checkout(tmp_path)
+    output = tmp_path / "distribution"
+    collector.collect_licenses({"packages": [package]}, output, [repo])
+    rows = json.loads((output / "index.json").read_bytes())["packages"][0]["upstream_notice_files"]
+    by_path = {row["source_file"]: row for row in rows}
+    for name in ("build/LICENSE", "build/vendor/leaf/COPYING"):
+        row = by_path[name]
+        assert (output / row["file"]).read_bytes() == (repo / name).read_bytes()
+        source = row["source_resolution"]
+        assert source["resolved_source_file"] == name
+        assert source["git_submodules"] == [
+            {"path": root, "revision": git(repo / root, "rev-parse", "HEAD").strip().decode()}
+            for root in ("build", "build/vendor/leaf") if name.startswith(root + "/")]
+    assert set(by_path) == {"LICENSE", "build/LICENSE", "build/vendor/leaf/COPYING"}
+
+
+@pytest.mark.skipif(not IS_CAG, reason="normal CADSG native packager")
+def test_gitlink_notice_alias_can_cross_back_to_exact_tracked_parent(tmp_path):
+    repo, package = gitlink_checkout(tmp_path, alias="../LICENSE")
+    context = collector.source_context(package)
+    content, origin = collector.notice_content(repo / "build/LICENSE", repo, context)
+    assert content == FULL and origin["resolved_source_file"] == "LICENSE"
+    assert origin["alias_chain"][0]["git_submodules"] == [
+        {"path": "build", "revision": git(repo / "build", "rev-parse", "HEAD").strip().decode()}]
+
+
+@pytest.mark.skipif(not IS_CAG, reason="normal CADSG native packager")
+@pytest.mark.parametrize("fault, reason", [
+    ("outer-index", "submodule index differs"), ("child-head", "checkout HEAD differs"),
+    ("inner-index", "submodule index differs"), ("inner-head", "checkout HEAD differs"),
+    ("child-index", "notice index differs"), ("dirty-file", "notice content differs"),
+    ("untracked-file", "notice path|not tracked"), ("escape", "escapes its source scope"),
+])
+def test_gitlink_notice_rejects_unverified_nested_source(tmp_path, fault, reason):
+    repo, package = gitlink_checkout(tmp_path, alias="../../outside" if fault == "escape" else None)
+    child = repo / "build"
+    leaf = child / "vendor/leaf"
+    path = child / "LICENSE"
+    if fault == "outer-index":
+        git(repo, "update-index", "--cacheinfo", "160000", "f"*40, "build")
+    elif fault == "child-head":
+        git(child, "commit", "--allow-empty", "-qm", "different child commit")
+    elif fault == "inner-index":
+        git(child, "update-index", "--cacheinfo", "160000", "e"*40, "vendor/leaf")
+        path = leaf / "COPYING"
+    elif fault == "inner-head":
+        git(leaf, "commit", "--allow-empty", "-qm", "different leaf commit")
+        path = leaf / "COPYING"
+    elif fault == "child-index":
+        blob = git(child, "rev-parse", "HEAD:LICENSE").strip().decode()
+        git(child, "update-index", "--cacheinfo", "100755", blob, "LICENSE")
+    elif fault == "dirty-file":
+        path.write_bytes(b"altered child notice")
+    elif fault == "untracked-file":
+        path = child / "NOTICE"
+        path.write_bytes(b"untracked child notice")
+    elif fault == "escape":
+        (tmp_path / "outside").write_bytes(b"out of scope notice")
+    with pytest.raises(ValueError, match=reason):
+        collector.notice_content(path, repo, collector.source_context(package))
+
+
+@pytest.mark.skipif(not IS_CAG or os.name != "nt", reason="Windows CADSG path folding")
+def test_gitlink_notice_refuses_case_ambiguous_submodule_ancestor(tmp_path):
+    repo, package = gitlink_checkout(tmp_path)
+    blob = git(repo, "hash-object", "-w", "--stdin", input=FULL).strip().decode()
+    git(repo, "update-index", "--add", "--cacheinfo", "100644", blob, "BUILD/NOTICE")
+    git(repo, "commit", "-qm", "case-distinct gitlink and ordinary directory")
+    revision = git(repo, "rev-parse", "HEAD").strip().decode()
+    package["source"] = "git+https://example.invalid/fixture?rev=" + revision + "#" + revision
+    with pytest.raises(ValueError, match="Ambiguous Windows Git notice submodule path"):
+        collector.notice_content(repo / "build/LICENSE", repo, collector.source_context(package))

@@ -344,9 +344,20 @@ def source_context(package, *, git="git"):
     require(source.is_relative_to(root), "Crate is outside its Git checkout: " + str(source))
     require(not any(_redirected(p) for p in (root, *root.parents)),
             "Git source root is redirected: " + str(root))
+    context.update(_git_notice_checkout(root, revision, git))
+    context.update(kind="pinned_git_checkout", declared=declared)
+    return context
+
+
+def _git_notice_checkout(root, revision, git):
+    require(root.is_dir() and not any(_redirected(p) for p in (root, *root.parents)),
+            "Git notice checkout is redirected or absent: " + str(root))
+    observed_root = Path(_git(root, "rev-parse", "--show-toplevel", executable=git).decode().strip())
+    require(observed_root.is_absolute() and observed_root.samefile(root),
+            "Git notice path is not its own locked checkout: " + str(root))
     require(_git(root, "rev-parse", "HEAD", executable=git).decode().strip() == revision,
-            "Git checkout HEAD differs from Cargo source revision: " + str(source))
-    tree_raw = _git(root, "ls-tree", "-r", "-z", revision, executable=git)
+            "Git checkout HEAD differs from Cargo source revision: " + str(root))
+    tree_raw = _git(root, "ls-tree", "-r", "-t", "-z", revision, executable=git)
     index_raw = _git(root, "ls-files", "--stage", "-z", executable=git)
     require(len(tree_raw) <= 16 * 1024 * 1024 and len(index_raw) <= 16 * 1024 * 1024,
             "Git notice inventory exceeds bounded bytes")
@@ -370,22 +381,58 @@ def source_context(package, *, git="git"):
     folded = {}
     for name in tree:
         folded.setdefault(name.casefold(), []).append(name)
-    context.update(root=root, kind="pinned_git_checkout", revision=revision,
-                   declared=declared, tree=tree, index=index, folded=folded)
-    return context
+    return {"root": root, "revision": revision, "tree": tree, "index": index,
+            "folded": folded, "git_executable": git, "submodules": {}}
+
+
+def _git_names(context, relative):
+    if os.name == "nt":
+        return context["folded"].get(relative.casefold(), [])
+    return [relative] if relative in context["tree"] else []
+
+
+def _git_notice_scope(context, path):
+    """Follow only gitlinks whose parent tree, index and actual child HEAD agree."""
+    scope = context
+    for _ in range(MAX_NOTICE_SCAN_DEPTH):
+        relative = path.relative_to(scope["root"])
+        for parent in reversed(relative.parents):
+            names = _git_names(scope, parent.as_posix())
+            if not any(scope["tree"][name][0] == "160000" for name in names):
+                continue
+            require(len(names) == 1, "Ambiguous Windows Git notice submodule path: " + parent.as_posix())
+            name = names[0]
+            entry = scope["tree"][name]
+            require(scope["index"].get(name) == entry,
+                    "Git notice submodule index differs from the Cargo revision: " + name)
+            nested = scope["submodules"].get(name)
+            if nested is None:
+                nested = _git_notice_checkout(scope["root"] / name, entry[1], scope["git_executable"])
+                nested["gitlinks"] = [*scope.get("gitlinks", []),
+                                      {"path": nested["root"].relative_to(context["root"]).as_posix(),
+                                       "revision": entry[1]}]
+                scope["submodules"][name] = nested
+            scope = nested
+            break
+        else:
+            return scope
+    raise ValueError("Git notice submodule chain exceeds bounded depth")
 
 
 def _git_entry(context, path):
-    relative = path.relative_to(context["root"]).as_posix()
+    scope = _git_notice_scope(context, path)
+    relative = path.relative_to(scope["root"]).as_posix()
+    matches = _git_names(scope, relative)
     if os.name == "nt":
-        matches = context["folded"].get(relative.casefold(), [])
         require(len(matches) == 1, "Missing or ambiguous Windows Git notice path: " + relative)
-        relative = matches[0]
-    require(relative in context["tree"], "Notice is not tracked at the Cargo revision: " + relative)
-    value = context["tree"][relative]
-    require(context["index"].get(relative) == value,
-            "Git notice index differs from the Cargo revision: " + relative)
-    return relative, value
+    else:
+        require(matches, "Notice is not tracked at the Cargo revision: " + relative)
+    name = matches[0]
+    value = scope["tree"][name]
+    require(scope["index"].get(name) == value,
+            "Git notice index differs from the Cargo revision: " + name)
+    logical = (scope["root"] / name).relative_to(context["root"]).as_posix()
+    return logical, value, scope
 
 
 def _resolve_notice(path, source, context):
@@ -405,7 +452,8 @@ def _resolve_notice(path, source, context):
         require(current not in seen, "Crate notice alias cycle: " + str(current))
         seen.add(current); _plain_parents(current)
         relative = current.relative_to(root).as_posix()
-        git_name, entry = _git_entry(context, current) if context["kind"] == "pinned_git_checkout" else (relative, None)
+        git_name, entry, scope = (_git_entry(context, current) if context["kind"] == "pinned_git_checkout"
+                                  else (relative, None, context))
         actual_link = current.is_symlink()
         git_link = entry is not None and entry[0] == "120000"
         info = current.lstat()
@@ -415,10 +463,10 @@ def _resolve_notice(path, source, context):
             require(stat.S_ISREG(info.st_mode), "Crate notice is not a regular file: " + str(current))
             if entry is not None:
                 require(entry[0] in {"100644", "100755"}, "Invalid Git notice file mode: " + git_name)
-            return current, chain, (git_name, entry)
+            return current, chain, (git_name, entry, scope)
         require(len(chain) < MAX_NOTICE_ALIAS_HOPS, "Crate notice alias chain exceeds bounded hops")
         if git_link:
-            target_bytes = _git(root, "cat-file", "blob", entry[1], executable=context["git_executable"])
+            target_bytes = _git(scope["root"], "cat-file", "blob", entry[1], executable=scope["git_executable"])
             require(len(target_bytes) <= 4096, "Git notice alias target exceeds bounded bytes")
             target = target_bytes.decode("utf-8")
             if actual_link:
@@ -436,7 +484,8 @@ def _resolve_notice(path, source, context):
                 "Crate notice alias target must be a relative file path: " + str(current))
         chain.append({"source": git_name, "target": target,
                       "representation": "symlink" if actual_link else "git_materialized",
-                      **({"git_mode": "120000", "git_blob": entry[1]} if git_link else {})})
+                      **({"git_mode": "120000", "git_blob": entry[1]} if git_link else {}),
+                      **({"git_submodules": scope["gitlinks"]} if scope is not context else {})})
         current = Path(os.path.abspath(current.parent / target_path))
     raise ValueError("Crate notice alias chain exceeds bounded hops")
 
@@ -462,9 +511,9 @@ def notice_candidates(source, context=None):
                 logical_notice = _notice_name(path, source) or path == context.get("declared_notice")
                 git_alias = False
                 if context["kind"] == "pinned_git_checkout":
-                    relative = path.relative_to(context["root"]).as_posix()
-                    matches = context["folded"].get(relative.casefold(), []) if os.name == "nt" else [relative]
-                    git_alias = any(context["tree"].get(name, ("", ""))[0] == "120000" for name in matches)
+                    scope = _git_notice_scope(context, path)
+                    relative = path.relative_to(scope["root"]).as_posix()
+                    git_alias = any(scope["tree"][name][0] == "120000" for name in _git_names(scope, relative))
                 if entry.is_symlink() or _redirected(path) or git_alias:
                     require(logical_notice, "Crate notice scan contains a redirected entry: " + str(path))
                     _resolve_notice(path, source, context)
@@ -506,19 +555,22 @@ def notice_content(path, source, context=None):
     resolved, chain, git_entry = _resolve_notice(path, source, context)
     content = _regular_notice_bytes(resolved, context["root"])
     if context["kind"] == "pinned_git_checkout":
-        require(content == _git(context["root"], "cat-file", "blob", git_entry[1][1], executable=context["git_executable"]),
+        scope = git_entry[2]
+        require(content == _git(scope["root"], "cat-file", "blob", git_entry[1][1], executable=scope["git_executable"]),
                 "Git notice content differs from the Cargo revision: " + str(resolved))
     require((resolved, chain, git_entry) == _resolve_notice(path, source, context),
             "Crate notice alias changed during copy: " + str(path))
     provenance = None
     shared_declaration = not Path(os.path.abspath(path)).is_relative_to(source)
-    if chain or shared_declaration:
+    if chain or shared_declaration or git_entry[2] is not context:
         provenance = {"kind": context["kind"], "resolved_source_file": git_entry[0],
                       "alias_chain": chain}
         if shared_declaration:
             provenance["declaration"] = "Cargo license_file"
         if context["kind"] == "pinned_git_checkout":
             provenance.update(git_source=context["declared"], git_revision=context["revision"])
+            if git_entry[2] is not context:
+                provenance["git_submodules"] = git_entry[2]["gitlinks"]
     return content, provenance
 
 
