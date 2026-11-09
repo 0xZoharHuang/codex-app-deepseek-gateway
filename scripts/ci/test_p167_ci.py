@@ -407,16 +407,20 @@ class P167Gate(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "V8 input differs"):
                 ci.warm_inputs(builder, source, v8, lock)
 
-    def test_only_core_uses_jobs4_and_admission_rejects_wrong_hardware(self):
-        with patch.object(ci,"CANDIDATE","P167"), patch.dict(os.environ, {
-            "CI_P167_CORE_JOBS4":"1","CI_P20_BUILD_JOBS":"2",
-        }):
-            self.assertEqual(ci.build_jobs(),2)
-            self.assertEqual(ci.unit_jobs("codex-core"),4)
-            for name in ("codex-guardian-v2","codex-core-plugins","codex-windows-sandbox"):
-                self.assertEqual(ci.unit_jobs(name),2)
-            self.assertEqual(ci.unit_command(Path("toolchain"),ci.unit_jobs("codex-core"),"codex-core")[4:6],
-                             ["--jobs","4"])
+    def test_only_admitted_core_and_guardian_use_jobs4(self):
+        for guardian_warmup in ("0", "1"):
+            with self.subTest(guardian_warmup=guardian_warmup), patch.object(ci, "CANDIDATE", "P167"), patch.dict(os.environ, {
+                "CI_P167_CORE_JOBS4": "1", "CI_P167_GUARDIAN_WARMUP": guardian_warmup, "CI_P20_BUILD_JOBS": "2",
+            }):
+                self.assertEqual(ci.build_jobs(), 2)
+                self.assertEqual(ci.unit_jobs("codex-core"), 4)
+                guardian_jobs = 4 if guardian_warmup == "1" else 2
+                self.assertEqual(ci.unit_jobs("codex-guardian-v2"), guardian_jobs)
+                for name in ("codex-core-plugins", "codex-windows-sandbox"):
+                    self.assertEqual(ci.unit_jobs(name), 2)
+                for name, jobs in (("codex-core", 4), ("codex-guardian-v2", guardian_jobs)):
+                    self.assertEqual(ci.unit_command(Path("toolchain"), ci.unit_jobs(name), name)[4:6],
+                                     ["--jobs", str(jobs)])
         for cpus, available in ((4,8*1024**3),(2,8*1024**3),(4,8*1024**3-1)):
             fake = SimpleNamespace(cpu_count=lambda logical:cpus,
                                    virtual_memory=lambda:SimpleNamespace(total=17174360064,available=available))
