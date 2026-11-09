@@ -363,11 +363,13 @@ class P167Gate(unittest.TestCase):
             log.write_text(progress)
             command = ci.unit_command(Path("toolchain"), 2, "codex-core")
             raw = {"command":command, "fixed_timeout_seconds":1800, "passed":False, "timed_out":True,
-                   "returncode":1, "wrapper_minimum_available_memory_bytes":ci.FLOOR, "log_sha256":ci.sha(log)}
+                   "returncode":1, "seconds":1800.1, "wrapper_minimum_available_memory_bytes":ci.FLOOR,
+                   "log_sha256":ci.sha(log)}
             self.assertEqual(ci.admit_warm_result(raw, command, log), "warm_compile_timed_out_without_survivors")
             for change in ({"command":["other"]}, {"fixed_timeout_seconds":3600}, {"unknown_live":[1]},
                            {"remaining_before_cleanup":[1]}, {"remaining_after_cleanup":[1]},
-                           {"forced_cleanup":[1]}, {"resource_guard":{"minimum":1}}, {"timed_out":False}):
+                           {"forced_cleanup":[1]}, {"resource_guard":{"minimum":1}},
+                           {"timed_out":False}, {"seconds":1799.9}):
                 with self.subTest(change=change), self.assertRaises(ValueError):
                     ci.admit_warm_result({**raw, **change}, command, log)
             for output in ('{"reason":"compiler-message","message":{"level":"error"}}\n',
@@ -375,6 +377,9 @@ class P167Gate(unittest.TestCase):
                 log.write_text((progress if output else "")+output)
                 with self.assertRaises(ValueError):
                     ci.admit_warm_result({**raw,"log_sha256":ci.sha(log)}, command, log)
+            log.write_text('{"reason":"compiler-artifact","fresh":true}\n')
+            with self.assertRaisesRegex(ValueError, "with new Cargo artifacts"):
+                ci.admit_warm_result({**raw, "log_sha256": ci.sha(log)}, command, log)
             log.write_text(progress+'{"reason":"build-finished","success":true}\n')
             success = {**raw,"passed":True,"timed_out":False,"returncode":0,"log_sha256":ci.sha(log)}
             self.assertEqual(ci.admit_warm_result(success, command, log), "warm_compile_completed")
@@ -399,7 +404,7 @@ class P167Gate(unittest.TestCase):
             self.assertEqual(first["source_sha256"], second["source_sha256"])
             self.assertNotEqual(first["natural_source_mtimes_sha256"], second["natural_source_mtimes_sha256"])
             v8file.write_bytes(b"changed")
-            with self.assertRaisesRegex(ValueError, "Core V8 input differs"):
+            with self.assertRaisesRegex(ValueError, "V8 input differs"):
                 ci.warm_inputs(builder, source, v8, lock)
 
     def test_only_core_uses_jobs4_and_admission_rejects_wrong_hardware(self):
@@ -417,12 +422,12 @@ class P167Gate(unittest.TestCase):
                                    virtual_memory=lambda:SimpleNamespace(total=17174360064,available=available))
             with patch.dict(sys.modules, {"psutil":fake}):
                 if cpus==4 and available>=8*1024**3:
-                    d=ci.core_resource_admission()
+                    d=ci.compile_resource_admission(4)
                     self.assertEqual((d["logical_cpus"],d["initial_available_memory_bytes"],d["memory_floor_bytes"]),
                                      (4,8*1024**3,4*1024**3))
                 else:
                     with self.assertRaisesRegex(ValueError,"four logical CPUs"):
-                        ci.core_resource_admission()
+                        ci.compile_resource_admission(4)
 
     def test_fresh_core_compile_requires_resource_admission_before_observation(self):
         class CompileObserved(Exception):
@@ -452,15 +457,120 @@ class P167Gate(unittest.TestCase):
                                             "CI_P167_CORE_WARMUP": ""}),
                     patch.object(ci, "plan", return_value=({}, None, ())),
                     patch.object(ci, "unit_environment", return_value=({}, None)),
-                    patch.object(ci, "core_resource_admission", return_value=resources,
+                    patch.object(ci, "compile_resource_admission", return_value=resources,
                                  side_effect=None if admitted else unavailable) as admission,
                     patch.object(ci, "observe", side_effect=observe) as observed,
                 ):
                     with self.assertRaises(CompileObserved if admitted else ValueError):
                         ci.unit(root, p167_group="codex-core")
-                admission.assert_called_once_with()
+                admission.assert_called_once_with(4)
                 self.assertEqual(record.is_file(), admitted)
                 self.assertEqual(observed.call_count, int(admitted))
+
+    def test_fresh_git_and_core_warmup_bind_formal_inputs_without_test_credit(self):
+        class CompileObserved(Exception):
+            pass
+
+        builder = ci.load_module("p167_fresh_warm_builder", ci.REPO / "scripts/build_native.py")
+        for label, package, jobs in (("git", "codex-core-plugins", 2), ("core", "codex-core", 4)):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                source = root / "work/source"
+                source.mkdir(parents=True)
+                source_file = source / "fixture.rs"
+                source_file.write_bytes(b"sealed source")
+                target = root / "target"
+                target.mkdir()
+                v8_file = root / "v8.lib.gz"
+                v8_file.write_bytes(b"sealed V8")
+                v8 = {"files": [{"file": str(v8_file), "size": v8_file.stat().st_size, "sha256": ci.sha(v8_file)}]}
+                state = builder.source_state(source)
+                lock = {"prepared_source_sha256": state["sha256"], "prepared_source_files": state["count"]}
+                lock_sha = "1" * 64
+                manifest = root / "native-producer/manifest.json"
+                ci.save(manifest, {})
+                evidence = root / "evidence"
+                for name in ("toolchain.json", "p167-dependency-checkout.json"):
+                    ci.save(evidence / name, {})
+                ci.save(evidence / "normal-six-build.json", {"passed": True})
+                ci.save(evidence / "normal-source-binding.json", {
+                    "source_sha256": state["sha256"], "lock_sha256": lock_sha,
+                    "native_build_executed": True, "normal_manifest_sha256": ci.sha(manifest),
+                })
+                for name, status, count in (("unit18", "COMPONENT18", 18), ("git-unit12", "GIT12", 12)):
+                    ci.save(evidence / f"native-{name}.json", {
+                        "status": f"P167_NATIVE_{status}_PASSED_NOT_APP_QUALIFIED",
+                        "source_sha256": state["sha256"], "lock_sha256": lock_sha, "cases": list(range(count)),
+                    })
+                command = ci.unit_command(root, jobs, package)
+                resources = {"logical_cpus": 4, "initial_available_memory_bytes": 8 * 1024**3,
+                             "memory_floor_bytes": ci.FLOOR, "jobs": jobs}
+                warm_name = f"native-p167-{label}-warmup"
+                formal_name = "native-git-unit-compile" if label == "git" else "native-p167-codex-core-compile"
+
+                def observe(actual, actual_root, cwd, environment, name, deadline):
+                    self.assertEqual((actual, actual_root, cwd, environment, deadline),
+                                     (command, root, source / "codex-rs", {}, 1800))
+                    if name == formal_name:
+                        raise CompileObserved
+                    self.assertEqual(name, warm_name)
+                    log = evidence / f"{name}.log"
+                    log.write_bytes(b'{"reason":"compiler-artifact","fresh":false}\n')
+                    ci.save(evidence / f"{name}.json", {
+                        "command": command, "fixed_timeout_seconds": 1800, "seconds": 1800.1,
+                        "returncode": 1, "timed_out": True, "passed": False,
+                        "wrapper_minimum_available_memory_bytes": ci.FLOOR, "log_sha256": ci.sha(log),
+                    })
+                    raise ValueError("original warm timeout")
+
+                with (
+                    patch.multiple(ci, CANDIDATE="P167", P167_CASES={"codex-core": ("one",)},
+                                   SOURCE=state["sha256"], LOCK=lock_sha),
+                    patch.dict(os.environ, {"CI_RUST_TOOLCHAIN_BIN": str(root), "GITHUB_RUN_ID": "123",
+                                            "GITHUB_RUN_ATTEMPT": "1", "CI_P20_BUILD_JOBS": "2",
+                                            "CI_P167_CORE_JOBS4": "1", "CI_P167_CORE_WARMUP": "1",
+                                            "CI_P167_GIT_WARMUP": "1", "CI_P167_RESUME": "",
+                                            "CI_P167_TEST_RESUME": ""}),
+                    patch.object(ci, "plan", return_value=(lock, builder, ())),
+                    patch.object(ci, "cache_paths", return_value=(root / "cache", target)),
+                    patch.object(ci, "unit_environment", return_value=({}, v8)),
+                    patch.object(ci, "compile_resource_admission", return_value=resources),
+                    patch.object(ci, "observe", side_effect=observe) as observed,
+                ):
+                    if label == "git":
+                        ci.warm_git(root)
+                    else:
+                        ci.warm_core(root)
+                    receipt = ci.load(evidence / f"p167-{label}-warmup.json")
+                    self.assertEqual(receipt["status"], "warm_compile_timed_out_without_survivors")
+                    self.assertEqual(receipt["cases_credited"], 0)
+                    self.assertFalse((root / "delivery/unit").exists())
+                    unit_args = {"plugin_git": True} if label == "git" else {"p167_group": "codex-core"}
+                    with patch.dict(os.environ, {"GITHUB_RUN_ATTEMPT": "2"}):
+                        with self.assertRaisesRegex(ValueError, "same runner, exact inputs and natural mtimes"):
+                            ci.unit(root, **unit_args)
+                    stamp = source_file.stat()
+                    os.utime(source_file, ns=(stamp.st_atime_ns, stamp.st_mtime_ns + 1_000_000_000))
+                    with self.assertRaisesRegex(ValueError, "same runner, exact inputs and natural mtimes"):
+                        ci.unit(root, **unit_args)
+                    os.utime(source_file, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+                    deps = evidence / "p167-dependency-checkout.json"
+                    original_deps = deps.read_bytes()
+                    deps.write_bytes(b'{"changed":true}\n')
+                    with self.assertRaisesRegex(ValueError, "original producer, prerequisite receipts and target"):
+                        ci.unit(root, **unit_args)
+                    deps.write_bytes(original_deps)
+                    previous_target = target.with_name("old-target")
+                    target.rename(previous_target)
+                    target.mkdir()
+                    with self.assertRaisesRegex(ValueError, "original producer, prerequisite receipts and target"):
+                        ci.unit(root, **unit_args)
+                    target.rmdir()
+                    previous_target.rename(target)
+                    self.assertEqual(observed.call_count, 1)
+                    with self.assertRaises(CompileObserved):
+                        ci.unit(root, **unit_args)
+                    self.assertEqual(observed.call_count, 2)
 
     def test_fresh_workflow_builds_and_seals_every_group_without_resume(self):
         text = (ci.REPO / ".github/workflows/p20-native-windows.yml").read_text()
@@ -476,11 +586,13 @@ class P167Gate(unittest.TestCase):
         self.assertIn("p20-hosted-tools.ps1 -Mode Toolchain -Candidate P167", text)
         self.assertIn("--only-binary=:all: --require-hashes", text)
         self.assertEqual(re.findall(r"p20-windows\.py (\w+(?:-\w+)?) --candidate P167", text),
-                         ["check-only", "prepare", "locked_fetch", "build", "unit", "git_unit",
-                          "extra_unit", "package"])
+                         ["check-only", "prepare", "locked_fetch", "build", "unit", "warm_git",
+                          "git_unit", "warm_core", "extra_unit", "package"])
         for forbidden in ("actions/cache", "restore-keys:", "secrets.", "CI_P167_RESUME",
-                          "CI_P167_TEST_RESUME", "CI_P167_CORE_WARMUP", "GH_TOKEN", "gh release"):
+                          "CI_P167_TEST_RESUME", "GH_TOKEN", "gh release"):
             self.assertNotIn(forbidden, text)
+        self.assertIn("CI_P167_GIT_WARMUP: '1'", text)
+        self.assertIn("CI_P167_CORE_WARMUP: '1'", text)
         self.assertIn("CI_P167_CORE_JOBS4: '1'", text)
         self.assertIn("CI_P20_BUILD_JOBS: '2'", text)
         self.assertIn("if: ${{ always() }}", text)
