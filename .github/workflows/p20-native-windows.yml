@@ -67,6 +67,7 @@ jobs:
         shell: pwsh
         run: python -I -B -u scripts/ci/p20-windows.py locked_fetch --candidate P167 --root "$env:CI_P20_ROOT"
       - name: Build all six native binaries from the exact reviewed source
+        id: normal_native_build
         shell: pwsh
         run: python -I -B -u scripts/ci/p20-windows.py build --candidate P167 --root "$env:CI_P20_ROOT"
       - name: Run the exact Windows sandbox cases
@@ -87,6 +88,16 @@ jobs:
       - name: Normal clean-source assembly with all native receipts
         shell: pwsh
         run: python -I -B -u scripts/ci/p20-windows.py package --candidate P167 --root "$env:CI_P20_ROOT"
+      - name: Preserve exact fresh compiler inputs after a post-build failure
+        if: ${{ failure() && !cancelled() && steps.normal_native_build.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            C:/c167/cargo/registry
+            C:/c167/cargo/git
+            C:/c167/target
+          key: p167-fresh-failed-v1-Windows-rust1.95.0-msvc14.44.35207-sdk10.0.26100.0-${{ inputs.lock_sha256 }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Upload scoped candidate and original evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0

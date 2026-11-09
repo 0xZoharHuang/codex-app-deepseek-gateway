@@ -1656,7 +1656,7 @@ index 3025c3a62b67f370cff4b55164d7c65e2c5ed850..ec2199f797f76da46997788431875bb1
  codex-utils-cargo-bin = { workspace = true }
 diff --git a/codex-rs/core-plugins/src/git_lifetime_windows_tests.rs b/codex-rs/core-plugins/src/git_lifetime_windows_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..6bf2b5dad904ec1c197278b8f798ba139063acf7
+index 0000000000000000000000000000000000000000..5e7eee9e57da8372541f6d4d78a9e2da83a7ad7e
 --- /dev/null
 +++ b/codex-rs/core-plugins/src/git_lifetime_windows_tests.rs
 @@ -0,0 +1,378 @@
@@ -2027,7 +2027,7 @@ index 0000000000000000000000000000000000000000..6bf2b5dad904ec1c197278b8f798ba13
 +            .expect("unique fixture directory")
 +            .to_string_lossy()
 +    );
-+    fs::rename(git, cwd.join(&cwd_only_name)).expect("relocate fixture executable");
++    fs::copy(&test, cwd.join(&cwd_only_name)).expect("independent cwd-only fixture executable");
 +    let error = run_git_command_with_timeout(
 +        Command::new(&cwd_only_name)
 +            .current_dir(&cwd)

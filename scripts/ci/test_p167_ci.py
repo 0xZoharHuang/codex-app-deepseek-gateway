@@ -588,15 +588,26 @@ class P167Gate(unittest.TestCase):
         self.assertEqual(re.findall(r"p20-windows\.py (\w+(?:-\w+)?) --candidate P167", text),
                          ["check-only", "prepare", "locked_fetch", "build", "unit", "warm_git",
                           "git_unit", "warm_core", "extra_unit", "package"])
-        for forbidden in ("actions/cache", "restore-keys:", "secrets.", "CI_P167_RESUME",
+        for forbidden in ("actions/cache/restore", "restore-keys:", "secrets.", "CI_P167_RESUME",
                           "CI_P167_TEST_RESUME", "GH_TOKEN", "gh release"):
             self.assertNotIn(forbidden, text)
+        backups = [a for a in re.findall(r"uses: (\S+)", text) if a.startswith("actions/cache")]
+        self.assertEqual(backups, ["actions/cache/save@caa296126883cff596d87d8935842f9db880ef25"])
+        tail = text.split("      - name: Preserve exact fresh compiler inputs after a post-build failure\n", 1)
+        self.assertEqual(len(tail), 2)
+        self.assertIn("Normal clean-source assembly with all native receipts", tail[0])
+        save = tail[1].split("      - name: Upload scoped candidate and original evidence\n", 1)[0]
+        self.assertIn("failure() && !cancelled() && steps.normal_native_build.outcome == 'success'", save)
+        self.assertIn("continue-on-error: true", save)
+        self.assertIn("inputs.lock_sha256", save)
+        self.assertIn("github.run_id", save)
+        self.assertIn("github.run_attempt", save)
         self.assertIn("CI_P167_GIT_WARMUP: '1'", text)
         self.assertIn("CI_P167_CORE_WARMUP: '1'", text)
         self.assertIn("CI_P167_CORE_JOBS4: '1'", text)
         self.assertIn("CI_P20_BUILD_JOBS: '2'", text)
         self.assertIn("if: ${{ always() }}", text)
-        self.assertTrue(all(re.fullmatch(r"actions/[a-z-]+@[a-f0-9]{40}", action)
+        self.assertTrue(all(re.fullmatch(r"actions/[a-z-]+(?:/save)?@[a-f0-9]{40}", action)
                             for action in re.findall(r"uses: (\S+)", text)))
 
 

@@ -1,10 +1,10 @@
 {
   "status": "sealed",
-  "lock_sha256": "07a7a9a597e06e763233bc6bd630154fab5d25f131fc155a30aad2781cdd20ce",
-  "source_sha256": "4f37e098b1ab63cff44ecd5900f3d5dff5360b6ea7af73643753fc0976cf0a94",
+  "lock_sha256": "e0945f5898e6b3f6f4e94224770e8e4420b6bda66f2df284b72a85f59062247f",
+  "source_sha256": "abbdfa4a6561389f370a6bb3916b93810168c08b25776db715e4ffa6fb8413c9",
   "source_files": 9837,
   "builder_sha256": "809876af3ef31e779e2a6bb8d98774b8cc63e7c0e04b5c96b24b12262e79202c",
-  "packager_sha256": "e598740415d27badb682ac3671ad180451ae3e7da291e6f557ca60123c765f9d",
+  "packager_sha256": "3f890e4a03753c7d4b6d4dcf15d8fe093afd54a8154cee887bd1fcb5513dcaa8",
   "capacity_cases": [
     "compact::tests::persisted_local_manual_413_compacts_only_the_completed_pair_safe_prefix",
     "compact::capacity_projection::tests::projected_image_views_keep_atomic_labels_and_positional_provenance",
@@ -17,5 +17,5 @@
     "session::request_capacity::tests::cold_owned_checkpoint_revalidates_typed_image_metadata_and_delete_fences_late_writer",
     "session::tests::capacity_install_append_failure_fences_session_and_preserves_exact_pending_suffix"
   ],
-  "workflow_sha256": "3c17ab139066b7d60205b2aa50395d85c8e63992022c21484f60d113f96264e9"
+  "workflow_sha256": "bfb27bfc4590e92c5dc5b7affd57f67c53e782778130b5954ab3a44b11cfb3f8"
 }

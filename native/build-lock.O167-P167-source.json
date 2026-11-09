@@ -8,7 +8,7 @@
   "patches": [
     {
       "file": "windows-native-0167.patch",
-      "sha256": "9bfdbde49da226ee394dad2c9ac7aafcae3040187593b2b7849fbd8560b04f04"
+      "sha256": "31f4db38bc17b2c656a6489226529d5afa5173ca0ade74b9b9992f9661cf0248"
     },
     {
       "file": "guardian-native-0167.patch",
@@ -19,7 +19,7 @@
       "sha256": "5b5f881751ee5b71ace348bfb215c67c9c3d269fcd0ed981f444274e47bb7aac"
     }
   ],
-  "prepared_source_sha256": "4f37e098b1ab63cff44ecd5900f3d5dff5360b6ea7af73643753fc0976cf0a94",
+  "prepared_source_sha256": "abbdfa4a6561389f370a6bb3916b93810168c08b25776db715e4ffa6fb8413c9",
   "prepared_source_files": 9837,
   "cargo_lock_sha256": "edcd5f467a4248cc041376e20f89657a8a3223851d968d89dcf3d6495e711bf7",
   "release_environment": {
