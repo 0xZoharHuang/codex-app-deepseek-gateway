@@ -31,13 +31,15 @@ class P167Gate(unittest.TestCase):
         good = dict(status="sealed", lock_sha256="1" * 64, source_sha256="2" * 64,
                     builder_sha256="3" * 64, packager_sha256="4" * 64,
                     workflow_sha256="5" * 64, source_files=9850,
-                    capacity_cases=["session::tests::fixture_exact_capacity"])
+                    capacity_cases=[f"session::tests::fixture_exact_capacity_{i}" for i in range(10)])
         self.assertEqual(ci.reviewed_p167_plan(good)["codex-core"],
                          (*ci.P167_GUARDIAN_CASES["codex-core"], *good["capacity_cases"]))
         for bad in ({"source_files": True}, {"source_sha256": ""},
-                    {"capacity_cases": []}, {"capacity_cases": ["partial"]},
-                    {"capacity_cases": good["capacity_cases"] * 2},
-                    {"capacity_cases": list(ci.P167_GUARDIAN_CASES["codex-core"])}):
+                    {"capacity_cases": []}, {"capacity_cases": good["capacity_cases"][:-1]},
+                    {"capacity_cases": ["partial", *good["capacity_cases"][1:]]},
+                    {"capacity_cases": [good["capacity_cases"][1], *good["capacity_cases"][1:]]},
+                    {"capacity_cases": [ci.P167_GUARDIAN_CASES["codex-core"][0],
+                                        *good["capacity_cases"][1:]]}):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 ci.reviewed_p167_plan({**good, **bad})
 
@@ -422,28 +424,67 @@ class P167Gate(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError,"four logical CPUs"):
                         ci.core_resource_admission()
 
-    def test_workflow_read_only_no_rebuild_and_exact_cache_restore(self):
+    def test_fresh_core_compile_requires_resource_admission_before_observation(self):
+        class CompileObserved(Exception):
+            pass
+
+        for admitted in (False, True):
+            with self.subTest(admitted=admitted), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                record = root / "evidence/p167-core-normal-resource-admission.json"
+                source = root / "work/source/codex-rs"
+                command = ci.unit_command(root, 4, "codex-core")
+                resources = {"logical_cpus": 4, "initial_available_memory_bytes": 8 * 1024**3,
+                             "memory_floor_bytes": ci.FLOOR, "jobs": 4}
+
+                def observe(*args):
+                    self.assertEqual(args, (command, root, source, {}, "native-p167-codex-core-compile", 1800))
+                    self.assertEqual(ci.load(record), {**resources, "command": command, "run_id": "123"})
+                    raise CompileObserved
+
+                ci.save(root / "evidence/normal-six-build.json", {"passed": True})
+                unavailable = ValueError("four logical CPUs required")
+                with (
+                    patch.multiple(ci, CANDIDATE="P167", P167_CASES={"codex-core": ("one",)}),
+                    patch.dict(os.environ, {"CI_RUST_TOOLCHAIN_BIN": str(root), "GITHUB_RUN_ID": "123",
+                                            "CI_P20_BUILD_JOBS": "2", "CI_P167_CORE_JOBS4": "1",
+                                            "CI_P167_RESUME": "", "CI_P167_TEST_RESUME": "",
+                                            "CI_P167_CORE_WARMUP": ""}),
+                    patch.object(ci, "plan", return_value=({}, None, ())),
+                    patch.object(ci, "unit_environment", return_value=({}, None)),
+                    patch.object(ci, "core_resource_admission", return_value=resources,
+                                 side_effect=None if admitted else unavailable) as admission,
+                    patch.object(ci, "observe", side_effect=observe) as observed,
+                ):
+                    with self.assertRaises(CompileObserved if admitted else ValueError):
+                        ci.unit(root, p167_group="codex-core")
+                admission.assert_called_once_with()
+                self.assertEqual(record.is_file(), admitted)
+                self.assertEqual(observed.call_count, int(admitted))
+
+    def test_fresh_workflow_builds_and_seals_every_group_without_resume(self):
         text = (ci.REPO / ".github/workflows/p20-native-windows.yml").read_text()
         self.assertIn("runs-on: windows-2022", text)
+        self.assertIn("timeout-minutes: 345", text)
         self.assertIn("contents: read", text)
         self.assertIn("persist-credentials: false", text)
-        resume = ci.load_module("p167_test_resume_tests", ci.REPO / "scripts/ci/p167-tests-resume.py")
-        self.assertEqual(text.count("actions/cache/restore"), 1)
-        self.assertIn(f"key: {resume.KEY}", text)
-        self.assertIn("fail-on-cache-miss: true", text)
-        self.assertNotIn("restore-keys:", text)
-        self.assertNotIn("secrets.", text)
-        self.assertNotIn("p20-windows.py build --candidate P167", text)
-        self.assertNotIn("p20-windows.py unit --candidate P167", text)
-        self.assertEqual(text.count("p20-windows.py restore_producer --candidate P167"), 1)
-        self.assertLess(text.index("p20-windows.py locked_fetch"), text.index("p20-windows.py restore_producer"))
-        self.assertNotIn("p20-windows.py git_unit --candidate P167", text)
-        self.assertLess(text.index("p20-windows.py restore_producer"), text.index("p20-windows.py warm_core"))
-        self.assertLess(text.index("p20-windows.py warm_core"), text.index("p20-windows.py extra_unit"))
-        self.assertEqual(text.count("p20-windows.py warm_core --candidate P167"), 1)
+        self.assertIn("github.event_name == 'workflow_dispatch'", text)
+        self.assertIn("inputs.candidate == 'P167'", text)
+        self.assertIn("CI_P167_APPROVED_LOCK_SHA256: ${{ inputs.lock_sha256 }}", text)
+        self.assertIn("$hash -cne $env:CI_P167_APPROVED_LOCK_SHA256", text)
+        self.assertIn("p20-hosted-tools.ps1 -Mode Space -Candidate P167", text)
+        self.assertIn("p20-hosted-tools.ps1 -Mode Toolchain -Candidate P167", text)
+        self.assertIn("--only-binary=:all: --require-hashes", text)
+        self.assertEqual(re.findall(r"p20-windows\.py (\w+(?:-\w+)?) --candidate P167", text),
+                         ["check-only", "prepare", "locked_fetch", "build", "unit", "git_unit",
+                          "extra_unit", "package"])
+        for forbidden in ("actions/cache", "restore-keys:", "secrets.", "CI_P167_RESUME",
+                          "CI_P167_TEST_RESUME", "CI_P167_CORE_WARMUP", "GH_TOKEN", "gh release"):
+            self.assertNotIn(forbidden, text)
         self.assertIn("CI_P167_CORE_JOBS4: '1'", text)
         self.assertIn("CI_P20_BUILD_JOBS: '2'", text)
-        self.assertTrue(all(re.fullmatch(r"actions/(?:[a-z-]+|cache/(?:restore|save))@[a-f0-9]{40}", action)
+        self.assertIn("if: ${{ always() }}", text)
+        self.assertTrue(all(re.fullmatch(r"actions/[a-z-]+@[a-f0-9]{40}", action)
                             for action in re.findall(r"uses: (\S+)", text)))
 
 

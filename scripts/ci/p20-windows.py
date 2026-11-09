@@ -106,13 +106,13 @@ def reviewed_p167_plan(review):
     require(type(review.get("source_files")) is int and review["source_files"] >= 9816,
             "Exact prepared source file count required")
     capacity = review.get("capacity_cases")
-    require(isinstance(capacity, list) and bool(capacity)
+    require(isinstance(capacity, list) and len(capacity) == 10
             and all(isinstance(case, str)
                     and re.fullmatch(r"(?:[a-z0-9_]+::)+[a-z0-9_]+", case)
                     for case in capacity)
             and len(set(capacity)) == len(capacity)
             and not set(capacity).intersection(P167_GUARDIAN_CASES["codex-core"]),
-            "Explicit distinct full native capacity libtest selectors required")
+            "Exactly ten distinct full native capacity libtest selectors required")
     return {**P167_GUARDIAN_CASES,
             "codex-core": (*P167_GUARDIAN_CASES["codex-core"], *capacity)}
 
@@ -848,7 +848,8 @@ def unit(root, *, plugin_git=False, p167_group=None):
     jobs = unit_jobs(package_name)
     environment, v8 = unit_environment(root, lock, builder, work, toolchain, cache, target, jobs)
     command = unit_command(toolchain, jobs, package_name)
-    if p167_group == "codex-core" and os.environ.get("CI_P167_CORE_WARMUP") == "1":
+    core_warmup = p167_group == "codex-core" and os.environ.get("CI_P167_CORE_WARMUP") == "1"
+    if core_warmup:
         proof = load(root / "evidence/p167-core-warmup.json")
         warm_raw = root / "evidence/native-p167-core-warmup.json"
         warm_log = root / "evidence/native-p167-core-warmup.log"
@@ -862,10 +863,13 @@ def unit(root, *, plugin_git=False, p167_group=None):
                 and proof["resources"]["initial_available_memory_bytes"] >= 8*1024**3
                 and proof["resources"]["memory_floor_bytes"] == FLOOR,
                 "Normal Core compile must use the same runner, exact inputs and natural mtimes as warm-up")
+    if p167_group == "codex-core" and jobs == 4:
         resources = core_resource_admission()
-        save(root / "evidence/p167-core-normal-resource-admission.json",
-             {**resources, "command":command, "run_id":os.environ["GITHUB_RUN_ID"],
-              "warmup_receipt_sha256":sha(root / "evidence/p167-core-warmup.json")})
+        save(root / "evidence/p167-core-normal-resource-admission.json", {
+            **resources, "command": command, "run_id": os.environ["GITHUB_RUN_ID"],
+            **({"warmup_receipt_sha256": sha(root / "evidence/p167-core-warmup.json")}
+               if core_warmup else {}),
+        })
     observe(command, root, source / "codex-rs", environment, compile_name, 1800)
     artifacts, finished = [], []
     for line in (root / "evidence" / f"{compile_name}.log").read_text(
@@ -1007,9 +1011,10 @@ def package(root):
         **({"p167_exact_native_receipts": p167_receipts} if CANDIDATE == "P167" else {}),
         **({"p167_retained_producer_receipt_sha256": sha(root / "evidence/p167-retained-producer.json")}
            if CANDIDATE == "P167" and os.environ.get("CI_P167_TEST_RESUME") == "1" else {}),
-        **({"p167_core_warmup_receipt_sha256": sha(root / "evidence/p167-core-warmup.json"),
-            "p167_core_normal_resource_receipt_sha256": sha(root / "evidence/p167-core-normal-resource-admission.json")}
+        **({"p167_core_warmup_receipt_sha256": sha(root / "evidence/p167-core-warmup.json")}
            if CANDIDATE == "P167" and os.environ.get("CI_P167_CORE_WARMUP") == "1" else {}),
+        **({"p167_core_normal_resource_receipt_sha256": sha(root / "evidence/p167-core-normal-resource-admission.json")}
+           if CANDIDATE == "P167" and unit_jobs("codex-core") == 4 else {}),
         "App_GUI_qualified": False, "public_stable_release": False,
         "required_next": "Windows Limited Session3 helper/network migration and real official App acceptance"})
 

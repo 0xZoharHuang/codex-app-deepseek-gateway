@@ -14,7 +14,6 @@ on:
         type: string
 permissions:
   contents: read
-  actions: read
 concurrency:
   group: p167-native-${{ github.ref }}
   cancel-in-progress: false
@@ -27,9 +26,6 @@ jobs:
       CI_P20_ROOT: C:\cagp167-${{ github.run_id }}-${{ github.run_attempt }}
       CI_REPOSITORY_VISIBILITY: public
       CI_P20_BUILD_JOBS: '2'
-      CI_P167_RESUME: '1'
-      CI_P167_TEST_RESUME: '1'
-      CI_P167_CORE_WARMUP: '1'
       CI_P167_CORE_JOBS4: '1'
       CI_P167_APPROVED_LOCK_SHA256: ${{ inputs.lock_sha256 }}
       OTEL_SDK_DISABLED: 'true'
@@ -65,53 +61,24 @@ jobs:
       - name: Verify official source, V8 chain, and process observer inputs
         shell: pwsh
         run: python -I -B -u scripts/ci/p20-windows.py prepare --candidate P167 --root "$env:CI_P20_ROOT"
-      - name: Restore exact completed P167 producer and test intermediates
-        id: original-cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: |
-            C:/c167/cargo/registry
-            C:/c167/cargo/git
-            C:/c167/target
-          key: p167-native-v1-Windows-rust1.95.0-msvc14.44.35207-sdk10.0.26100.0-24dab591cfe8c61f3960f109f1a67c7d3e57d9dc371fe8ed09042d35cc695c6d-42516370653-1
-          fail-on-cache-miss: true
-      - name: Verify original completed six sandbox and Git evidence
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python -I -B -u scripts/ci/p20-windows.py resume_inputs --candidate P167 --root "$env:CI_P20_ROOT"
       - name: Verify locked Cargo and nested V8 dependency checkout before compilation
-        id: locked-fetch
         shell: pwsh
-        env:
-          CI_P167_CACHE_HIT: ${{ steps.original-cache.outputs.cache-hit }}
-          CI_P167_CACHE_KEY: ${{ steps.original-cache.outputs.cache-matched-key }}
         run: python -I -B -u scripts/ci/p20-windows.py locked_fetch --candidate P167 --root "$env:CI_P20_ROOT"
-      - name: Restore verified six outputs and original sandbox18 and Git12 receipts
-        id: restore-producer
+      - name: Build all six native binaries from the exact reviewed source
         shell: pwsh
-        env:
-          CI_P167_CACHE_HIT: ${{ steps.original-cache.outputs.cache-hit }}
-          CI_P167_CACHE_KEY: ${{ steps.original-cache.outputs.cache-matched-key }}
-        run: python -I -B -u scripts/ci/p20-windows.py restore_producer --candidate P167 --root "$env:CI_P20_ROOT"
-      - name: Warm exact Core compile on the same runner
+        run: python -I -B -u scripts/ci/p20-windows.py build --candidate P167 --root "$env:CI_P20_ROOT"
+      - name: Run the exact Windows sandbox cases
         shell: pwsh
-        run: python -I -B -u scripts/ci/p20-windows.py warm_core --candidate P167 --root "$env:CI_P20_ROOT"
+        run: python -I -B -u scripts/ci/p20-windows.py unit --candidate P167 --root "$env:CI_P20_ROOT"
+      - name: Run the exact Windows Git lifecycle cases
+        shell: pwsh
+        run: python -I -B -u scripts/ci/p20-windows.py git_unit --candidate P167 --root "$env:CI_P20_ROOT"
       - name: Exact native Guardian and request capacity tests
         shell: pwsh
         run: python -I -B -u scripts/ci/p20-windows.py extra_unit --candidate P167 --root "$env:CI_P20_ROOT"
       - name: Normal clean-source assembly with all native receipts
         shell: pwsh
         run: python -I -B -u scripts/ci/p20-windows.py package --candidate P167 --root "$env:CI_P20_ROOT"
-      - name: Preserve new P167 intermediates for exact packaging-only recovery if needed
-        if: ${{ always() && !cancelled() && steps.restore-producer.outcome == 'success' }}
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: |
-            C:/c167/cargo/registry
-            C:/c167/cargo/git
-            C:/c167/target
-          key: p167-native-v1-Windows-rust1.95.0-msvc14.44.35207-sdk10.0.26100.0-${{ inputs.lock_sha256 }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Upload scoped candidate and original evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
