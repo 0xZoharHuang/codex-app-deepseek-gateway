@@ -51,7 +51,7 @@ EARLY_KEY = KEY.removesuffix(f"-{RUN}-1") + f"-{EARLY_RUN}-1"
 EARLY_ZIP_SIZE = 838096342
 EARLY_ZIP_SHA = "06265f3c096be43fb2781ea61a415ca335233678eaaa1502f838b45412d3da29"
 FORMAL_PACKAGER = "87ef2981f4f56dc61f9ca3d62885d30a3da52c9705f13e8deb52b35a625d97f8"
-EARLY_PACKAGER = "6525484eb37afea894890b4c4d2beead357291113966ab023b86c60feefeae61"
+EARLY_PACKAGER = "353097e2833dd45e79dcaeaf5f2d591faa0d74946eea53c803dbf944cc70a29b"
 EARLY_REF = "refs/heads/codex/p167-hosted-ci-r626"
 FORMAL_STEPS = {
     "Restore exact completed P167 producer and test intermediates": "success",

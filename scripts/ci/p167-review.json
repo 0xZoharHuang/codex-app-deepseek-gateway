@@ -4,7 +4,7 @@
   "source_sha256": "3e9c98401f8219c05fad52ddd701db58137c6b942d91ccb606d1ccdc1b1602dc",
   "source_files": 9837,
   "builder_sha256": "809876af3ef31e779e2a6bb8d98774b8cc63e7c0e04b5c96b24b12262e79202c",
-  "packager_sha256": "6525484eb37afea894890b4c4d2beead357291113966ab023b86c60feefeae61",
+  "packager_sha256": "353097e2833dd45e79dcaeaf5f2d591faa0d74946eea53c803dbf944cc70a29b",
   "capacity_cases": [
     "compact::tests::persisted_local_manual_413_compacts_only_the_completed_pair_safe_prefix",
     "compact_capacity_projection::tests::projected_image_views_keep_atomic_labels_and_positional_provenance",

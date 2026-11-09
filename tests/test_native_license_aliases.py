@@ -340,3 +340,58 @@ def test_gitlink_notice_refuses_case_ambiguous_submodule_ancestor(tmp_path):
     package["source"] = "git+https://example.invalid/fixture?rev=" + revision + "#" + revision
     with pytest.raises(ValueError, match="Ambiguous Windows Git notice submodule path"):
         collector.notice_content(repo / "build/LICENSE", repo, collector.source_context(package))
+
+
+
+@pytest.mark.skipif(not IS_CAG or os.name != "nt", reason="Windows CADSG checkout representation")
+@pytest.mark.parametrize("attributes,autocrlf,eol,fault", [
+    ("* text=auto", "true", "lf", None),
+    ("LICENSE text eol=crlf", "input", "lf", None),
+    ("LICENSE text", "false", "crlf", None),
+    ("* text=auto", "true", "native", "mixed"),
+    ("* text=auto", "true", "native", "tampered"),
+    ("* text=auto", "true", "native", "binary"),
+    ("LICENSE -text", "true", "native", "disabled-attribute"),
+    ("LICENSE text eol=lf", "true", "native", "lf-attribute"),
+    ("LICENSE text", "false", "lf", "disabled-config"),
+    ("* text=auto", "input", "native", "input-config"),
+    ("LICENSE text filter=external", "true", "native", "filter"),
+    ("LICENSE text filter=unspecified", "true", "native", "filter"),
+    ("LICENSE text filter=unset", "true", "native", "filter"),
+    ("LICENSE text ident", "true", "native", "ident"),
+    ("LICENSE text working-tree-encoding=UTF-16LE", "true", "native", "encoding"),
+    ("* text=auto", "true", "native", "dirty-attributes"),
+])
+def test_locked_windows_git_notice_accepts_only_exact_builtin_crlf(tmp_path, attributes, autocrlf, eol, fault):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    git(repo, "config", "core.autocrlf", autocrlf)
+    git(repo, "config", "core.eol", eol)
+    (repo / "Cargo.toml").write_bytes(b'[package]\nname="fixture"\nversion="1.0.0"\n')
+    (repo / ".gitattributes").write_bytes((attributes + "\n").encode())
+    git(repo, "add", "Cargo.toml", ".gitattributes")
+    canonical = FULL if fault != "binary" else FULL + b"\0binary\n"
+    # Put the fixed Git blob in the index without ever invoking a custom filter.
+    blob = git(repo, "hash-object", "-w", "--stdin", input=canonical).strip().decode()
+    git(repo, "update-index", "--add", "--cacheinfo", "100644", blob, "LICENSE")
+    git(repo, "commit", "-qm", "pinned notice")
+    revision = git(repo, "rev-parse", "HEAD").strip().decode()
+    pkg = {"manifest_path": str(repo / "Cargo.toml"),
+           "source": "git+https://example.invalid/fixture?rev=" + revision + "#" + revision}
+    notice = repo / "LICENSE"
+    converted = canonical.replace(b"\n", b"\r\n")
+    if fault is None:
+        git(repo, "-c", "core.autocrlf=" + autocrlf, "checkout-index", "--force", "LICENSE")
+        assert notice.read_bytes() == converted and converted != canonical
+        assert collector.notice_content(notice, repo, collector.source_context(pkg))[0] == canonical
+        return
+    if fault == "mixed":
+        converted = converted.replace(b"\r\n", b"\n", 1)
+    elif fault == "tampered":
+        converted = b"tampered\r\n" + converted
+    elif fault == "dirty-attributes":
+        (repo / ".gitattributes").write_bytes(b"LICENSE text filter=external\n")
+    notice.write_bytes(converted)
+    with pytest.raises(ValueError, match="Git notice content differs"):
+        collector.notice_content(notice, repo, collector.source_context(pkg))

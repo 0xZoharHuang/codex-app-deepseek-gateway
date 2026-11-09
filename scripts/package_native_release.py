@@ -549,6 +549,39 @@ def _regular_notice_bytes(path, scope):
     return content
 
 
+def _windows_git_crlf_checkout(content, blob, relative, scope):
+    """Admit only Git's built-in LF to CRLF checkout representation."""
+    if (os.name != "nt" or b"\r" in blob or b"\0" in blob
+            or content != blob.replace(b"\n", b"\r\n")):
+        return False
+    root, git = scope["root"], scope["git_executable"]
+    query = ("-z", "--all", "--", relative)
+    pinned = _git(root, "check-attr", "--source=" + scope["revision"], *query, executable=git)
+    if pinned != _git(root, "check-attr", *query, executable=git):
+        return False
+    # --all distinguishes absence from a custom driver literally named "unspecified".
+    if {b"filter", b"ident", b"working-tree-encoding"}.intersection(pinned.split(b"\0")[1::3]):
+        return False
+    entry = _git(root, "--literal-pathspecs", "ls-files", "--eol", "-z", "--", relative, executable=git)
+    labels, _, name = entry.partition(b"\t")
+    modes = labels.split(maxsplit=2)
+    if name != relative.encode() + b"\0" or modes[:2] != [b"i/lf", b"w/crlf"] or len(modes) != 3:
+        return False
+    rule = modes[2].rstrip()
+    if rule in {b"attr/text eol=crlf", b"attr/text=auto eol=crlf"}:
+        return True
+    if rule not in {b"attr/", b"attr/text", b"attr/text=auto"}:
+        return False
+    autocrlf = _git(root, "config", "--get", "--default", "false", "--type=bool-or-str",
+                    "core.autocrlf", executable=git).strip()
+    if autocrlf == b"true":
+        return True
+    if autocrlf != b"false" or rule == b"attr/":
+        return False
+    eol = _git(root, "config", "--get", "--default", "native", "core.eol", executable=git).rstrip(b"\r\n").lower()
+    return eol in {b"native", b"crlf"}
+
+
 def notice_content(path, source, context=None):
     source = Path(os.path.abspath(source))
     context = context or {"source": source, "root": source, "kind": "crate", "tree": {}, "index": {}}
@@ -556,8 +589,12 @@ def notice_content(path, source, context=None):
     content = _regular_notice_bytes(resolved, context["root"])
     if context["kind"] == "pinned_git_checkout":
         scope = git_entry[2]
-        require(content == _git(scope["root"], "cat-file", "blob", git_entry[1][1], executable=scope["git_executable"]),
-                "Git notice content differs from the Cargo revision: " + str(resolved))
+        blob = _git(scope["root"], "cat-file", "blob", git_entry[1][1], executable=scope["git_executable"])
+        if content != blob:
+            relative = (context["root"] / git_entry[0]).relative_to(scope["root"]).as_posix()
+            require(_windows_git_crlf_checkout(content, blob, relative, scope),
+                    "Git notice content differs from the Cargo revision: " + str(resolved))
+        content = blob
     require((resolved, chain, git_entry) == _resolve_notice(path, source, context),
             "Crate notice alias changed during copy: " + str(path))
     provenance = None
