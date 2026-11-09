@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import zipfile
+from urllib.parse import urlencode
 
 REPO = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("p167_preceding_resume", Path(__file__).with_name("p167-resume.py"))
@@ -40,6 +41,35 @@ SANDBOX_SHA = "e43829cedfb262e6f67321c8ed3063f5e808c738df458402363c99158ef29b86"
 GIT_FAILURE_SHA = "7dc4493fae2e9342195b3172f196df0a1afd79102a5d769eb3402fe9737190c7"
 KEY = ("p167-native-v1-Windows-rust1.95.0-msvc14.44.35207-sdk10.0.26100.0-"
        "24dab591cfe8c61f3960f109f1a67c7d3e57d9dc371fe8ed09042d35cc695c6d-42516370653-1")
+# The early-only lane recovers cache bytes from a failed formal attempt.
+# The embedded historical ZIP still owns the original six and 30 case receipts.
+EARLY_RUN, EARLY_JOB, EARLY_ARTIFACT = 42524403118, 128864678848, 13636662801
+EARLY_HEAD = "66001c11e20bd6420f71fec72b9200f1be93b7cc"
+EARLY_CACHE_ID = 10205833743
+EARLY_CACHE_VERSION = "e358c3bf48200b610baabba2ae9dd2f435e636e75a5db4d1dd1d9d28e60c6214"
+EARLY_KEY = KEY.removesuffix(f"-{RUN}-1") + f"-{EARLY_RUN}-1"
+EARLY_ZIP_SIZE = 838096342
+EARLY_ZIP_SHA = "06265f3c096be43fb2781ea61a415ca335233678eaaa1502f838b45412d3da29"
+FORMAL_PACKAGER = "87ef2981f4f56dc61f9ca3d62885d30a3da52c9705f13e8deb52b35a625d97f8"
+EARLY_PACKAGER = "6525484eb37afea894890b4c4d2beead357291113966ab023b86c60feefeae61"
+EARLY_REF = "refs/heads/codex/p167-hosted-ci-r626"
+FORMAL_STEPS = {
+    "Restore exact completed P167 producer and test intermediates": "success",
+    "Restore verified six outputs and original sandbox18 and Git12 receipts": "success",
+    "Warm exact Core compile on the same runner": "success",
+    "Exact native Guardian and request capacity tests": "failure",
+    "Normal clean-source assembly with all native receipts": "skipped",
+    "Preserve new P167 intermediates for exact packaging-only recovery if needed": "success",
+    "Upload scoped candidate and original evidence": "success",
+}
+FORMAL_RECORDS = (
+    "inputs.json", "p167-retained-producer.json", "p167-dependency-checkout.json",
+    "p167-core-normal-resource-admission.json", "p167-core-warmup.json",
+    "native-p167-core-warmup.json", "native-p167-core-warmup.log",
+    "native-p167-codex-core-compile.json", "native-p167-codex-core-compile.log",
+    "native-p167-codex-core-case-02.json", "native-p167-codex-core-case-02.log",
+    "extra_unit-failure.json",
+)
 LEAF = "codex-windows-sandbox-p167-libtest.exe"
 GIT_LEAF = "codex-core-plugins-p167-libtest.exe"
 ORIGINAL_SANDBOX = Path(rf"C:\cagp167-{PRODUCER_RUN}-1\delivery\unit") / LEAF
@@ -60,10 +90,91 @@ def verify_zip(path):
     need(path.is_file() and path.stat().st_size == SIZE and sha(path) == ZIP_SHA,
          "Exact prior producer/18 ZIP required")
 
+def early_draft():
+    return os.environ.get("CI_P167_EARLY_DRAFT") == "1"
+
+
+def formal_archive(root):
+    return root / "evidence" / f"p167-native-windows-{EARLY_RUN}-1.zip"
+
+
+def formal_identity():
+    return {
+        "run": EARLY_RUN, "job": EARLY_JOB, "attempt": 1, "head": EARLY_HEAD,
+        "conclusion": "failure", "steps": FORMAL_STEPS, "test_cases_credited": 0,
+        "artifact_id": EARLY_ARTIFACT, "artifact_size": EARLY_ZIP_SIZE,
+        "artifact_sha256": EARLY_ZIP_SHA, "cache_id": EARLY_CACHE_ID,
+        "cache_key": EARLY_KEY, "cache_version": EARLY_CACHE_VERSION, "cache_ref": EARLY_REF,
+        "historical_cache_key": KEY, "formal_packager_sha256": FORMAL_PACKAGER,
+        "early_packager_sha256": EARLY_PACKAGER,
+    }
+
+
+def verify_formal_metadata(run, job, artifact, caches):
+    branch = EARLY_REF.removeprefix("refs/heads/")
+    need(all(run.get(k) == v for k, v in {
+        "id": EARLY_RUN, "head_sha": EARLY_HEAD, "head_branch": branch,
+        "status": "completed", "conclusion": "failure", "run_attempt": 1,
+        "path": ".github/workflows/p20-native-windows.yml", "event": "workflow_dispatch",
+    }.items()), "Exact failed formal cache-producing run required")
+    need(all(job.get(k) == v for k, v in {
+        "id": EARLY_JOB, "run_id": EARLY_RUN, "head_sha": EARLY_HEAD,
+        "status": "completed", "conclusion": "failure",
+    }.items()), "Exact failed formal cache-producing job required")
+    steps = [(row["name"], row["conclusion"]) for row in job["steps"]
+             if row["name"] in FORMAL_STEPS]
+    need(len(steps) == len(FORMAL_STEPS) and dict(steps) == FORMAL_STEPS,
+         "Formal test failure, skipped assembly and successful cache save required")
+    need(all(artifact.get(k) == v for k, v in {
+        "id": EARLY_ARTIFACT, "name": f"p167-native-windows-{EARLY_RUN}-1",
+        "size_in_bytes": EARLY_ZIP_SIZE, "expired": False, "digest": "sha256:" + EARLY_ZIP_SHA,
+    }.items()) and all(artifact["workflow_run"].get(k) == v for k, v in {
+        "id": EARLY_RUN, "head_sha": EARLY_HEAD, "head_branch": branch,
+        "repository_id": 1442389092, "head_repository_id": 1442389092,
+    }.items()), "Exact formal raw artifact identity required")
+    rows = caches["actions_caches"]
+    need(caches["total_count"] == len(rows) == 1 and all(rows[0].get(k) == v for k, v in {
+        "id": EARLY_CACHE_ID, "key": EARLY_KEY, "version": EARLY_CACHE_VERSION, "ref": EARLY_REF,
+    }.items()), "Exact restored cache identity required")
+
+
+def verify_formal_zip(path):
+    need(path.is_file() and path.stat().st_size == EARLY_ZIP_SIZE and sha(path) == EARLY_ZIP_SHA,
+         "Exact failed formal raw ZIP required")
+
+
+def download_formal(root):
+    def api(endpoint):
+        return json.loads(subprocess.check_output(
+            ["gh", "api", f"repos/{previous.REPOSITORY}/actions/{endpoint}"], timeout=30))
+
+    verify_formal_metadata(api(f"runs/{EARLY_RUN}"), api(f"jobs/{EARLY_JOB}"),
+                           api(f"artifacts/{EARLY_ARTIFACT}"),
+                           api("caches?" + urlencode({"key": EARLY_KEY, "ref": EARLY_REF})))
+    out = formal_archive(root)
+    part = out.with_suffix(".part")
+    with part.open("xb") as f:
+        subprocess.run(["gh", "api", f"repos/{previous.REPOSITORY}/actions/artifacts/{EARLY_ARTIFACT}/zip"],
+                       stdout=f, timeout=300, check=True)
+    verify_formal_zip(part)
+    part.rename(out)
+    old = original_archive(root)
+    with zipfile.ZipFile(out) as z, z.open(f"evidence/{old.name}") as src, old.open("xb") as dst:
+        need(z.getinfo(f"evidence/{old.name}").file_size == SIZE, "Historical ZIP size differs")
+        shutil.copyfileobj(src, dst, 1024 * 1024)
+    verify_zip(old)
+    receipt = root / "evidence/early-formal-cache-identity.json"
+    with receipt.open("x", encoding="utf-8") as f:
+        json.dump(formal_identity(), f, indent=2)
+
+
 def download(root):
     need(os.environ.get("CI_P167_TEST_RESUME") == "1"
          and os.environ.get("GITHUB_REPOSITORY", "").casefold() == previous.REPOSITORY.casefold(),
          "Exact test-resume repository required")
+    if early_draft():
+        download_formal(root)
+        return
     out = original_archive(root)
     part = out.with_suffix(".part")
     with part.open("xb") as f:
@@ -72,7 +183,7 @@ def download(root):
     verify_zip(part)
     part.rename(out)
 
-def read_origin(path, evidence, work, cache, target, lock, source_sha, lock_sha):
+def read_origin(path, evidence, work, cache, target, lock, source_sha, lock_sha, *, early=False):
     verify_zip(path)
     with zipfile.ZipFile(path) as z:
         def exact(name, digest=None):
@@ -95,7 +206,10 @@ def read_origin(path, evidence, work, cache, target, lock, source_sha, lock_sha)
         bind = exact("normal-source-binding.json")
         inputs = exact("inputs.json")
         current = json.loads((evidence / "inputs.json").read_bytes())
-        fields = ("lock_sha256", "source_sha256", "normal_builder_sha256", "normal_packager_sha256", "build_jobs")
+        fields = ("lock_sha256", "source_sha256", "normal_builder_sha256", "build_jobs")
+        packagers = inputs["normal_packager_sha256"], current["normal_packager_sha256"]
+        need(packagers == (FORMAL_PACKAGER, EARLY_PACKAGER) if early else packagers[0] == packagers[1],
+             "Original producer or current packager hash differs")
         need(inputs["source_commit"] == COMMIT and inputs["build_jobs"] == 2
              and all(current[key] == inputs[key] for key in fields), "Normal source/builder/lock inputs differ")
         toolchain = exact("toolchain.json")
@@ -172,14 +286,49 @@ def read_origin(path, evidence, work, cache, target, lock, source_sha, lock_sha)
             "same_runner_core_warm_proof_sha256": CORE_WARM_PROOF_SHA}
 
 
+def read_formal(root, restored, source_sha, lock_sha):
+    receipt = root / "evidence/early-formal-cache-identity.json"
+    need(json.loads(receipt.read_bytes()) == formal_identity(), "Formal cache identity receipt differs")
+    path = formal_archive(root)
+    verify_formal_zip(path)
+    with zipfile.ZipFile(path) as z:
+        records = {name: z.read(f"evidence/{name}") for name in FORMAL_RECORDS}
+        inputs = json.loads(records["inputs.json"])
+        current = json.loads((root / "evidence/inputs.json").read_bytes())
+        retained = json.loads(records["p167-retained-producer.json"])
+        failure = json.loads(records["extra_unit-failure.json"])
+        failed_case = json.loads(records["native-p167-codex-core-case-02.json"])
+        need(inputs["source_commit"] == EARLY_HEAD and inputs["source_sha256"] == source_sha
+             and inputs["lock_sha256"] == lock_sha and inputs["build_jobs"] == 2
+             and inputs["normal_packager_sha256"] == FORMAL_PACKAGER
+             and current["normal_packager_sha256"] == EARLY_PACKAGER
+             and inputs["normal_builder_sha256"] == current["normal_builder_sha256"]
+             and retained == restored
+             and previous.digest(z.read("evidence/normal-raw-manifest.json")) == RAW_SHA
+             and previous.digest(z.read("evidence/normal-six-build.json")) == BUILD_SHA
+             and failure["original_failure_preserved"] is True and failure["App_GUI_qualified"] is False
+             and failure["error"].startswith("native-p167-codex-core-case-02 failed;")
+             and failed_case["passed"] is False
+             and failed_case["log_sha256"] == previous.digest(records["native-p167-codex-core-case-02.log"]),
+             "Failed formal raw evidence or original six lineage differs")
+    return {**formal_identity(), "records": {name: previous.digest(data) for name, data in records.items()}}
+
+
 def admit_cache(root, lock, source_sha, lock_sha, cache, target):
+    early = early_draft()
+    key = EARLY_KEY if early else KEY
     need(os.environ.get("CI_P167_TEST_RESUME") == "1" and os.environ.get("CI_P167_CACHE_HIT") == "true"
-         and os.environ.get("CI_P167_CACHE_KEY") == KEY, "Exact completed P167 cache required")
+         and os.environ.get("CI_P167_CACHE_KEY") == key, "Exact completed P167 cache required")
     work = original_work(root)
     need(work.parent != root and not work.parent.exists() and target.resolve(strict=True) == target
          and not target.is_junction() and cache.resolve(strict=True) == cache,
          "Fresh runner, original source path and physical cache required")
-    return read_origin(original_archive(root), root / "evidence", work, cache, target, lock, source_sha, lock_sha)
+    restored = read_origin(original_archive(root), root / "evidence", work, cache, target, lock,
+                           source_sha, lock_sha, early=early)
+    if early:
+        formal = read_formal(root, restored, source_sha, lock_sha)
+        return {**restored, "cache_key": key, "failed_formal_cache": formal}
+    return restored
 
 def cache_binaries(target, raw, expected):
     rows = raw["binaries"]

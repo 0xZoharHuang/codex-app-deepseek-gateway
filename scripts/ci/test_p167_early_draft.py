@@ -32,14 +32,28 @@ class EarlyDraft(unittest.TestCase):
                 early.draft_state({**self.state(),**change},17,self.head,{})
         early.draft_state(self.state(),17,self.head,{})
 
+    def retained(self, resume):
+        return {"same_runner_core_run":resume.RUN, "same_runner_core_artifact_sha256":resume.ZIP_SHA,
+                "same_runner_core_compile_sha256":resume.CORE_SAME_RUNNER_SHA, "repeat_core_compile_run":"42511450429",
+                "repeat_core_artifact_sha256":"5c504baf7ae12bcf96073ff6b12567d15612110ceb2ae5a2daa38e0a854eb213",
+                "repeat_core_compile_sha256":resume.CORE_REPEAT_SHA, "raw_manifest_sha256":early.ORIGINAL_RAW,
+                "native_producer_rerun":False, "original_sandbox_reexecuted":False, "original_git_reexecuted":False,
+                "cache_key":resume.EARLY_KEY, "failed_formal_cache":{
+                    **resume.formal_identity(), "records":dict.fromkeys(resume.FORMAL_RECORDS, "a"*64)}}
+
     def test_upload_uses_only_exact_draft_and_keeps_payload_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root/"evidence").mkdir()
             archive = root/"assembled.tar.gz"; archive.write_bytes(b"fixture archive")
             digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+            with patch.dict(os.environ, {"CI_P167_TEST_RESUME":"1"}):
+                resume = early.controller().resume_controller()
             class CI:
                 sha = staticmethod(digest)
                 load = staticmethod(lambda p:json.loads(p.read_bytes()))
+                resume_controller = staticmethod(lambda:resume)
+            retained = self.retained(resume)
+            (root/"evidence/p167-retained-producer.json").write_text(json.dumps(retained))
             assembly_path = root / "evidence/early-assembly/assembly-result.json"
             assembly_path.parent.mkdir()
             assembly = {"archive":str(archive), "kind":"clean_source_assembly",
@@ -55,6 +69,7 @@ class EarlyDraft(unittest.TestCase):
                      "normal_assembly_receipt_sha256":digest(assembly_path),
                      "normal_assembly_receipt_size":assembly_path.stat().st_size,
                      "native_manifest_sha256":assembly["manifest_sha256"],
+                     "retained_producer":retained,
                      "full_native_suite_qualified":False,"App_GUI_qualified":False,"public_stable_release":False}
             receipt = root/"evidence/EARLY_UNQUALIFIED.json"
             receipt.write_text(json.dumps(proof))
@@ -140,18 +155,47 @@ class EarlyDraft(unittest.TestCase):
     def test_retained_chain_binds_latest_same_runner_and_previous_repeat(self):
         with patch.dict(os.environ, {"CI_P167_TEST_RESUME":"1"}):
             resume = early.controller().resume_controller()
-        retained = {"same_runner_core_run":resume.RUN,"same_runner_core_artifact_sha256":resume.ZIP_SHA,
-            "same_runner_core_compile_sha256":resume.CORE_SAME_RUNNER_SHA,"repeat_core_compile_run":"42511450429",
-            "repeat_core_artifact_sha256":"5c504baf7ae12bcf96073ff6b12567d15612110ceb2ae5a2daa38e0a854eb213",
-            "repeat_core_compile_sha256":resume.CORE_REPEAT_SHA,"raw_manifest_sha256":early.ORIGINAL_RAW,
-            "native_producer_rerun":False,"original_sandbox_reexecuted":False,"original_git_reexecuted":False}
+        retained = self.retained(resume)
         early.retained_identity(retained,resume)
+        early.require_failed_formal(retained,resume)
+        for changed in ({"test_cases_credited":3}, {"conclusion":"success"}, {"cache_id":1},
+                        {"early_packager_sha256":resume.FORMAL_PACKAGER}, {"records":{}}):
+            with self.subTest(changed=changed), self.assertRaisesRegex(ValueError,"zero test credit"):
+                early.require_failed_formal({**retained, "failed_formal_cache":{
+                    **retained["failed_formal_cache"], **changed}}, resume)
+        with self.assertRaisesRegex(ValueError,"zero test credit"):
+            early.require_failed_formal({**retained, "cache_key":resume.KEY}, resume)
         for changed in ({"same_runner_core_run":retained["repeat_core_compile_run"]},
                         {"same_runner_core_artifact_sha256":retained["repeat_core_artifact_sha256"]},
                         {"repeat_core_compile_run":resume.RUN},{"repeat_core_artifact_sha256":resume.ZIP_SHA},
                         {"raw_manifest_sha256":"different"},{"original_git_reexecuted":True}):
             with self.subTest(changed=changed),self.assertRaises(ValueError):
                 early.retained_identity({**retained,**changed},resume)
+
+    def test_exact_failed_run_artifact_and_cache_metadata(self):
+        with patch.dict(os.environ, {"CI_P167_TEST_RESUME":"1"}):
+            resume = early.controller().resume_controller()
+        branch = resume.EARLY_REF.removeprefix("refs/heads/")
+        run = {"id":resume.EARLY_RUN, "head_sha":resume.EARLY_HEAD, "head_branch":branch,
+               "status":"completed", "conclusion":"failure", "run_attempt":1,
+               "path":".github/workflows/p20-native-windows.yml", "event":"workflow_dispatch"}
+        job = {"id":resume.EARLY_JOB, "run_id":resume.EARLY_RUN, "head_sha":resume.EARLY_HEAD,
+               "status":"completed", "conclusion":"failure",
+               "steps":[{"name":n, "conclusion":s} for n,s in resume.FORMAL_STEPS.items()]}
+        artifact = {"id":resume.EARLY_ARTIFACT, "name":f"p167-native-windows-{resume.EARLY_RUN}-1",
+                    "size_in_bytes":resume.EARLY_ZIP_SIZE, "expired":False, "digest":"sha256:"+resume.EARLY_ZIP_SHA,
+                    "workflow_run":{"id":resume.EARLY_RUN, "head_sha":resume.EARLY_HEAD, "head_branch":branch,
+                                    "repository_id":1442389092, "head_repository_id":1442389092}}
+        cache = {"id":resume.EARLY_CACHE_ID, "key":resume.EARLY_KEY,
+                 "version":resume.EARLY_CACHE_VERSION, "ref":resume.EARLY_REF}
+        caches = {"total_count":1, "actions_caches":[cache]}
+        resume.verify_formal_metadata(run,job,artifact,caches)
+        for values in (({**run,"conclusion":"success"},job,artifact,caches),
+                       (run,{**job,"steps":job["steps"][:-1]},artifact,caches),
+                       (run,job,{**artifact,"expired":True},caches),
+                       (run,job,artifact,{**caches,"actions_caches":[{**cache,"key":resume.KEY}]})):
+            with self.assertRaises(ValueError):
+                resume.verify_formal_metadata(*values)
 
     def test_workflow_has_only_private_upload_no_native_compile_or_artifact(self):
         path=early.REPO/".github/workflows/p20-native-package-resume.yml"
@@ -164,7 +208,11 @@ class EarlyDraft(unittest.TestCase):
         self.assertIn("fail-on-cache-miss: true",text)
         with patch.dict(os.environ, {"CI_P167_TEST_RESUME":"1"}):
             resume = early.controller().resume_controller()
-            self.assertIn(f"key: {resume.KEY}",text)
+            self.assertIn(f"key: {resume.EARLY_KEY}",text)
+            self.assertNotIn(resume.KEY,text)
+            formal = (early.REPO/".github/workflows/p20-native-windows.yml").read_text()
+            self.assertIn(f"key: {resume.KEY}",formal)
+            self.assertNotIn(resume.EARLY_KEY,formal)
 
 if __name__ == "__main__":
     unittest.main()

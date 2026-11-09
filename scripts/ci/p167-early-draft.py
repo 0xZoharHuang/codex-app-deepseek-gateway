@@ -62,10 +62,22 @@ def retained_identity(retained, resume):
             "Exact retained producer/18/Git12 chain required")
 
 
+def require_failed_formal(retained, resume):
+    formal = retained.get("failed_formal_cache", {})
+    require(retained.get("cache_key") == resume.EARLY_KEY
+            and {k: v for k, v in formal.items() if k != "records"} == resume.formal_identity()
+            and set(formal.get("records", {})) == set(resume.FORMAL_RECORDS)
+            and all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in formal["records"].values()),
+            "Exact failed formal cache provenance with zero test credit required")
+
+
 def assemble(ci, root, head):
     lock, builder, _ = ci.plan()
-    retained = ci.load(root / "evidence/p167-retained-producer.json")
-    retained_identity(retained, ci.resume_controller())
+    retained_path = root / "evidence/p167-retained-producer.json"
+    retained = ci.load(retained_path)
+    resume = ci.resume_controller()
+    retained_identity(retained, resume)
+    require_failed_formal(retained, resume)
     raw = root / "native-producer/manifest.json"
     require(ci.sha(raw) == ORIGINAL_RAW and ci.sha(root / "evidence/normal-six-build.json") == ORIGINAL_BUILD,
             "Exact original normal producer manifest and observer required")
@@ -99,6 +111,7 @@ def assemble(ci, root, head):
             and d["archive_identity"]["size"] == archive.stat().st_size
             and builder.source_state(source) == before, "Ordinary clean-source early package evidence differs")
     ci.verify_normal_outputs(root, manifest)
+    require(ci.load(retained_path) == retained, "Retained producer provenance changed during assembly")
     proof = {"status":"P167_EARLY_UNQUALIFIED_PRIVATE_SMOKE_ONLY", "label":LABEL,
              "head":head, "run":os.environ["GITHUB_RUN_ID"], "source_sha256":ci.SOURCE,
              "build_lock_sha256":ci.LOCK, "normal_assembly_receipt_sha256":ci.sha(assembly_path),
@@ -194,6 +207,11 @@ def upload(ci, root, head, release):
             and assembly["archive_identity"]["sha256"] == proof["archive_sha256"]
             and assembly["archive_identity"]["size"] == proof["archive_size"],
             "Same-run assembly receipt differs from archive or manifest")
+    retained = ci.load(root / "evidence/p167-retained-producer.json")
+    resume = ci.resume_controller()
+    retained_identity(retained, resume)
+    require_failed_formal(retained, resume)
+    require(proof.get("retained_producer") == retained, "Draft proof lost its retained cache provenance")
     endpoint = f"repos/{REPOSITORY}/releases/{release}"
     uploaded = {}
     assets = [
