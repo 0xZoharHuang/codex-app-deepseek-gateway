@@ -201,7 +201,8 @@ class EarlyDraft(unittest.TestCase):
         path=early.REPO/".github/workflows/p20-native-package-resume.yml"
         text=path.read_text()
         for forbidden in ("actions/upload-artifact", "actions/cache/save", "p20-windows.py build ",
-                          "p20-windows.py unit ", "p20-windows.py git_unit ", "p20-windows.py extra_unit "):
+                          "p20-windows.py unit ", "p20-windows.py git_unit ", "p20-windows.py extra_unit ",
+                          "p20-windows.py warm_git ", "p20-windows.py warm_core "):
             self.assertNotIn(forbidden,text)
         self.assertIn("p20-windows.py restore_producer --candidate P167",text)
         self.assertIn("p167-early-draft.py upload",text)
@@ -211,8 +212,10 @@ class EarlyDraft(unittest.TestCase):
             self.assertIn(f"key: {resume.EARLY_KEY}",text)
             self.assertNotIn(resume.KEY,text)
             formal = (early.REPO/".github/workflows/p20-native-windows.yml").read_text()
-            self.assertIn(f"key: {resume.KEY}",formal)
+            self.assertNotIn(resume.KEY,formal)
             self.assertNotIn(resume.EARLY_KEY,formal)
+            self.assertNotIn("actions/cache/restore",formal)
+            self.assertIn("p20-windows.py build --candidate P167",formal)
 
 if __name__ == "__main__":
     unittest.main()
