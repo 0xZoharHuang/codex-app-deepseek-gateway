@@ -395,7 +395,7 @@ def observe(command, root, cwd, environment, name, timeout):
                   log_sha256=sha(log_path), build_controller_only=True)
     telemetry = None
     compile_steps = {"normal-six-build", "native-unit-compile", "native-git-unit-compile",
-                     "native-p167-core-warmup", "native-p167-git-warmup"}
+                     "native-p167-core-warmup", "native-p167-git-warmup", "native-p167-guardian-warmup"}
     if CANDIDATE == "P167":
         compile_steps.update(f"native-p167-{name}-compile" for name in P167_CASES)
     if not result["observer_passed"] and name in compile_steps:
@@ -712,9 +712,10 @@ def unit_environment(root, lock, builder, work, toolchain, cache, target, jobs):
 
 def unit_jobs(package_name):
     jobs = build_jobs()
-    if (CANDIDATE == "P167" and package_name == "codex-core"
-            and os.environ.get("CI_P167_CORE_JOBS4") == "1"):
-        require(jobs == 2, "Normal producer and all other groups stay at two jobs")
+    hosted_jobs4 = ((package_name == "codex-core" and os.environ.get("CI_P167_CORE_JOBS4") == "1")
+                    or (package_name == "codex-guardian-v2" and os.environ.get("CI_P167_GUARDIAN_WARMUP") == "1"))
+    if CANDIDATE == "P167" and hosted_jobs4:
+        require(jobs == 2, "Normal producer stays at two jobs")
         return 4
     return jobs
 
@@ -798,8 +799,11 @@ def fresh_warm_lineage(root, target, label):
             and produced["normal_manifest_sha256"] == sha(manifest),
             "Warm compile requires this run's fresh native producer")
     expected = [("native-unit18.json", "P167_NATIVE_COMPONENT18_PASSED_NOT_APP_QUALIFIED", 18)]
-    if label == "core":
+    if label in {"core", "guardian"}:
         expected.append(("native-git-unit12.json", "P167_NATIVE_GIT12_PASSED_NOT_APP_QUALIFIED", 12))
+    if label == "guardian":
+        expected.append(("native-p167-codex-core.json", "P167_EXACT_NATIVE_UNIT_PASSED_NOT_APP_QUALIFIED",
+                         len(P167_CASES["codex-core"])))
     prior = {}
     for name, status, count in expected:
         path = evidence / name
@@ -905,7 +909,7 @@ def unit(root, *, plugin_git=False, p167_group=None):
     jobs = unit_jobs(package_name)
     environment, v8 = unit_environment(root, lock, builder, work, toolchain, cache, target, jobs)
     command = unit_command(toolchain, jobs, package_name)
-    warm_label = ("git" if plugin_git else "core" if p167_group == "codex-core" else None)
+    warm_label = "git" if plugin_git else {"codex-core": "core", "codex-guardian-v2": "guardian"}.get(p167_group)
     warmup = (CANDIDATE == "P167" and warm_label is not None
               and os.environ.get(f"CI_P167_{warm_label.upper()}_WARMUP") == "1")
     if warmup:
@@ -919,7 +923,7 @@ def unit(root, *, plugin_git=False, p167_group=None):
                 and proof["observer_sha256"] == sha(warm_raw) and proof["log_sha256"] == sha(warm_log)
                 and proof["status"] == admit_warm_result(load(warm_raw), command, warm_log)
                 and proof["inputs"] == warm_inputs(builder, source, v8, lock)
-                and proof["resources"]["jobs"] == jobs == (4 if warm_label == "core" else 2)
+                and proof["resources"]["jobs"] == jobs == (2 if warm_label == "git" else 4)
                 and proof["resources"]["logical_cpus"] == 4
                 and proof["resources"]["initial_available_memory_bytes"] >= 8*1024**3
                 and proof["resources"]["memory_floor_bytes"] == FLOOR,
@@ -979,6 +983,10 @@ def git_unit(root):
 def extra_unit(root):
     require(CANDIDATE == "P167" and bool(P167_CASES), "P167 exact Guardian/capacity selectors required")
     for group in P167_CASES:
+        if group == "codex-guardian-v2" and os.environ.get("CI_P167_GUARDIAN_WARMUP") == "1":
+            require(os.environ.get("CI_P167_RESUME") != "1" and os.environ.get("CI_P167_TEST_RESUME") != "1",
+                    "Guardian warm compile must use the original producer on the same runner")
+            warm_compile(root, "guardian", group)
         unit(root, p167_group=group)
 
 

@@ -29,6 +29,7 @@ jobs:
       CI_P167_CORE_JOBS4: '1'
       CI_P167_GIT_WARMUP: '1'
       CI_P167_CORE_WARMUP: '1'
+      CI_P167_GUARDIAN_WARMUP: '1'
       CI_P167_APPROVED_LOCK_SHA256: ${{ inputs.lock_sha256 }}
       OTEL_SDK_DISABLED: 'true'
       VSCMD_SKIP_SENDTELEMETRY: '1'
