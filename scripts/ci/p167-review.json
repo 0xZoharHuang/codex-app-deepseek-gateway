@@ -1,14 +1,14 @@
 {
   "status": "sealed",
-  "lock_sha256": "24dab591cfe8c61f3960f109f1a67c7d3e57d9dc371fe8ed09042d35cc695c6d",
-  "source_sha256": "3e9c98401f8219c05fad52ddd701db58137c6b942d91ccb606d1ccdc1b1602dc",
+  "lock_sha256": "07a7a9a597e06e763233bc6bd630154fab5d25f131fc155a30aad2781cdd20ce",
+  "source_sha256": "4f37e098b1ab63cff44ecd5900f3d5dff5360b6ea7af73643753fc0976cf0a94",
   "source_files": 9837,
   "builder_sha256": "809876af3ef31e779e2a6bb8d98774b8cc63e7c0e04b5c96b24b12262e79202c",
-  "packager_sha256": "353097e2833dd45e79dcaeaf5f2d591faa0d74946eea53c803dbf944cc70a29b",
+  "packager_sha256": "e598740415d27badb682ac3671ad180451ae3e7da291e6f557ca60123c765f9d",
   "capacity_cases": [
     "compact::tests::persisted_local_manual_413_compacts_only_the_completed_pair_safe_prefix",
-    "compact_capacity_projection::tests::projected_image_views_keep_atomic_labels_and_positional_provenance",
-    "compact_capacity_projection::tests::projected_completed_tool_pair_keeps_ids_and_utf8_coverage",
+    "compact::capacity_projection::tests::projected_image_views_keep_atomic_labels_and_positional_provenance",
+    "compact::capacity_projection::tests::projected_completed_tool_pair_keeps_ids_and_utf8_coverage",
     "session::capacity_recovery::tests::recovery_cut_does_not_consume_current_input_or_split_a_tool_pair",
     "session::capacity_recovery::tests::translated_reset_receipt_preserves_epoch_fence_and_excludes_live_suffix",
     "session::capacity_recovery::tests::reset_old_gap_proof_checks_typed_bytes_and_exact_metadata_and_excludes_current",
@@ -17,5 +17,5 @@
     "session::request_capacity::tests::cold_owned_checkpoint_revalidates_typed_image_metadata_and_delete_fences_late_writer",
     "session::tests::capacity_install_append_failure_fences_session_and_preserves_exact_pending_suffix"
   ],
-  "workflow_sha256": "0fa58c9a8945cfd0e5e5df3fdc5bea2945f2d75c2250a08c784598dbe7bd4ff9"
+  "workflow_sha256": "3c17ab139066b7d60205b2aa50395d85c8e63992022c21484f60d113f96264e9"
 }

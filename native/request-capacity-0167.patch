@@ -1571,14 +1571,14 @@ index a13b18ba448680976c0ce047aeb296e5c2c9d1ee..9b211afa80c04af377dec2cf2233c915
          sess.conversation_history_snapshot().await.as_ref(),
      ) == crate::context::GuardianContextMode::Legacy
 diff --git a/codex-rs/core/src/compact_tests.rs b/codex-rs/core/src/compact_tests.rs
-index a57d2f024069fea9987ee1f24f3c3b42f470ccaf..cbddd893571ec85fed4137148655eb9f81d70fac 100644
+index a57d2f024069fea9987ee1f24f3c3b42f470ccaf..58d53662a9acf12b1cbcdcfefe75b145c1b60401 100644
 --- a/codex-rs/core/src/compact_tests.rs
 +++ b/codex-rs/core/src/compact_tests.rs
-@@ -24,6 +24,98 @@ use pretty_assertions::assert_eq;
+@@ -24,6 +24,101 @@ use pretty_assertions::assert_eq;
  use serde_json::json;
  use test_case::test_case;
  
-+#[tokio::test]
++#[tokio::test(flavor = "multi_thread")]
 +async fn persisted_local_manual_413_compacts_only_the_completed_pair_safe_prefix()
 +-> anyhow::Result<()> {
 +    skip_if_no_network!(Ok(()));
@@ -1590,16 +1590,19 @@ index a57d2f024069fea9987ee1f24f3c3b42f470ccaf..cbddd893571ec85fed4137148655eb9f
 +    use wiremock::matchers::path;
 +    let server = responses::start_mock_server().await;
 +    let provider = ModelProviderInfo::create_openai_provider(Some(format!("{}/v1", server.uri())));
-+    let (mut session, turn, _events) = make_session_and_context_with_auth_and_config_and_rx(
-+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
-+        Vec::new(),
-+        move |config| {
-+            config.model = Some("gpt-5.2".to_string());
-+            config.model_provider = provider;
-+            config.model_provider.supports_websockets = false;
-+        },
-+    )
-+    .await;
++    let home = crate::session::request_capacity::TestProfile::new()?;
++    let (mut session, turn, _events) =
++        crate::session::tests::make_session_and_context_with_auth_config_home_and_rx(
++            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
++            Vec::new(),
++            home.path(),
++            move |config| {
++                config.model = Some("gpt-5.2".to_string());
++                config.model_provider = provider;
++                config.model_provider.supports_websockets = false;
++            },
++        )
++        .await;
 +    crate::session::tests::attach_thread_persistence(
 +        Arc::get_mut(&mut session).expect("unique test session"),
 +    )
@@ -1673,7 +1676,7 @@ index a57d2f024069fea9987ee1f24f3c3b42f470ccaf..cbddd893571ec85fed4137148655eb9f
  #[test_case(true; "metadata enabled")]
  #[test_case(false; "metadata disabled after capture")]
  #[tokio::test]
-@@ -189,6 +281,7 @@ async fn local_compaction_retries_preserve_instructions_and_tool_metadata(
+@@ -189,6 +284,7 @@ async fn local_compaction_retries_preserve_instructions_and_tool_metadata(
              text: "Summarize the conversation.".to_string(),
              text_elements: Vec::new(),
          }],
@@ -1717,7 +1720,7 @@ index 51573406cbac98747a83e8b6fa7594b2b6c59063..16d4309a8a21e37cbd99165c2563ec6c
 +}
 diff --git a/codex-rs/core/src/session/capacity_recovery.rs b/codex-rs/core/src/session/capacity_recovery.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..b5559fae06ea548c6acd4e6ef9445c4dee857775
+index 0000000000000000000000000000000000000000..1550fca530d8871f2dff71c4d2a278ed184331a5
 --- /dev/null
 +++ b/codex-rs/core/src/session/capacity_recovery.rs
 @@ -0,0 +1,1076 @@
@@ -2630,7 +2633,7 @@ index 0000000000000000000000000000000000000000..b5559fae06ea548c6acd4e6ef9445c4d
 +    #[test]
 +    fn translated_reset_receipt_preserves_epoch_fence_and_excludes_live_suffix()
 +    -> anyhow::Result<()> {
-+        let home = tempfile::tempdir()?;
++        let home = request_capacity::TestProfile::new()?;
 +        let thread = "018f3405-e835-71af-914a-7efb76abfa71";
 +        let turn = "018f3405-e835-71af-914a-7efb76abfa72";
 +        let binding = request_capacity::Binding::for_profile(
@@ -2705,7 +2708,7 @@ index 0000000000000000000000000000000000000000..b5559fae06ea548c6acd4e6ef9445c4d
 +    #[test]
 +    fn completed_manual_prefix_creates_cold_genesis_then_translates_existing_lineage()
 +    -> anyhow::Result<()> {
-+        let home = tempfile::tempdir()?;
++        let home = request_capacity::TestProfile::new()?;
 +        let thread = "018f3405-e835-71af-914a-7efb76abfa71";
 +        let turn = "018f3405-e835-71af-914a-7efb76abfa72";
 +        let retained = message("summarized manual input", thread)?;
@@ -3130,10 +3133,10 @@ index f365c4e2e8cba703f2189ecff0acaf6aacd20ef1..a2479d1f3cb5033d1ba1c43dc88b6754
              state.start_new_context_window()
 diff --git a/codex-rs/core/src/session/request_capacity.rs b/codex-rs/core/src/session/request_capacity.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..afdd269e0b8cc51cdf4043638f6990d5f1f2cf9d
+index 0000000000000000000000000000000000000000..8d27fec65e444ddf356851c298ebfc8adb63bd1f
 --- /dev/null
 +++ b/codex-rs/core/src/session/request_capacity.rs
-@@ -0,0 +1,1318 @@
+@@ -0,0 +1,1345 @@
 +//! Native-owned consumption metadata, never history, credentials or a tool runtime.
 +//! A checkpoint proves replayable native input after an ordinary completion or a
 +//! fresh manual summary, following the existing rollout flush barrier.
@@ -4410,6 +4413,33 @@ index 0000000000000000000000000000000000000000..afdd269e0b8cc51cdf4043638f6990d5
 +}
 +
 +#[cfg(test)]
++pub(crate) struct TestProfile {
++    _root: tempfile::TempDir,
++    path: PathBuf,
++}
++
++#[cfg(test)]
++impl TestProfile {
++    pub(crate) fn new() -> Result<Self> {
++        let root = tempfile::tempdir()?;
++        let parent = std::fs::canonicalize(root.path())?;
++        // A Windows elevated token can give ordinary temporary directories
++        // the Administrators group as owner. Create the profile with the
++        // same explicit current-user ownership as native capacity children.
++        let directory = platform::Directory::open_home(&parent)?;
++        directory
++            .child("profile", true, true)?
++            .context("create private test profile")?;
++        let path = parent.join("profile");
++        Ok(Self { _root: root, path })
++    }
++
++    pub(crate) fn path(&self) -> &Path {
++        &self.path
++    }
++}
++
++#[cfg(test)]
 +mod tests {
 +    use super::*;
 +    use codex_history::CodexHarnessMetadata;
@@ -4418,7 +4448,7 @@ index 0000000000000000000000000000000000000000..afdd269e0b8cc51cdf4043638f6990d5
 +    #[test]
 +    fn cold_owned_checkpoint_revalidates_typed_image_metadata_and_delete_fences_late_writer()
 +    -> Result<()> {
-+        let home = tempfile::tempdir()?;
++        let home = TestProfile::new()?;
 +        let thread = "018f3405-e835-71af-914a-7efb76abfa71";
 +        let binding = Binding::for_profile(home.path(), thread, "model", "provider", "window")?;
 +        let item = serde_json::from_value(json!({"type":"message", "role":"user",
