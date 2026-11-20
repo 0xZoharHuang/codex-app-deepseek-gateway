@@ -213,6 +213,7 @@ runpy.run_path(argv[0],run_name='__main__')
                 else:
                     output=[{"id":"mock-message","type":"message","role":"assistant","status":"completed",
                              "content":[{"type":"output_text","text":"Local synthetic stand-in only","annotations":[]}]}]
+                    stream.append({"type":"response.output_item.done","output_index":0,"item":output[0]})
                 stream.append({"type":"response.completed","response":{"id":rid,"status":"completed","output":output,
                     "usage":{"input_tokens":1,"output_tokens":1}}})
                 return web.Response(body=b"".join(f.encode_sse(e) for e in stream),content_type="text/event-stream")

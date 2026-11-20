@@ -4,6 +4,7 @@ This does not install, activate, configure, launch, qualify, or publish anything
 """
 from __future__ import annotations
 import argparse
+import ast
 from email.parser import BytesParser
 import hashlib
 import io
@@ -200,22 +201,29 @@ def verify_cds_dependency(path, lock):
         require(metadata_name == dist_info + "/METADATA"
                 and dependency["filename"].startswith(dist_info.removesuffix(".dist-info") + "-"),
                 "CDS wheel distribution metadata path differs from lock")
-        for name, expected in lock["protocol_boundary"]["pure_files"].items():
-            require(hashlib.sha256(archive.read("codex_deepseek/" + name)).hexdigest() == expected,
-                    "Pinned pure CDS protocol differs")
+        pure_files = lock["protocol_boundary"]["pure_files"]
+        require({"__init__.py", "protocol.py", "structured.py", "request_metadata.py", "image_selection.py", "opaque_replay.py"}
+                <= pure_files.keys(), "Pinned pure CDS protocol entry is missing")
         compatibility = lock["transport_compatibility"]
         require(compatibility["source_commit"] == lock["protocol_boundary"]["source_commit"],
                 "Transport helper source differs from pinned protocol source")
-        transport_files = {"windows_asyncio.py"}
-        if versions[0] == "0.7.0":
-            transport_files |= {"image_transport.py", "platforms.py", "processes.py"}
-            require("image_selection.py" in lock["protocol_boundary"]["pure_files"],
-                    "Pinned pure CDS image selector is missing")
+        # The App facade imports the CDS image cache and that cache uses these
+        # helpers regardless of the distribution's version string. A newer
+        # version must not bypass the reviewed boundary by changing metadata.
+        transport_files = {"windows_asyncio.py", "image_transport.py", "platforms.py", "processes.py"}
         require(set(compatibility["files"]) == transport_files,
                 "Unexpected CDS transport helper boundary")
-        for name, expected in compatibility["files"].items():
-            require(hashlib.sha256(archive.read("codex_deepseek/" + name)).hexdigest() == expected,
-                    "Pinned CDS transport helper differs")
+        admitted = pure_files.keys() | transport_files
+        for section, files in (("pure CDS protocol", pure_files), ("CDS transport helper", compatibility["files"])):
+            for name, expected in files.items():
+                data = archive.read("codex_deepseek/" + name)
+                require(hashlib.sha256(data).hexdigest() == expected, f"Pinned {section} differs")
+                for statement in ast.walk(ast.parse(data, filename=name)):
+                    if isinstance(statement, ast.ImportFrom) and statement.level == 1:
+                        imports = ([statement.module] if statement.module else [alias.name for alias in statement.names])
+                        for module in imports:
+                            dependency_name = module.split(".", 1)[0] + ".py"
+                            require(dependency_name in admitted, f"Pinned CDS module imports an unlocked helper: {dependency_name}")
         license_path = dist_info + "/licenses/licenses/cpython-proactor-PSF.txt"
         require(set(compatibility["license_files"]) == {license_path},
                 "Unexpected CDS transport license boundary")

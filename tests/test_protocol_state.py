@@ -18,9 +18,23 @@ def complete_events(state):
     events = Events(registry)
     item = {"id": "fc_one", "call_id": "call_one", "type": "function_call",
             "name": "sample", "arguments": "{}", "status": "completed"}
+    events.transform({'type':'response.output_item.done','item':item})
     events.transform({"type": "response.completed", "response": {
         "id": "resp_one", "status": "completed", "output": [item], "usage": {"input_tokens": 12}}})
     return events, item
+
+
+def test_snapshot_only_tool_never_creates_history_attestation(tmp_path):
+    with ProtocolState(tmp_path/'protocol.sqlite') as state:
+        request_id=start(state)
+        _,registry=prepare({'model':MODEL,'tools':[{'type':'function','name':'sample','parameters':{'type':'object'}}]},state)
+        events=Events(registry)
+        item={'id':'fc_one','call_id':'call_one','type':'function_call','name':'sample','arguments':'{}','status':'completed'}
+        with pytest.raises(ProtocolError,match='output_item.done'):
+            events.transform({'type':'response.completed','response':{'id':'resp_one','status':'completed','output':[item]}})
+        with pytest.raises(ValueError,match='matching validated'):
+            state.finish(request_id,'completed',200,events)
+        assert not state.has_completed_native_item(native_history_fingerprint(item),item_id=item['id'])
 
 
 def test_search_evidence_survives_reopen_and_is_immutable(tmp_path):
@@ -131,12 +145,13 @@ def test_version_one_receipt_migrates_without_losing_previous_outcome(tmp_path):
 
 def test_request_scoped_evidence_requires_every_original_identity(tmp_path):
     import copy
-    reasoning = {"type": "reasoning", "id": "rs_original",
+    reasoning = {"type": "reasoning", "id": "rs_original", "summary": [],
                  "content": [{"type": "reasoning_text", "text": "same semantic text"}]}
     with ProtocolState(tmp_path / "protocol.sqlite") as state:
         key = start(state)
         _, registry = prepare({"model": MODEL}, state.evidence_view([]))
         events = Events(registry)
+        events.transform({'type':'response.output_item.done','item':reasoning})
         events.transform({"type": "response.completed", "response": {
             "id": "resp_source", "status": "completed", "output": [reasoning]}})
         state.finish(key, "completed", 200, events)

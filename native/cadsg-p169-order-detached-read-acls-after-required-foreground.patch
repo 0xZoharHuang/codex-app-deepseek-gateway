@@ -1,0 +1,98 @@
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+index 111a83a..315c304 100644
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+@@ -1057,38 +1057,6 @@ fn run_setup_full(
+         }
+     }
+ 
+-    if payload.read_roots.is_empty() {
+-        log_line(log, "no read roots to grant; skipping read ACL helper")?;
+-    } else {
+-        match read_acl_mutex_exists(&namespace.key.read_acl_mutex()) {
+-            Ok(true) => {
+-                log_line(log, "read ACL helper already running; skipping spawn")?;
+-            }
+-            Ok(false) => {
+-                spawn_read_acl_helper(payload, log).map_err(|err| {
+-                    anyhow::Error::new(SetupFailure::new(
+-                        SetupErrorCode::HelperReadAclHelperSpawnFailed,
+-                        format!("spawn read ACL helper failed: {err}"),
+-                    ))
+-                })?;
+-            }
+-            Err(err) => {
+-                log_line(
+-                    log,
+-                    &format!("read ACL mutex check failed: {err}; spawning anyway"),
+-                )?;
+-                spawn_read_acl_helper(payload, log).map_err(|spawn_err| {
+-                    anyhow::Error::new(SetupFailure::new(
+-                        SetupErrorCode::HelperReadAclHelperSpawnFailed,
+-                        format!(
+-                            "spawn read ACL helper failed after mutex error {err}: {spawn_err}"
+-                        ),
+-                    ))
+-                })?;
+-            }
+-        }
+-    }
+-
+     if refresh_only {
+         setup_runtime_bin::ensure_codex_app_runtime_paths_readable(
+             sandbox_group_psid,
+@@ -1251,6 +1219,44 @@ fn run_setup_full(
+     }
+ 
+     lock_sandbox_bin_dir(payload, &sandbox_group_sid)?;
++    if !refresh_only {
++        lock_persistent_sandbox_dirs(payload, &sandbox_group_sid)?;
++    }
++
++    // Finish foreground ACL changes before starting inheritable read grants.
++    // An AppData ancestor grant can otherwise block this refresh's writes to
++    // Temp and project metadata in the native ACL inheritance domain.
++    if payload.read_roots.is_empty() {
++        log_line(log, "no read roots to grant; skipping read ACL helper")?;
++    } else {
++        match read_acl_mutex_exists(&namespace.key.read_acl_mutex()) {
++            Ok(true) => {
++                log_line(log, "read ACL helper already running; skipping spawn")?;
++            }
++            Ok(false) => {
++                spawn_read_acl_helper(payload, log).map_err(|err| {
++                    anyhow::Error::new(SetupFailure::new(
++                        SetupErrorCode::HelperReadAclHelperSpawnFailed,
++                        format!("spawn read ACL helper failed: {err}"),
++                    ))
++                })?;
++            }
++            Err(err) => {
++                log_line(
++                    log,
++                    &format!("read ACL mutex check failed: {err}; spawning anyway"),
++                )?;
++                spawn_read_acl_helper(payload, log).map_err(|spawn_err| {
++                    anyhow::Error::new(SetupFailure::new(
++                        SetupErrorCode::HelperReadAclHelperSpawnFailed,
++                        format!(
++                            "spawn read ACL helper failed after mutex error {err}: {spawn_err}"
++                        ),
++                    ))
++                })?;
++            }
++        }
++    }
+ 
+     if refresh_only {
+         log_line(
+@@ -1262,9 +1268,6 @@ fn run_setup_full(
+             ),
+         )?;
+     }
+-    if !refresh_only {
+-        lock_persistent_sandbox_dirs(payload, &sandbox_group_sid)?;
+-    }
+ 
+     unsafe {
+         if !sandbox_group_psid.is_null() {

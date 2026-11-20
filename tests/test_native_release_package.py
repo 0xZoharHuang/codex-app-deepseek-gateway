@@ -3,6 +3,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tarfile
 import pytest
@@ -711,3 +712,26 @@ def test_reviewed_p167_source_lock_matches_current_signed_app_baseline():
     assert lock["rust_version"] == "1.95.0"
     assert set(lock["binaries"]) == pack.SOURCE_BINARIES
     assert pack.single_graph(lock, native)["producer_id"] == "O167"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows extended filesystem path regression")
+def test_license_scan_walks_long_directory_and_preserves_logical_provenance(tmp_path):
+    cache, crate, value = metadata(tmp_path)
+    nested = crate.joinpath(*(f"deep-{i}-" + "a" * 41 for i in range(6)))
+    assert len(str(nested)) > 260
+    physical = Path("\\\\?\\" + str(nested.absolute()))
+    physical.mkdir(parents=True)
+    (physical / "irrelevant.snap").write_bytes(b"unrelated non-notice")
+    notice_bytes = b"original deep pinned notice\n"
+    (physical / "LICENSE.fixture").write_bytes(notice_bytes)
+
+    output = tmp_path / "out"
+    receipt = pack.collect_licenses(value, output, [cache])
+    notices = receipt["packages"][0]["upstream_notice_files"]
+    source = (nested / "LICENSE.fixture").relative_to(crate).as_posix()
+    results = [item for item in notices if item["source_file"] == source]
+    assert len(results) == 1
+    item = results[0]
+    assert item["sha256"] == hashlib.sha256(notice_bytes).hexdigest()
+    assert (output / item["file"]).read_bytes() == notice_bytes
+    assert all(not item["source_file"].endswith(".snap") for item in notices)

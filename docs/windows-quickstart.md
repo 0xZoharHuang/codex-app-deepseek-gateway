@@ -1,10 +1,12 @@
 # Windows 安装、运行与回退
 
-以下使用固定的官方 App 26.1023.6621.0 / runtime 0.165.0-alpha.1.2。目标用户使用**非提升 PowerShell**，先准备独立 x64 Python 3.13，本轮实际资格为 3.13.3。其他 Python 构建若触发兼容检查应保留错误，不跳过 process-local helper 的已知实现守卫。首次使用的官方 onboarding 和沙箱设置按 App 正常完成；已有其他 App/CDS 实例和数据不接管。
+公开 P7 安装请使用 [v0.1.0 固定版本的 Windows 安装说明](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/blob/v0.1.0/docs/windows-quickstart.md)。P169/O169 的私有验收条件和入口见 [README](../README.md#p169-私有资格环境的安装与检查)。
+
+以下保留 P20 候选的组装与验收步骤，使用官方 App 26.1023.6621.0 与 runtime 0.165.0-alpha.1.2。目标用户使用非提升 PowerShell，先准备独立 x64 Python 3.13，本轮实际资格为 3.13.3。首次使用的官方 onboarding 和沙箱设置按 App 正常完成，现有 App/CDS 实例和数据继续使用各自的配置。
 
 ## 1. 下载并核对外部发行索引
 
-从 [v0.2.0 发行页](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/releases/tag/v0.2.0) 取得网关 zip、原生 tar.gz、`SHA256SUMS.json`。最终文件名、可用性、大小和 SHA 由该页的资产索引给出。**先确认索引来自可信仓库/标签，再复制对应 SHA**，不要用本地现算值充当可信期望值。
+复现 P20 候选步骤需要对应的网关 zip、原生 tar.gz 和可信的外部 `SHA256SUMS.json`。从该组合的资产索引取得文件名、大小与 SHA，按该摘要验证本地文件。
 
 索引是单独发行资产，不塞回被其校验的归档。网关 zip 内应有 `install_gateway.ps1`、`release.json`、`wheels/`。网关 archive 和 `release.json` 的 SHA 在最终构建后写入外部索引，不硬编码回参与构建的本页。
 

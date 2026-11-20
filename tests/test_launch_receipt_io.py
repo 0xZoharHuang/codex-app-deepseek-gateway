@@ -209,7 +209,7 @@ Read-OwnedReceipt $InputPath | ForEach-Object {
  while(!(Test-Path -LiteralPath $Release) -and [DateTime]::UtcNow -lt $deadline){Start-Sleep -Milliseconds 10}
 }
 ''', encoding="utf-8")
-    source = app_delivery.assets()[1]
+    source = Path(app_delivery.__file__).parent / "assets" / "launch_isolated_app.ps1"
     child = subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                               "-File", str(probe), str(source), str(target), str(ready), str(release)],
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)

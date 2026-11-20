@@ -1,0 +1,17 @@
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index d54e74b..3700ce4 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -4009,10 +4009,11 @@ async fn capacity_install_append_failure_fences_session_and_preserves_exact_pend
+                 prefix: CompactionPrefix {
+                     generation,
+                     len: 1,
+-                    auth_owner_generation: session.services.model_client.auth_owner_generation(),
++                    auth_owner: session.services.model_client.auth_owner(),
+                 },
+                 prefix_context: Vec::new(),
+                 initial_context: Vec::new(),
++                reset_world_state_sections: Vec::new(),
+                 model_info: turn_context.model_info(),
+                 compaction_response_id: Some("test-compaction-response".into()),
+                 reviewer_compaction_hash: None,

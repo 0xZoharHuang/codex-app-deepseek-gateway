@@ -2,6 +2,7 @@
 from pathlib import Path
 import hashlib
 import os
+import secrets
 import stat
 import tempfile
 import time
@@ -57,8 +58,15 @@ def atomic_write(path: Path, data: bytes, *,
         digest = captured[1] if captured is not None else None
         if digest != expected_sha256:
             raise AtomicPublicationConflict("Config changed before atomic publication; nothing published")
-    descriptor, temporary_name = tempfile.mkstemp(prefix=".app-deepseek-", suffix=".tmp", dir=path.parent)
-    temporary = Path(temporary_name)
+    if os.name == "nt":
+        # On Windows mkstemp may keep generating names after an ACL denial.
+        # A 128-bit name and exclusive create preserve the single-attempt error.
+        temporary = path.parent / f".app-deepseek-{secrets.token_hex(16)}.tmp"
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_BINARY
+        descriptor = os.open(temporary, flags, 0o600)
+    else:
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".app-deepseek-", suffix=".tmp", dir=path.parent)
+        temporary = Path(temporary_name)
     try:
         os.close(descriptor)
         if prepare_temp is not None:

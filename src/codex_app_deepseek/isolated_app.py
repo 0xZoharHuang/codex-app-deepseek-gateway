@@ -11,7 +11,12 @@ from pathlib import Path
 import psutil
 from .app_config import _atomic_write, _private
 
-BASELINE_SHA256 = "f598079edf49e4398aae925ebe5874ce7e0b3fe1218931d165df4676261e3dcc"
+BASELINE_SHA256 = "b10d42a4e0266b9a31e9835c25ae749498e2b590a779fac5cfc879a465f2f2c7"
+P169_COHORT = ("0.169.0-alpha.11.1", "226fa88979b1a9d76dc36f339ee9c5fbdb2c8e7f")
+P169_BUILD_LOCK_SHA256 = "0ab81f556d6062026b2ff6194351d697b04483bfc3b55a197a5b32944031ee72"
+P169_PREPARED_SOURCE_SHA256 = "81ce8e50ef8b979b60719060816581c9b62abc3bc07e0fea8d9be34a98344eb7"
+P167_BUILD_LOCK_SHA256 = "e0945f5898e6b3f6f4e94224770e8e4420b6bda66f2df284b72a85f59062247f"
+P167_PREPARED_SOURCE_SHA256 = "abbdfa4a6561389f370a6bb3916b93810168c08b25776db715e4ffa6fb8413c9"
 CONTROLLED = {"CODEX_HOME", "CODEX_CLI_PATH", "CODEX_ELECTRON_USER_DATA_PATH", "CODEX_APP_SERVER_FORCE_CLI"}
 REMOVED = {
     "OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENROUTER_API_KEY",
@@ -195,6 +200,74 @@ def baseline(path):
     require(value["schema_version"] == 1 and value["package_name"] == "OpenAI.Codex", "invalid App baseline")
     return value
 
+def _bound_windows_desktop():
+    """Read this thread's borrowed Win32 desktop and process window station."""
+    require(os.name == "nt", "P169 App admission requires Windows")
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    user = ctypes.WinDLL("user32", use_last_error=True)
+    kernel.GetCurrentThreadId.argtypes = []
+    kernel.GetCurrentThreadId.restype = wintypes.DWORD
+    kernel.ProcessIdToSessionId.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    kernel.ProcessIdToSessionId.restype = wintypes.BOOL
+    user.GetThreadDesktop.argtypes = [wintypes.DWORD]
+    user.GetThreadDesktop.restype = wintypes.HANDLE
+    user.GetProcessWindowStation.argtypes = []
+    user.GetProcessWindowStation.restype = wintypes.HANDLE
+    user.GetUserObjectInformationW.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    user.GetUserObjectInformationW.restype = wintypes.BOOL
+
+    def object_name(handle):
+        required = wintypes.DWORD()
+        require(bool(handle), "Cannot read P169 Windows desktop object")
+        fetched = user.GetUserObjectInformationW(handle, 2, None, 0, ctypes.byref(required))
+        width = ctypes.sizeof(ctypes.c_wchar)
+        require(not fetched and ctypes.get_last_error() == 122
+                and width <= required.value <= 1024 and required.value % width == 0,
+                "Cannot size P169 Windows desktop name")
+        buffer = ctypes.create_unicode_buffer(required.value // width)
+        require(bool(user.GetUserObjectInformationW(
+            handle, 2, buffer, ctypes.sizeof(buffer), ctypes.byref(required))),
+            "Cannot read P169 Windows desktop name")
+        return buffer.value
+
+    session = wintypes.DWORD()
+    require(bool(kernel.ProcessIdToSessionId(os.getpid(), ctypes.byref(session))),
+            "Cannot read P169 Windows desktop session")
+    return (
+        session.value,
+        object_name(user.GetProcessWindowStation()),
+        object_name(user.GetThreadDesktop(kernel.GetCurrentThreadId())),
+    )
+
+
+P169_APP_PACKAGE = "OpenAI.Codex_26.1111.2228.0_x64__2p2nqsd0c76g0"
+
+
+def _is_p169_app_cohort(baseline):
+    return (baseline is not None and baseline.get("package_full_name") == P169_APP_PACKAGE
+            and (baseline.get("native_version"), baseline.get("native_upstream_commit")) == P169_COHORT)
+
+
+def _expected_native_environment(frontend_environment, app_baseline=None):
+    if _is_p169_app_cohort(app_baseline):
+        return {**frontend_environment, "CODEX_ELECTRON_USER_DATA_PATH": None}
+    return frontend_environment
+
+
+def require_app_candidate_ready(expected):
+    readiness = expected.get("candidate_readiness")
+    if readiness is None:
+        return
+    require(readiness == "private_windows_desktop_required"
+            and expected["version"] == "26.1111.2228.0"
+            and (expected["native_version"], expected["native_upstream_commit"]) == P169_COHORT,
+            "Unrecognized P169 App candidate admission")
+    require(_bound_windows_desktop() == (1, "WinSta0", "CADSG-P169-Acceptance-D857"),
+            "P169 App candidate requires its isolated Windows acceptance desktop")
+
 def verify_package(observed, expected):
     package = observed["package"]
     for actual, fixed in [("full_name", "package_full_name"), ("family", "package_family_name"), ("version", "version"), ("publisher", "publisher")]:
@@ -206,6 +279,9 @@ def verify_package(observed, expected):
     require(observed["package_signature_status"] == "Valid", "App package signature is not valid")
     files = {**expected["files"], **{name: item["sha256"] for name, item in expected["app_resources"].items()}}
     require(observed["files"] == files, "App or official runtime resource bytes differ")
+    if "absent_app_resources" in expected:
+        require(observed.get("absent_app_resources") == expected["absent_app_resources"],
+                "Observed App resource absence differs from the signed candidate baseline")
     return observed
 
 def verify_bundle(path, expected_sha, expected, *, prepared=True, cleanup_only=False):
@@ -260,15 +336,40 @@ def verify_bundle(path, expected_sha, expected, *, prepared=True, cleanup_only=F
             admitted = file.resolve()
         files[name] = {"name": name, "path": str(admitted), "size": size, "sha256": checksum}
     own_host = manifest.get("kind") == "cadsg-native-source-bundle"
+    cohort = expected["native_version"], expected["native_upstream_commit"]
+    if cohort == P169_COHORT:
+        require(own_host, "P169 requires the exact six-binary source bundle")
     require(manifest.get("kind") in (None, "cadsg-native-source-bundle"), "unknown native file bundle kind")
     required = set(expected["native_binaries"])
+    source_bundle = None
     if own_host:
+        revision = manifest.get("candidate_revision")
+        lock_sha = manifest.get("build_lock_sha256")
         require(manifest.get("runtime_mode") == "legacy"
-                and re.fullmatch("[0-9a-f]{64}", manifest.get("build_lock_sha256", ""))
-                and manifest.get("candidate_revision") == "O165",
+                and isinstance(lock_sha, str) and re.fullmatch("[0-9a-f]{64}", lock_sha),
                 "source-built native bundle mode or producer is missing")
+        if cohort == P169_COHORT:
+            require(revision == "O169" and lock_sha == P169_BUILD_LOCK_SHA256
+                    and source_sha == P169_PREPARED_SOURCE_SHA256,
+                    "source-built native bundle differs from the pinned P169 candidate recipe")
+            if prepared:
+                require(manifest.get("runtime_executed") is False and manifest.get("app_qualified") is False,
+                        "Prepared P169 bundle cannot assert App qualification")
+            else:
+                require(manifest.get("status") == "built-not-app-qualified"
+                        and manifest.get("distribution", {}).get("App_acceptance_asserted") is False,
+                        "Raw P169 bundle must retain explicit unqualified assembly provenance")
+        elif cohort == ("0.167.0-alpha.3.2", "c40729ea5cf8e947481b130c59807273eda2f8e9"):
+            require(revision == "O167" and lock_sha == P167_BUILD_LOCK_SHA256
+                    and source_sha == P167_PREPARED_SOURCE_SHA256,
+                    "source-built native bundle differs from the pinned P167 recipe")
+        else:
+            require(cohort == ("0.165.0-alpha.1.2", "720fec862a608ae1e5878d1eecb04fb93192e93c")
+                    and revision == "O165", "source-built native bundle has no match for this App baseline")
         required.update({"codex-code-mode-host.exe", "codex-windows-sandbox-service.exe"})
-        require(all(row.get("producer_id") == "O165" for row in rows), "mixed native source producers")
+        require(all(row.get("producer_id") == revision for row in rows), "mixed native source producers")
+        source_bundle = {"kind": "cadsg-native-source-bundle", "runtime_mode": "legacy",
+                         "build_lock_sha256": lock_sha, "candidate_revision": revision}
     elif prepared:
         required.update(expected["required_private_sidecars"])
     require(required == files.keys(), "native bundle has missing or unexpected binaries/Code Mode Host")
@@ -276,13 +377,27 @@ def verify_bundle(path, expected_sha, expected, *, prepared=True, cleanup_only=F
         if prepared and not own_host: require(files[name]["sha256"] == expected["app_resources"][resource]["sha256"], "Code Mode Host differs from the fixed App")
     result = {"manifest": str(path.resolve()), "manifest_sha256": expected_sha, "source_sha256": source_sha,
               "native_version": manifest["native_version"], "upstream_commit": manifest["upstream_commit"], "files": files}
+    if source_bundle is not None:
+        result["source_bundle"] = source_bundle
     if cleanup_only:
         result["cleanup_verification"] = {"scope": "cleanup_cli_only", "full_bundle_verified": False,
                                           "unexecuted_components": unused}
     return result
 
+def _verify_candidate_native_bundle(expected, bundle):
+    pinned = expected.get("candidate_native_outputs")
+    if pinned is None:
+        return
+    files = {name: {key: row[key] for key in ("sha256", "size")}
+             for name, row in bundle["files"].items()}
+    lock = bundle.get("build_lock_sha256") or bundle.get("source_bundle", {}).get("build_lock_sha256")
+    require(lock == P169_BUILD_LOCK_SHA256 and bundle["source_sha256"] == P169_PREPARED_SOURCE_SHA256
+            and files == pinned, "Native runtime differs from the verified P169 candidate build")
+
+
 def verify_launch_bundle(path, digest, expected, backend, owner, home):
     """Keep legacy file bundles and own installed MSIX descriptors as strict branches."""
+    require_app_candidate_ready(expected)
     require(isinstance(digest, str) and len(digest) == 64 and sha(path) == digest,
             "native manifest checksum mismatch")
     from . import runtime_package as packages
@@ -290,6 +405,7 @@ def verify_launch_bundle(path, digest, expected, backend, owner, home):
         bundle = packages.verify(path, digest, expected, owner, home, backend)
     else:
         bundle = verify_bundle(path, digest, expected)
+    _verify_candidate_native_bundle(expected, bundle)
     snapshot = getattr(backend, "native_runtime_owner_snapshot", None)
     if snapshot is not None:
         packages.require_mode_available(bundle.get("runtime_package"), snapshot(), owner, home)
@@ -469,16 +585,21 @@ class WindowsBackend:
 
     def package(self, expected):
         names = [*expected["files"], *expected["app_resources"]]
-        payload = base64.b64encode(json.dumps(names).encode()).decode()
+        probe = {"present": names, "absent": expected.get("absent_app_resources", [])}
+        payload = base64.b64encode(json.dumps(probe).encode()).decode()
         script = r"""$ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
 $p=Get-AppxPackage -Name OpenAI.Codex
 if(@($p).Count -ne 1){throw 'Expected one installed current-user Codex package'}
-$names=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('PAYLOAD'))|ConvertFrom-Json
-$files=@{};foreach($name in $names){$files[$name]=(Get-FileHash -LiteralPath (Join-Path $p.InstallLocation $name) -Algorithm SHA256).Hash.ToLower()}
+$probe=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('PAYLOAD'))|ConvertFrom-Json
+$files=@{};foreach($name in $probe.present){$files[$name]=(Get-FileHash -LiteralPath (Join-Path $p.InstallLocation $name) -Algorithm SHA256).Hash.ToLower()}
+$absent=@();foreach($name in $probe.absent){
+ if(Test-Path -LiteralPath (Join-Path $p.InstallLocation $name)){throw 'Expected absent signed App resource is present'}
+ $absent+=$name
+}
 $exe=Get-AuthenticodeSignature -LiteralPath (Join-Path $p.InstallLocation 'app/ChatGPT.exe')
 $signature=Get-AuthenticodeSignature -LiteralPath (Join-Path $p.InstallLocation 'AppxSignature.p7x')
-[ordered]@{package=[ordered]@{full_name=$p.PackageFullName;family=$p.PackageFamilyName;version=$p.Version.ToString();publisher=$p.Publisher;location=$p.InstallLocation;signature_kind=$p.SignatureKind.ToString();status=$p.Status.ToString();development=$p.IsDevelopmentMode};exe_signature=@{status=$exe.Status.ToString();thumbprint=$exe.SignerCertificate.Thumbprint};package_signature_status=$signature.Status.ToString();files=$files}|ConvertTo-Json -Depth 6 -Compress
+[ordered]@{package=[ordered]@{full_name=$p.PackageFullName;family=$p.PackageFamilyName;version=$p.Version.ToString();publisher=$p.Publisher;location=$p.InstallLocation;signature_kind=$p.SignatureKind.ToString();status=$p.Status.ToString();development=$p.IsDevelopmentMode};exe_signature=@{status=$exe.Status.ToString();thumbprint=$exe.SignerCertificate.Thumbprint};package_signature_status=$signature.Status.ToString();files=$files;absent_app_resources=$absent}|ConvertTo-Json -Depth 6 -Compress
 """.replace("PAYLOAD", payload)
         powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
         command = [str(powershell), "-NoProfile", "-NonInteractive", "-EncodedCommand", base64.b64encode(script.encode("utf-16le")).decode()]
@@ -740,7 +861,8 @@ $directory=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) ('Mi
         """Strict full-tree inspection; do not treat sandbox accounts as the App user."""
         return self._descendants(root)
 
-    def native_control_plane(self, root, *, executable, expected_sha256, environment, auxiliary_exits=None, runtime_package=None):
+    def native_control_plane(self, root, *, executable, expected_sha256, environment, auxiliary_exits=None,
+                             runtime_package=None, app_baseline=None):
         """Discover App backends, stopping only at fully bound native main loops.
 
         The native runtime owns its tool/MCP/sandbox workload tree. Its restricted
@@ -775,6 +897,7 @@ $directory=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) ('Mi
                 "owned App identity differs before control-plane observation")
         require(self.selected_environment(root) == environment,
                 "App control-plane environment differs")
+        native_environment = _expected_native_environment(environment, app_baseline)
         boundaries = []
 
         def verify_boundary(identity, *, role_checked=False):
@@ -790,7 +913,7 @@ $directory=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) ('Mi
                         "native boundary is not the app-server main loop")
             require(sha(native_path) == expected_sha256,
                     "native control-plane image checksum differs")
-            require(self.selected_environment(identity) == environment,
+            require(self.selected_environment(identity) == native_environment,
                     "native control-plane environment differs")
             if runtime_package is not None:
                 packages.verify_activation(runtime_package, self.runtime_process_activation(identity))
@@ -1002,6 +1125,7 @@ def validate_request(request, backend=None):
     owner = backend.current()
     require(owner["session"] > 0 and not owner["elevated"], "use the current non-elevated interactive desktop session")
     expected = baseline(Path(request["baseline"]).resolve())
+    require_app_candidate_ready(expected)
     package = verify_package(backend.package(expected), expected)
     paths = defaults()
     trace_root = validated_trace_root(request["trace_root"], paths, backend, owner["sid"]) if "trace_root" in request else None
@@ -1075,6 +1199,7 @@ def inside_launch(plan_path, expected_sha, backend=None):
         save(started, record)
         require({key: current[key] for key in ("sid", "session")} == plan["validated"]["owner"], "helper changed user or desktop session")
         expected = baseline(Path(plan["request"]["baseline"]))
+        require_app_candidate_ready(expected)
         require(current["package_full_name"] == expected["package_full_name"], "helper lacks the fixed DesktopPackage identity")
         with backend.launch_lock(current["sid"]), ExitStack() as diagnostic_guards:
             checked = validate_request(plan["request"], backend)
@@ -1131,6 +1256,7 @@ def inside_launch(plan_path, expected_sha, backend=None):
             _save_receipt(run / "receipt.json", record)
             record.update(validation_scope=CONTROL_PLANE_SCOPE,
                           native_workload_scope=NATIVE_WORKLOAD_SCOPE)
+            native_environment = _expected_native_environment(checked["environment"], expected)
             deadline = time.monotonic() + checked["timeout_seconds"]
             while time.monotonic() < deadline:
                 try:
@@ -1138,6 +1264,8 @@ def inside_launch(plan_path, expected_sha, backend=None):
                     control_options = {"executable": checked["bundle"]["files"]["codex.exe"]["path"],
                         "expected_sha256": checked["bundle"]["files"]["codex.exe"]["sha256"],
                         "environment": checked["environment"], "auxiliary_exits": auxiliary_exits}
+                    if _is_p169_app_cohort(expected):
+                        control_options["app_baseline"] = expected
                     if "runtime_package" in checked["bundle"]:
                         control_options["runtime_package"] = checked["bundle"]["runtime_package"]
                     observed = backend.native_control_plane(identity, **control_options)
@@ -1152,7 +1280,7 @@ def inside_launch(plan_path, expected_sha, backend=None):
                         require(actual_sha == checked["bundle"]["files"]["codex.exe"]["sha256"], "native runtime bytes changed after preflight")
                         item["observed_executable_sha256"] = actual_sha
                         observed = backend.selected_environment(item)
-                        require(observed == checked["environment"], "native runtime selected a different home or controlled environment")
+                        require(observed == native_environment, "native runtime selected a different home or controlled environment")
                         item["controlled_environment"] = observed
                         if trace:
                             item["diagnostic_environment"] = backend.diagnostic_environment(item)
@@ -1182,6 +1310,7 @@ def inside_launch(plan_path, expected_sha, backend=None):
 def prepare_runtime(manifest_path, manifest_sha, baseline_path, backend=None, *, resources_receipt=None):
     manifest_path = Path(manifest_path); expected = baseline(baseline_path); backend = backend or WindowsBackend()
     current = backend.current()
+    require_app_candidate_ready(expected)
     with backend.launch_lock(current["sid"]):
         paths = defaults(); validate_state_paths(paths)
         require_disjoint_apps(backend, current, paths)
@@ -1194,6 +1323,7 @@ def prepare_runtime(manifest_path, manifest_sha, baseline_path, backend=None, *,
             bundle = verify_launch_bundle(manifest_path, manifest_sha, expected, backend, current, paths["home"])
         else:
             bundle = verify_bundle(manifest_path, manifest_sha, expected, prepared=False)
+        _verify_candidate_native_bundle(expected, bundle)
         from . import native_app_tools as tools
         tools.preflight(paths["home"], for_setup=False)
         receipt = resources_receipt or paths["home"] / ".cadsg-native-tools/resources.json"
@@ -1209,8 +1339,8 @@ def prepare_runtime(manifest_path, manifest_sha, baseline_path, backend=None, *,
         root = manifest_path.parent.resolve(); outputs = list(bundle["files"].values())
         path = root / "app-runtime-manifest.json"
         require(path != manifest_path.resolve(), "raw build manifest must have a separate filename")
-        own_host = load_json(manifest_path).get("kind") == "cadsg-native-source-bundle"
-        for name, relative in ({} if own_host else expected["required_private_sidecars"]).items():
+        source_bundle = bundle.get("source_bundle")
+        for name, relative in ({} if source_bundle else expected["required_private_sidecars"]).items():
             source = Path(package["package"]["location"]) / relative; destination = root / name
             wanted = expected["app_resources"][relative]["sha256"]
             require(not destination.is_symlink(), "private sidecar cannot be a symlink")
@@ -1230,12 +1360,10 @@ def prepare_runtime(manifest_path, manifest_sha, baseline_path, backend=None, *,
                   "native_build_manifest": {"file": manifest_path.name, "sha256": manifest_sha},
                   "app_baseline_sha256": BASELINE_SHA256, "app_package_full_name": expected["package_full_name"],
                   "outputs": outputs, "app_resource_sources": expected["app_resources"], "runtime_executed": False, "app_qualified": False}
-        if own_host:
-            raw = load_json(manifest_path)
-            result.update(kind="cadsg-native-source-bundle", runtime_mode="legacy",
-                          build_lock_sha256=raw["build_lock_sha256"], candidate_revision=raw["candidate_revision"])
+        if source_bundle:
+            result.update(source_bundle)
             for row in result["outputs"]:
-                row["producer_id"] = "O165"
+                row["producer_id"] = source_bundle["candidate_revision"]
             result["app_resource_sources"] = {name: value for name, value in expected["app_resources"].items()
                                                if name not in expected["required_private_sidecars"].values()}
         if path.exists(): require(load_json(path) == result, "prepared manifest already exists with different inputs")
@@ -1275,6 +1403,16 @@ def current_backend_observation(run, plan, receipt, backend):
                 "App executable differs from launch")
         stage = "app_environment_unverified"
         require(backend.selected_environment(actual) == expected, "App controlled environment changed")
+        app_baseline = None
+        package = validated.get("package", {})
+        if package.get("package", {}).get("full_name") == P169_APP_PACKAGE:
+            app_baseline = baseline(Path(plan["request"]["baseline"]))
+            require(_is_p169_app_cohort(app_baseline), "P169 App baseline differs")
+            verify_package(package, app_baseline)
+            require(backend.profile_arguments(actual) == [
+                "--user-data-dir=" + expected["CODEX_ELECTRON_USER_DATA_PATH"]],
+                "App controlled browser profile argument changed")
+        native_environment = _expected_native_environment(expected, app_baseline)
         stage = "native_manifest_unverified"
         manifest_path = Path(plan["request"]["native_manifest"])
         manifest_sha = plan["request"]["native_manifest_sha256"]
@@ -1305,6 +1443,8 @@ def current_backend_observation(run, plan, receipt, backend):
         stage = "current_control_plane_unverified"
         control_options = {"executable": native["path"], "expected_sha256": native["sha256"],
                            "environment": expected, "auxiliary_exits": result["excluded_auxiliary_processes"]}
+        if app_baseline is not None:
+            control_options["app_baseline"] = app_baseline
         if runtime is not None:
             control_options["runtime_package"] = runtime
         descendants = backend.native_control_plane(actual, **control_options)
@@ -1323,7 +1463,7 @@ def current_backend_observation(run, plan, receipt, backend):
             require(Path(candidate["exe"]).resolve() == Path(native["path"]).resolve(),
                     "native selected a different executable")
             environment = backend.selected_environment(candidate)
-            require(environment == expected, "native controlled environment differs")
+            require(environment == native_environment, "native controlled environment differs")
             chain = [candidate]
             cursor = candidate
             seen = set()

@@ -34,7 +34,7 @@ def inject_internal_reference(monkeypatch, file_id, count=1):
 @pytest.mark.asyncio
 @pytest.mark.parametrize('status,consumption,pinned', [
     (200, 'provider_terminal', 0),
-    (429, 'http_rejected', 0),
+    (429, 'unknown', 1),
     (503, 'unknown', 1),
 ])
 async def test_zero_new_conversions_still_pin_owned_existing_reference(

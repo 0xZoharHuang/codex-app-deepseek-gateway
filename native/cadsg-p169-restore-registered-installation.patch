@@ -1,0 +1,87 @@
+diff --git a/codex-rs/windows-sandbox-service/src/installation_record.rs b/codex-rs/windows-sandbox-service/src/installation_record.rs
+index 373bce9..c90262f 100644
+--- a/codex-rs/windows-sandbox-service/src/installation_record.rs
++++ b/codex-rs/windows-sandbox-service/src/installation_record.rs
+@@ -79,16 +79,17 @@ pub(crate) fn save(mut record: InstallationRecord) -> Result<InstallationRecord>
+ 
+ // Restore the saved owner's junction only while its physical target is pinned.
+ pub(crate) fn resolve_restored_home(
+-    saved: &Path,
+-    runtime: Option<&RuntimeRegistration>,
++    record: &InstallationRecord,
+     pins: &mut Vec<OwnedHandle>,
+ ) -> Result<Option<PathBuf>> {
+     use std::os::windows::io::AsRawHandle;
+     use windows_sys::Win32::Storage::FileSystem as fs;
++    let saved = &record.codex_home;
++    let runtime = record.runtime.as_ref();
+     let Ok(home) = saved.canonicalize() else {
+         return Ok(None);
+     };
+-    if home == saved || runtime.is_some_and(|runtime| runtime.retiring.is_some()) {
++    if &home == saved || runtime.is_some_and(|runtime| runtime.retiring.is_some()) {
+         return Ok(None);
+     }
+     crate::ipc::pin_existing_ancestors(&home, pins)?;
+@@ -102,13 +103,21 @@ pub(crate) fn resolve_restored_home(
+             &codex_windows_sandbox::sandbox_secrets_dir(&home),
+             pins,
+         )?;
++        // Use the protected binding with the pinned canonical path. The
++        // service must restore registered accounts through their own namespace.
++        let mut restored = record.clone();
++        restored.codex_home = home.clone();
+         for entry in &runtime.accounts {
+-            let token =
+-                codex_windows_sandbox::logon_existing_sandbox_account(&home, entry.account)?;
++            let token = codex_windows_sandbox::logon_existing_sandbox_account_for_installation(
++                &home,
++                entry.account,
++                &restored,
++            )?;
+             crate::registered_runtime::validate_target(
+                 token.as_raw_handle(),
+                 entry.account,
+                 Some(&entry.user_sid),
++                &restored,
+             )?;
+         }
+     }
+diff --git a/codex-rs/windows-sandbox-service/src/installation_record_tests.rs b/codex-rs/windows-sandbox-service/src/installation_record_tests.rs
+index b4c543a..d110eef 100644
+--- a/codex-rs/windows-sandbox-service/src/installation_record_tests.rs
++++ b/codex-rs/windows-sandbox-service/src/installation_record_tests.rs
+@@ -17,7 +17,15 @@ fn only_the_saved_junction_needs_migration() -> Result<()> {
+     anyhow::ensure!(status.success(), "create test junction");
+     let physical = target.path().canonicalize()?;
+     let resolve = |saved: &Path| {
+-        resolve_restored_home(saved, /*runtime*/ None, &mut Vec::new())
++        let record = InstallationRecord {
++            namespace_id: None,
++            codex_home: saved.to_owned(),
++            user_sid: "S-1-5-18".to_owned(),
++            session_id: 0,
++            desktop_installation: None,
++            runtime: None,
++        };
++        resolve_restored_home(&record, &mut Vec::new())
+     };
+     assert_eq!(resolve(&alias)?, Some(physical.clone()));
+     assert_eq!(resolve(&physical)?, None);
+diff --git a/codex-rs/windows-sandbox-service/src/package_lifecycle.rs b/codex-rs/windows-sandbox-service/src/package_lifecycle.rs
+index cb1b24e..c5b015d 100644
+--- a/codex-rs/windows-sandbox-service/src/package_lifecycle.rs
++++ b/codex-rs/windows-sandbox-service/src/package_lifecycle.rs
+@@ -284,11 +284,7 @@ impl PackageLifecycle {
+ 
+         let mut pins = Vec::new();
+         if let Some(home) = with_owner_impersonation(token.as_raw_handle(), || {
+-            crate::installation_record::resolve_restored_home(
+-                &record.codex_home,
+-                record.runtime.as_ref(),
+-                &mut pins,
+-            )
++            crate::installation_record::resolve_restored_home(&record, &mut pins)
+         })? {
+             record.codex_home = home;
+             if let Some(desktop) = &mut record.desktop_installation {

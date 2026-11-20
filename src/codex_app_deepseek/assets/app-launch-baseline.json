@@ -1,32 +1,32 @@
 {
   "schema_version": 1,
   "package_name": "OpenAI.Codex",
-  "package_full_name": "OpenAI.Codex_26.1103.4239.0_x64__2p2nqsd0c76g0",
+  "package_full_name": "OpenAI.Codex_26.1111.2228.0_x64__2p2nqsd0c76g0",
   "package_family_name": "OpenAI.Codex_2p2nqsd0c76g0",
-  "version": "26.1103.4239.0",
+  "version": "26.1111.2228.0",
   "publisher": "CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B",
   "app_id": "App",
   "executable": "app/ChatGPT.exe",
-  "executable_signer_thumbprint": "DE62726DB667B59DB0FD14B38F858D16C96804A0",
+  "executable_signer_thumbprint": "A3D8571BB61CCB3BB437296FCAD5C70AFEABF6B1",
   "required_signature_kind": "Store",
   "files": {
-    "app/ChatGPT.exe": "5586707af6624c04959ba2c5b4ad6d216a1d8ed17c04937a757495649de44b92",
-    "app/resources/app.asar": "fb47d6491dc3006b708cb1e14de479b882bf50f88b7daa81818f154c253266aa",
-    "app/resources/codex.exe": "4b3286e35d7fe866c6b0eb3f07d7a4cdb5e96489576170dfd6b3a15aa1c67382",
-    "AppxSignature.p7x": "224b9230b9c44a7585f3207c44e564c8b400222149a3889d834662587488e626",
-    "AppxManifest.xml": "612836d54e389e5fc861401d852c74c9b9075ea1d1932f2f1c04650c59f7d7bf"
+    "app/ChatGPT.exe": "cf2ee1ce895df9ee158ee61830d9d0f805c77d9b212ad0e159ae605ae04260c6",
+    "app/resources/app.asar": "2551cba1057a05cdc5cf5d75b146fac4092bff4ce77a10c43e3286c88d24c82d",
+    "app/resources/codex.exe": "094d4db493de22025712cc5963854e7654b7c97f4cee795e3e986270a0f4f6b4",
+    "AppxSignature.p7x": "c0b66a87778f4cabdc17347c0e3667f0d87803e52b8dcbfed90fe52150a70b5f",
+    "AppxManifest.xml": "582352034a5db3859c30f73be5bf2a7e80a2ce310bd28f456b077586b900cbdb"
   },
-  "native_version": "0.167.0-alpha.3.2",
+  "native_version": "0.169.0-alpha.11.1",
   "frontend_home_environment": "CODEX_ELECTRON_USER_DATA_PATH",
   "source_audit": {
-    "bootstrap_entry": ".vite/build/early-bootstrap-339-ce026819bf837ba7.js",
-    "bootstrap_sha256": "3147715e4f64625f331cacd455d3474dcaa368da7579b8ed69f3d8b746509ad8",
-    "startup_requirements_entry": ".vite/build/early-bootstrap-133-1c544c3280919085.js",
-    "startup_requirements_sha256": "2fde4e50ae9ea97e9fb0b1a6b741b64a00257b9cf73fd143fc6a0c9921ec2992",
-    "source_fact": "Signed frontend source applies the explicit private Electron userData before single-instance arbitration and preserves CODEX_HOME during startup. Explicit CODEX_CLI_PATH and FORCE_CLI still gate contained-core and other transports. Actual launch/IPC and native feature acceptance are separate.",
-    "native_release_source_association": "Signed Store PE embeds native version 0.167.0-alpha.3.2. Exact official annotated release tag resolves to c40729ea5cf8e947481b130c59807273eda2f8e9. Public CLI package metadata, size and bounded PE comparison corroborate the association; full binary identity is not established."
+    "bootstrap_entry": ".vite/build/early-bootstrap-631-cdfc1944212b0139.js",
+    "bootstrap_sha256": "d48763d1d4067319ace3b52d984e6e79bfb1819e559f6a492358a30b94cf62cf",
+    "backend_selector_entry": ".vite/build/early-bootstrap-824-ffc2ffee98291049.js",
+    "backend_selector_sha256": "39d3afbbfb2a9b19cbf97819ffb07c94d9330503853ab832fec49d4dac69cad8",
+    "source_fact": "The pinned signed ASAR has private userData before the single-instance lock marker and explicit CLI selector markers. Actual profile coexistence and process selection remain unverified.",
+    "native_release_source_association": "Candidate exact build recipe only. The signed App runtime hash is separate from the self-built binary."
   },
-  "qualification": "Candidate signed package baseline; native build and actual App compatibility are not yet qualified.",
+  "qualification": "P169 private signed App candidate. Native catalog, private profile and GUI acceptance are pending.",
   "native_binaries": [
     "codex.exe",
     "codex-command-runner.exe",
@@ -35,11 +35,11 @@
   ],
   "app_resources": {
     "app/resources/codex-code-mode-host.exe": {
-      "sha256": "a628447ae7784b4a7a2d3045da9cb0b06785abe4fb4387dc74c1cb2faff4b451",
-      "size": 80331056
+      "sha256": "ea5052efa8e4659f5eb2c6199090da75df65bbec4b08955e925eef60a64bbd33",
+      "size": 80459056
     },
     "app/resources/rg.exe": {
-      "sha256": "2d72d90150ab24f04d9849f7e7c7a64d2d1df322c5067f942ca3ab9e84f55d41",
+      "sha256": "aa3a65c65acf29456302b8ebe1ad5b77659d6139e149f149031ec7c99331c417",
       "size": 4352304
     },
     "app/resources/cua_node/manifest.json": {
@@ -47,24 +47,51 @@
       "size": 431
     },
     "app/resources/cua_node/bin/node.exe": {
-      "sha256": "ecf28d918cee4119a958f35755cd30820ff3df174c901c2ce4f7ff5b885f4e94",
+      "sha256": "67b13bfcf43036eadcb38749f369cd8e41bf0fe9b1d751dd1aeaac5f8bdd14b8",
       "size": 93713712
     },
     "app/resources/cua_node/bin/node_repl.exe": {
-      "sha256": "e17a465f754dc47bc5ddda2e080389ae32d059c60a1c3a17704ba973d1568b4d",
-      "size": 39348904
-    },
-    "app/resources/cua_node/bin/node_modules/.package-map.json": {
-      "sha256": "6ca032f90234c9d8d7c807e30e6f05195889381e420f1876ce6386635719e824",
-      "size": 5030
+      "sha256": "63640af87c269ecb5f0176947b18f02913b715c04fc32ed479a1e8ed3d88d8fe",
+      "size": 39519120
     },
     "app/resources/cua_node/bin/node_modules/@oai/sky/package.json": {
-      "sha256": "e2bf504d3054e3f16679a18026b28479e188e4411cf673416df5006230cbcc7f",
-      "size": 1324
+      "sha256": "c9e6d0e655a68bd4e10480ffa242585dd4d054711927d77c76fe17e783a313aa",
+      "size": 1384
     }
   },
-  "required_private_sidecars": {
-    "codex-code-mode-host.exe": "app/resources/codex-code-mode-host.exe"
+  "required_private_sidecars": {},
+  "native_upstream_commit": "226fa88979b1a9d76dc36f339ee9c5fbdb2c8e7f",
+  "candidate_readiness": "private_windows_desktop_required",
+  "candidate_native_manifest_sha256": "578681be6b0e187ee703d483ff31ad9a6c8b0da8f9eca91b8761f12f598f807d",
+  "candidate_native_binary_sha256": "383382f0a0242bd08e276fbf8639675c930559205f9aa909c3457e7df693ff76",
+  "candidate_bundled_catalog_sha256": "9e01cd50ec8c4ba6d782413d1154cb2dbe1da63e014d622631b0603bc19659d6",
+  "candidate_native_outputs": {
+    "codex.exe": {
+      "sha256": "383382f0a0242bd08e276fbf8639675c930559205f9aa909c3457e7df693ff76",
+      "size": 439034880
+    },
+    "codex-command-runner.exe": {
+      "sha256": "b1ab5279cccb7130a44de2f9fc13cee07d1ef4a0754535de8d109ed2fa287c36",
+      "size": 11059712
+    },
+    "codex-windows-sandbox-setup.exe": {
+      "sha256": "f42c4b96bba301c4572522d71d0eaeb84b303c8483d461c82763353889be7846",
+      "size": 19898368
+    },
+    "codex-windows-managed-deny-probe.exe": {
+      "sha256": "020d60436f772aa811ed603ebee2e6af65148b6ec2b40f12d27a1882b0fc3203",
+      "size": 244224
+    },
+    "codex-windows-sandbox-service.exe": {
+      "sha256": "83449b5eb272d901510cd8bd6921abd1baaaddebfc24b7b4da7bceefbdfc793c",
+      "size": 67680768
+    },
+    "codex-code-mode-host.exe": {
+      "sha256": "5932e47e11ab499b1b3fe76bd48f07f004d00b41fce7deeee8d23502f1a173de",
+      "size": 81800704
+    }
   },
-  "native_upstream_commit": "c40729ea5cf8e947481b130c59807273eda2f8e9"
+  "absent_app_resources": [
+    "app/resources/cua_node/bin/node_modules/.package-map.json"
+  ]
 }

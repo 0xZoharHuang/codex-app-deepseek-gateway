@@ -72,8 +72,11 @@ async def main(evidence, expected_bridge_sha256):
             report["assertions"].append("genuine_http413_through_installed_bridge_before_SSE_no_retry_advice_no_effect")
             for _ in range(2):
                 status,headers,text=await request()
-                assert status==200 and '"type": "response.failed"' not in text
-                assert "response.completed" in text
+                events=[json.loads(line.removeprefix("data: ")) for line in text.splitlines() if line.startswith("data: ")]
+                assert status==200 and not any(event["type"]=="response.failed" for event in events)
+                done=[event["item"] for event in events if event["type"]=="response.output_item.done"]
+                assert events[-1]["type"]=="response.completed" and done==events[-1]["response"]["output"]
+                assert [item["type"] for item in done]==["reasoning","message"]
                 receipt=next(r for r in h.state.list_receipts() if r["id"]==headers["x-gateway-request-id"])
                 assert receipt["status"]=="completed" and receipt["delivery_status"]=="delivered"
             assert (await request())[0]==503
@@ -83,7 +86,7 @@ async def main(evidence, expected_bridge_sha256):
             assert all(e["native_request_role_not_inferred"] for e in slots)
             assert h.deadline==initial_deadline and h.fixture["nonce"]==nonce and h.requests==5
             assert h.plan.case_id==case and h.ledger.count(case)==0
-            report["assertions"].append("exact_thread_single_transition_two_journaled_slots_then_503_no_live_forward")
+            report["assertions"].append("exact_thread_two_journaled_slots_with_explicit_item_done_then_503_no_live_forward")
             report["positive_state"]={"processed":h.requests,"deadline":h.deadline,
                 "nonce_sha256":f.base.digest(nonce),"case_sha256":f.base.digest(case),"state":str(h.home)}
         # Reopening fixture objects is metadata persistence evidence, not process/App cold proof.

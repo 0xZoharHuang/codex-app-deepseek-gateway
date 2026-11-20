@@ -56,7 +56,7 @@ def assets():
     launcher = directory / "launch_isolated_app.ps1"
     if not baseline.is_file() or not launcher.is_file():
         raise DeliveryError("Installed App assets are missing; reinstall the verified release")
-    app.baseline(baseline)
+    app.require_app_candidate_ready(app.baseline(baseline))
     if app.sha(launcher) != LAUNCHER_SHA256:
         raise DeliveryError("Packaged App launcher changed; reinstall the verified release")
     return baseline, launcher

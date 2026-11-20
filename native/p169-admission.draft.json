@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "status": "draft-only",
+  "cadsg_base_commit": "12aeea1203a3248a24176672fda9d6123c8ae3f2",
+  "signed_store": {
+    "readback_sha256": "1779c628095a74c2e92b72e4a4f01f4864cf2c8eddd0d0a781f8df29222fcf95",
+    "normalized_sha256": "0651e7b75bf857b8d258123bab1af372e38bb357d6ae8093d77a64c75842fc7e",
+    "package_full_name": "OpenAI.Codex_26.1111.2228.0_x64__2p2nqsd0c76g0",
+    "package_family_name": "OpenAI.Codex_2p2nqsd0c76g0",
+    "version": "26.1111.2228.0",
+    "publisher": "CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B",
+    "required_signature_kind": "Store",
+    "exe_thumbprint": "A3D8571BB61CCB3BB437296FCAD5C70AFEABF6B1",
+    "observed_missing_resources": [
+      "app/resources/cua_node/bin/node_modules/.package-map.json"
+    ]
+  },
+  "bundled_inventory": {
+    "file": "app-bundled-resources-26.1111.2228.0.json",
+    "sha256": "ff0001a107eceb31efb63626b22c7170b145d54ad253d62a337534005cee0ba2",
+    "source_relative": "app/resources/plugins/openai-bundled",
+    "plugin_id": "codex-app-tools@openai-bundled",
+    "plugin_version": "26.1111.21308",
+    "files_count": 848,
+    "total_bytes": 28775712,
+    "fingerprint": "ceb1249dfe8392f75fb4f91cbaceb315b47e7a581cbdf217b87ea8f48b186f00"
+  },
+  "native_recipe": {
+    "file": "p169-source-lock.service-restore-acl-order.draft.json",
+    "sha256": "0ab81f556d6062026b2ff6194351d697b04483bfc3b55a197a5b32944031ee72",
+    "candidate_revision": "O169",
+    "upstream_commit": "226fa88979b1a9d76dc36f339ee9c5fbdb2c8e7f",
+    "native_version": "0.169.0-alpha.11.1",
+    "package_mode": "cadsg-native-msix",
+    "runtime_mode": "legacy"
+  },
+  "official_v8": {
+    "version": "152.2.0",
+    "profile": "ptrcomp_sandbox_release",
+    "target": "x86_64-pc-windows-msvc",
+    "source_manifest_sha256": "1dd7c7f7d3d91af7f06a2846bddc6a1da7725acc67ecd7ab2c7dfc980dd8c6d4",
+    "files": {
+      "rusty_v8_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.sha256": {
+        "sha256": "e16bf2d7bc4b64a96a89e87048d61b9c466040e4c82ae64cfe9f7f2052ef3179",
+        "size": 257
+      },
+      "rusty_v8_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.lib.gz": {
+        "sha256": "cd829415695b30ad61b306b23a381e11276f14bb0b46815ac5ed8b96711d002d",
+        "size": 41630799
+      },
+      "src_binding_ptrcomp_sandbox_release_x86_64-pc-windows-msvc.rs": {
+        "sha256": "572ed16ff09bb7944f4b35c659ff62dcd3faf43a0351e3f94f011e01b2f92a62",
+        "size": 39400
+      }
+    }
+  },
+  "private_profile_gate": {
+    "mode": "legacy",
+    "private_paths": [
+      "CODEX_HOME",
+      "CODEX_ELECTRON_USER_DATA_PATH"
+    ],
+    "backend_selector": {
+      "CODEX_CLI_PATH": "exact candidate codex.exe",
+      "CODEX_APP_SERVER_FORCE_CLI": "1"
+    },
+    "require_native_runtime_marker": "app-server",
+    "existing_readback": "isolated_app.current_backend_observation",
+    "frontend_readback": {
+      "sha256": "bb7e54055871730ea7d743c29c3d47a0287a6eb204b9a1710fba5472c828f218",
+      "user_data_entry": ".vite/build/early-bootstrap-631-cdfc1944212b0139.js",
+      "backend_selector_entry": ".vite/build/early-bootstrap-824-ffc2ffee98291049.js"
+    }
+  },
+  "remaining_app_gates": [
+    "Verify Authenticode, exact Store package identity and all official resource bytes again in the approved interactive Windows session.",
+    "Prove native bundled App tools initialize and operate with the signed package's observed .package-map.json absence.",
+    "Generate and verify the bundled catalog from the exact built P169 runtime, and review gateway model-policy provenance against it.",
+    "Prove the same signed front end uses the private profile and exact candidate app-server child, with process birth, ancestry, path, hash, owner and session checked and the other desktop unaffected.",
+    "Run the existing sandbox, Guardian, tools, state, native child and long GUI session acceptance against that exact cohort."
+  ]
+}

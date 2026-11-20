@@ -11,7 +11,8 @@ from .paths import _sqlite_filename
 import time
 import uuid
 
-from codex_deepseek.protocol import ProtocolError, native_history_fingerprint
+from codex_deepseek.opaque_replay import remember_completed, restore
+from codex_deepseek.protocol import MODEL, PROVIDER, ProtocolError, native_history_fingerprint
 
 
 def _argument_diagnostics(events):
@@ -160,6 +161,7 @@ class ProtocolState:
                 PRAGMA journal_mode=WAL;
                 PRAGMA foreign_keys=ON;
                 CREATE TABLE IF NOT EXISTS searches(id TEXT PRIMARY KEY, item TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS adapter_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS completed_native_items(
                     fingerprint TEXT PRIMARY KEY, receipt_id TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS receipts(
@@ -253,7 +255,17 @@ class ProtocolState:
             self.db.execute("UPDATE receipts SET response_id=? WHERE id=? AND instance_id=? AND status='running'",
                             (events.response_id, key, self.instance_id))
 
-    def finish(self, key, status, upstream=None, events=None, detail=None):
+    def _completed_official_receipt(self, key):
+        row = self.db.execute(
+            "SELECT status, upstream_status, requested_upstream_model, requested_provider, response_id "
+            "FROM receipts WHERE id=?", (key,),
+        ).fetchone()
+        return bool(row and tuple(row[:4]) == ("completed", 200, MODEL, PROVIDER) and row[4])
+
+    def restore_opaque(self, payload, credential):
+        restore(payload, self.db, credential, completed_receipt=self._completed_official_receipt)
+
+    def finish(self, key, status, upstream=None, events=None, detail=None, *, opaque_credential=None):
         allowed = {"completed", "incomplete", "failed", "upstream_error", "cancelled", "adapter_error"}
         if status not in allowed:
             raise ValueError("Invalid request terminal status")
@@ -278,6 +290,9 @@ class ProtocolState:
             ).rowcount
             if changed:
                 self.db.executemany("INSERT OR IGNORE INTO completed_native_evidence VALUES (?,?,?,?)", fingerprints)
+                if opaque_credential is not None:
+                    remember_completed(self.db, opaque_credential, key, events.done.values(),
+                                       completed_receipt=self._completed_official_receipt)
                 if diagnostics is not None and diagnostics["total_count"] > 0:
                     row = self.db.execute("SELECT adaptations FROM receipts WHERE id=?", (key,)).fetchone()
                     adaptations = json.loads(row["adaptations"])

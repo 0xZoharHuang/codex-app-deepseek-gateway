@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "upstream_commit": "226fa88979b1a9d76dc36f339ee9c5fbdb2c8e7f",
+  "archive_sha256": "0d3a01d5ca36c7c7cfda1e1a707214a6fe80f2d396c36cfc78067aeabc477911",
+  "native_version": "0.169.0-alpha.11.1",
+  "rust_version": "1.95.0",
+  "target": "x86_64-pc-windows-msvc",
+  "patches": [
+    {
+      "file": "p169-integrated-source.patch",
+      "sha256": "4ff00c452d98d46a8aa68e1b52edc86f91424ecd8c1961618efde0784505d060"
+    },
+    {
+      "file": "p169-release-workspace-versions.patch",
+      "sha256": "4589e2172f96b18bec80c434fd096365c3c5f413e61367c2e2536a96e534a5d0"
+    },
+    {
+      "file": "cadsg-p169-preserve-shared-desktop-runtime-cache.patch",
+      "sha256": "54a7c9d02f1e55d8b9c67cd13ee4e6ea601b9c2f7eaff76dd79196d1e0b6ff00"
+    },
+    {
+      "file": "cadsg-p169-compaction-native-owner-world-state.patch",
+      "sha256": "52b6bd9d6c4fb644a34d88ceb642e225892c44f625cb7938c6bb56fa9e78c63f"
+    },
+    {
+      "file": "p169-capacity-auth-owner.patch",
+      "sha256": "876a1d8aded006d861804a4b7db6a2cc00f9715b29dc0970cab301c2f06da6d2"
+    },
+    {
+      "file": "cadsg-p169-restore-registered-installation.patch",
+      "sha256": "3e561db00b42141fd9dc0e60215e1798bcfaaa3e5dbc7d786af4d14b5284f4fd"
+    },
+    {
+      "file": "cadsg-p169-capacity-test-fixture.patch",
+      "sha256": "b02006f2457eda2605da9e31bbca6e79eb673dd800c3e403055f7c39a6e306af"
+    }
+  ],
+  "prepared_source_sha256": "575be0fc575c4b4d0092c1e80d5a05100acf475eeaddc625d55d23d037f2bf90",
+  "prepared_source_files": 10256,
+  "cargo_lock_sha256": "5d2d4149ccb0704dd3e9f211a84b25ae76b6e96f44869bf850e9dac18373bfd4",
+  "release_environment": {
+    "CARGO_BUILD_JOBS": "2",
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_PROFILE_RELEASE_INCREMENTAL": "false",
+    "CARGO_PROFILE_RELEASE_DEBUG": "0",
+    "CARGO_PROFILE_RELEASE_STRIP": "symbols",
+    "CARGO_PROFILE_RELEASE_LTO": "false",
+    "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "16"
+  },
+  "binaries": [
+    "codex.exe",
+    "codex-command-runner.exe",
+    "codex-windows-sandbox-setup.exe",
+    "codex-windows-managed-deny-probe.exe",
+    "codex-windows-sandbox-service.exe",
+    "codex-code-mode-host.exe"
+  ],
+  "candidate_revision": "O169",
+  "package_mode": "cadsg-native-msix"
+}

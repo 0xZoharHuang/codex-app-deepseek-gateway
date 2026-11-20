@@ -128,7 +128,8 @@ class OpenRouterFilesBackend:
             form.add_field('file', stream, filename=filename, content_type=mime)
             response = await self._call('POST', '', key, data=form)
         if response.status != 200:
-            raise self._error('upload', response, definitely_not_created=response.status in {400,401,403,413,415,422,429})
+            # An HTTP error alone does not prove the Files object was never created.
+            raise self._error('upload', response)
         return FileMetadata.parse(response.value)
 
     async def get(self, key: str, file_id: str) -> FileMetadata | None:

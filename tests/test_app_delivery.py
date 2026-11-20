@@ -57,11 +57,29 @@ def healthy_gateway(f):
 
 def test_packaged_assets_are_identical_to_the_fixed_sources():
     root = Path(__file__).parents[1]
-    baseline, launcher = delivery.assets()
-    assert baseline.read_bytes() == (root / "native/app-launch-baseline.json").read_bytes()
+    source = root / "src/codex_app_deepseek/assets"
+    packaged = Path(delivery.__file__).parent / "assets"
+    baseline = packaged / "app-launch-baseline.json"
+    launcher = packaged / "launch_isolated_app.ps1"
+    assert baseline.read_bytes() == (source / baseline.name).read_bytes()
+    assert launcher.read_bytes() == (source / launcher.name).read_bytes()
     assert launcher.read_bytes() == (root / "scripts/launch_isolated_app.ps1").read_bytes()
-    assert app.sha(baseline) == app.BASELINE_SHA256 and app.sha(launcher) == delivery.LAUNCHER_SHA256
+    assert app.sha(baseline) == app.BASELINE_SHA256
+    assert app.sha(launcher) == delivery.LAUNCHER_SHA256
     assert b"Invoke-CommandInDesktopPackage" in launcher.read_bytes()
+
+
+@pytest.fixture
+def packaged_launcher(monkeypatch):
+    monkeypatch.setattr(app, "_bound_windows_desktop",
+                        lambda: (1, "WinSta0", "CADSG-P169-Acceptance-D857"))
+    return delivery.assets()[1]
+
+
+def test_packaged_candidate_assets_refuse_the_default_desktop(monkeypatch):
+    monkeypatch.setattr(app, "_bound_windows_desktop", lambda: (1, "WinSta0", "Default"))
+    with pytest.raises(app.LaunchError, match="requires its isolated Windows acceptance desktop"):
+        delivery.assets()
 
 def test_bind_is_explicit_verified_and_never_starts_app(fixture):
     f = fixture; result = bind(f)
@@ -274,12 +292,12 @@ def test_installed_launch_refuses_missing_preflight_checksum(fixture,monkeypatch
 
 @pytest.mark.skipif(os.name!='nt',reason='actual Windows PowerShell transport')
 @pytest.mark.parametrize('checksum',[None,'a'*64,'invalid'])
-def test_powershell_check_preserves_expected_config_with_no_real_app_or_credentials(tmp_path,checksum):
+def test_powershell_check_preserves_expected_config_with_no_real_app_or_credentials(tmp_path, checksum, packaged_launcher):
     capture=tmp_path/'captured-request.json';fake=tmp_path/'fake_interpreter.py'
     fake.write_text('import sys,base64,json\nfrom pathlib import Path\nr=json.loads(base64.b64decode(sys.argv[sys.argv.index("--request-base64")+1]))\nPath('+repr(str(capture))+').write_text(json.dumps(r))\nprint(json.dumps({"fixture":True}))\n')
     shim=tmp_path/'fake-python.cmd';shim.write_bytes(('@echo off\r\n"'+sys.executable+'" -I "'+str(fake)+'" %*\r\n').encode())
     baseline=tmp_path/'baseline.json';baseline.write_text('{}');manifest=tmp_path/'manifest.json';manifest.write_text('{}')
-    args=['powershell.exe','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',str(delivery.assets()[1]),'-Mode','Check','-PythonPath',str(shim),'-BaselinePath',str(baseline),'-NativeManifest',str(manifest),'-NativeManifestSha256','b'*64]
+    args=['powershell.exe','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',str(packaged_launcher),'-Mode','Check','-PythonPath',str(shim),'-BaselinePath',str(baseline),'-NativeManifest',str(manifest),'-NativeManifestSha256','b'*64]
     if checksum is not None:args+=['-ExpectedConfigSha256',checksum]
     result=subprocess.run(args,capture_output=True,text=True,errors='replace',timeout=30)
     if checksum=='invalid':
@@ -308,9 +326,9 @@ def test_configure_refuses_incomplete_existing_policy_before_app_writes(fixture,
     assert not f.backend.spawned
 
 
-def test_explicit_extra_alias_catalog_policy_and_reordered_health_are_supported(fixture, monkeypatch):
+def test_reordered_fixed_catalog_policy_and_health_are_supported(fixture, monkeypatch):
     f = fixture; bind(f)
-    names = [*gp.REQUEST_MODEL_IDS, "explicit-memory-helper"]
+    names = list(gp.REQUEST_MODEL_IDS)
     f.catalog.write_text(json.dumps({"models": [{"slug": x} for x in reversed(names)]}))
     path = f.installation.data / "gateway.json"
     path.write_text(json.dumps({"accepted_models": names, "allowed_providers": list(reversed(gp.DEFAULT_PROVIDERS))}))
@@ -352,14 +370,29 @@ def test_app_check_rejects_policy_edit_after_process_start(fixture, monkeypatch)
     assert not f.backend.spawned
 
 
-def test_catalog_alias_mismatch_is_not_silently_renamed(fixture):
-    f = fixture; bind(f)
-    policy = gp.default_app_policy(); policy["accepted_models"].append("unlisted-helper")
-    path = f.installation.data / "gateway.json"; path.write_text(json.dumps(policy))
-    before = path.read_bytes()
-    with pytest.raises(gp.ServiceConfigError, match="catalog model names differ"):
+@pytest.mark.parametrize(("location", "message"), [
+    ("catalog", "exactly the fixed P169 main and auxiliary aliases"),
+    ("policy", "model aliases outside the fixed P169 catalog"),
+])
+def test_catalog_alias_mismatch_is_not_silently_renamed(fixture, location, message):
+    f = fixture
+    bind(f)
+    policy = gp.default_app_policy()
+    if location == "catalog":
+        names = [*gp.REQUEST_MODEL_IDS, "unlisted-helper"]
+        f.catalog.write_text(json.dumps({"models": [{"slug": name} for name in names]}))
+    else:
+        policy["accepted_models"].append("unlisted-helper")
+    path = f.installation.data / "gateway.json"
+    path.write_text(json.dumps(policy))
+    config = f.paths["home"] / "config.toml"
+    binding = delivery.binding_path(f.installation)
+    before = {file: file.read_bytes() for file in (path, f.catalog, config, binding)}
+    with pytest.raises(gp.ServiceConfigError, match=message):
         delivery.configure(f.installation.root, f.catalog, app.sha(f.catalog), backend=f.backend)
-    assert path.read_bytes() == before and not (f.installation.data / "app-catalogs").exists()
+    assert all(file.read_bytes() == data for file, data in before.items())
+    assert not (f.installation.data / "app-catalogs").exists()
+    assert not (f.installation.data / "config-backups").exists()
     assert not f.backend.spawned
 
 
@@ -746,14 +779,14 @@ def test_cli_explicit_trace_root_is_forwarded_only_to_requested_launch(monkeypat
 
 @pytest.mark.skipif(os.name != "nt", reason="actual Windows PowerShell request transport")
 @pytest.mark.parametrize("trace", [None, "E:\\Owned private evidence\\trace"])
-def test_powershell_passes_only_explicit_trace_root_without_app_activation(tmp_path, trace):
+def test_powershell_passes_only_explicit_trace_root_without_app_activation(tmp_path, trace, packaged_launcher):
     capture = tmp_path / "request.json"; fake = tmp_path / "fake.py"
     fake.write_text('import sys,base64,json\nfrom pathlib import Path\nr=json.loads(base64.b64decode(sys.argv[sys.argv.index("--request-base64")+1]))\nPath('+repr(str(capture))+').write_text(json.dumps(r))\nprint("{}")\n')
     shim = tmp_path / "fake-python.cmd"
     shim.write_bytes(('@echo off\r\n"'+sys.executable+'" -I "'+str(fake)+'" %*\r\n').encode())
     baseline = tmp_path / "baseline.json"; baseline.write_text('{}')
     manifest = tmp_path / "manifest.json"; manifest.write_text('{}')
-    args = ['powershell.exe','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',str(delivery.assets()[1]),'-Mode','Check','-PythonPath',str(shim),'-BaselinePath',str(baseline),'-NativeManifest',str(manifest),'-NativeManifestSha256','b'*64]
+    args = ['powershell.exe','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',str(packaged_launcher),'-Mode','Check','-PythonPath',str(shim),'-BaselinePath',str(baseline),'-NativeManifest',str(manifest),'-NativeManifestSha256','b'*64]
     if trace is not None: args += ['-TraceRoot', trace]
     run = subprocess.run(args, capture_output=True, text=True, errors='replace', timeout=30)
     assert run.returncode == 0, run.stderr

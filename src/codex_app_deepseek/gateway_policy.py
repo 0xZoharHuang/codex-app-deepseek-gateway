@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import tempfile
 from urllib.parse import urlsplit
-from .catalog import NATIVE_VERSION, PINNED_MODEL, REQUEST_MODEL_IDS
+from .catalog import NATIVE_CATALOG_CAPTURE_SHA256, NATIVE_VERSION, PINNED_MODEL, REQUEST_MODEL_IDS
 from .paths import paths_overlap
 MODEL = PINNED_MODEL
 PROVIDER, STRUCTURED_PROVIDER, SERIAL_PROVIDER = "deepseek", "morph/fp8", "primeintellect"
@@ -162,7 +162,7 @@ def load_service_config(home: Path) -> ServiceConfig:
         except (TypeError, ValueError):
             raise ServiceConfigError("image_transport has missing or invalid policy fields") from None
     origin = config.get("policy_origin")
-    if origin is not None and origin not in (DEFAULT_POLICY_ORIGIN, LEGACY_POLICY_ORIGIN_E83, LEGACY_POLICY_ORIGIN_0610, LEGACY_POLICY_ORIGIN_069, LEGACY_POLICY_ORIGIN_068_PUBLISHED, LEGACY_POLICY_ORIGIN_068, LEGACY_POLICY_ORIGIN_067):
+    if origin is not None and origin not in (DEFAULT_POLICY_ORIGIN, LEGACY_POLICY_ORIGIN_P167, LEGACY_POLICY_ORIGIN_E83, LEGACY_POLICY_ORIGIN_0610, LEGACY_POLICY_ORIGIN_069, LEGACY_POLICY_ORIGIN_068_PUBLISHED, LEGACY_POLICY_ORIGIN_068, LEGACY_POLICY_ORIGIN_067):
         raise ServiceConfigError("gateway.json has an unrecognized policy_origin")
     return ServiceConfig(models, providers, proxy, **metadata,
                          image_search_backend=image_search, web_search_backend=web_search,
@@ -177,10 +177,10 @@ def load_service_config(home: Path) -> ServiceConfig:
 # strict/peer+hosted Morph, and explicit serial Prime.
 # It is metadata, not a second routing implementation.
 DEFAULT_PROVIDERS = ("deepseek", "morph/fp8", "primeintellect")
-DEFAULT_POLICY_ORIGIN = {
+LEGACY_POLICY_ORIGIN_P167 = {
     "policy_id": "codex-app-c40729e-full-runtime-v1",
-    "native_version": NATIVE_VERSION,
-    "protocol_commit": "e83b4b3fa79714fa77b66ba4e96ae10abb9d6aad",
+    "native_version": "0.167.0-alpha.3.2",
+    "protocol_commit": "66f55c22b2d4b4041099509a014e12e3be780260",
     "provider_reasons": {
         "deepseek": "official_default",
         "morph/fp8": "strict_json_schema_or_native_peer_history_with_hosted_tools",
@@ -188,10 +188,17 @@ DEFAULT_POLICY_ORIGIN = {
     },
 }
 
+DEFAULT_POLICY_ORIGIN = {
+    **LEGACY_POLICY_ORIGIN_P167,
+    "policy_id": "codex-app-226fa88-p169-service-restore-v1",
+    "native_version": NATIVE_VERSION,
+    "bundled_catalog_sha256": NATIVE_CATALOG_CAPTURE_SHA256,
+}
+
 # An upgrade retains previously initialized policy bytes and still checks the
 # complete explicit model allowlist before binding the new App.
 LEGACY_POLICY_ORIGIN_E83 = {
-    **DEFAULT_POLICY_ORIGIN,
+    **LEGACY_POLICY_ORIGIN_P167,
     "policy_id": "codex-app-680c4-full-runtime-v1",
     "native_version": "0.165.0-alpha.1.2",
 }
@@ -249,6 +256,8 @@ def require_app_policy(config, catalog_models=None):
             "Gateway policy lacks fixed App/runtime aliases: " + ", ".join(missing)
             + "; explicitly update accepted_models and the matching immutable catalog. "
               "Existing policy bytes were not expanded.")
+    if set(config.accepted_models) != set(REQUEST_MODEL_IDS):
+        raise ServiceConfigError("Gateway App policy includes model aliases outside the fixed P169 catalog")
     if not set(DEFAULT_PROVIDERS) <= set(config.allowed_providers):
         raise ServiceConfigError("Gateway policy lacks required native schema/serial/default routes; update the explicit allowlist")
     if catalog_models is not None and set(config.accepted_models) != set(catalog_models):
@@ -306,6 +315,6 @@ def catalog_model_ids(path, expected_sha256):
     if not isinstance(models, list) or any(not isinstance(x, dict) or not isinstance(x.get("slug"), str) or not x["slug"] for x in models):
         raise ServiceConfigError("App catalog must contain explicit model slugs")
     names = tuple(x["slug"] for x in models)
-    if len(names) != len(set(names)) or not set(REQUEST_MODEL_IDS) <= set(names):
-        raise ServiceConfigError("App catalog must contain unique fixed main/Guardian aliases")
+    if len(names) != len(set(names)) or set(REQUEST_MODEL_IDS) != set(names):
+        raise ServiceConfigError("App catalog must contain exactly the fixed P169 main and auxiliary aliases")
     return names

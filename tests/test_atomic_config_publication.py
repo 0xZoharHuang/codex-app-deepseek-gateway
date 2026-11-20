@@ -1,4 +1,5 @@
 """Actual user-config publication I/O, never a repeated apply/restore operation."""
+import errno
 import hashlib
 import json
 import os
@@ -55,19 +56,21 @@ def test_config_publish_nonsharing_errors_are_not_retried(tmp_path, monkeypatch,
 @pytest.mark.parametrize("code", [5, 32, 33])
 def test_config_publish_bounded_same_temp_fsynced_once(tmp_path, monkeypatch, code):
     target = tmp_path / "config.toml"; target.write_bytes(b"old\n")
-    original_replace, original_temp, original_fsync = os.replace, config.tempfile.mkstemp, os.fsync
+    original_replace, original_temp, original_fsync = os.replace, os.open, os.fsync
     attempts, created, synced, sleeps = [], [], [], []
     error = busy(code)
     def blocked(source, destination):
         if Path(destination) == target:
             attempts.append(Path(source)); raise error
         return original_replace(source, destination)
-    def temporary(*args, **kwargs):
-        result = original_temp(*args, **kwargs); created.append(result[1]); return result
+    def temporary(path, flags, *args, **kwargs):
+        if flags & os.O_CREAT and Path(path).parent == tmp_path:
+            created.append(Path(path))
+        return original_temp(path, flags, *args, **kwargs)
     def fsync(fd):
         synced.append(fd); return original_fsync(fd)
     monkeypatch.setattr(config.os, "replace", blocked)
-    monkeypatch.setattr(config.tempfile, "mkstemp", temporary)
+    monkeypatch.setattr(config.os, "open", temporary)
     monkeypatch.setattr(config.os, "fsync", fsync)
     monkeypatch.setattr(config.time, "sleep", sleeps.append)
     with pytest.raises(PermissionError) as caught:
@@ -194,9 +197,9 @@ def test_public_apply_restore_supply_known_expected_digest(paths, monkeypatch):
     assert calls == [{"expected_sha256": digest(original_bytes), "retry_transient": True},
                      {"expected_sha256": digest(applied), "retry_transient": True}]
 
-@pytest.mark.skipif(os.name != "nt", reason="real Windows DACL deletion denial")
+@pytest.mark.skipif(os.name != "nt", reason="real Windows DACL file creation denial")
 @pytest.mark.parametrize("publisher", ["config", "metadata", "receipt", "lifecycle", "service"])
-def test_permanent_DACL_deny_is_not_weakened_or_bypassed(tmp_path, monkeypatch, publisher):
+def test_permanent_DACL_create_denial_preserves_target_and_acls(tmp_path, monkeypatch, publisher):
     import ctypes
     from ctypes import wintypes
     from codex_app_deepseek.isolated_app import WindowsBackend
@@ -231,11 +234,23 @@ def test_permanent_DACL_deny_is_not_weakened_or_bypassed(tmp_path, monkeypatch, 
             attempts.append(source)
         return real_replace(source, destination)
     try:
-        deny(tmp_path, "0x40")  # FILE_DELETE_CHILD on this parent only.
-        deny(target, "0x10000")  # DELETE on the target itself.
+        deny(tmp_path, "0x2")  # FILE_ADD_FILE in this directory.
         denied = {p: _windows_security_bytes(p) for p in before}
+        with pytest.raises(PermissionError):
+            (tmp_path / "creation-probe").touch(exist_ok=False)
+        opens = []
+        real_open = os.open
+
+        def track_open(path, flags, *args, **kwargs):
+            candidate = Path(path)
+            if flags & os.O_CREAT and candidate.parent == tmp_path:
+                opens.append(candidate)
+                assert len(opens) == 1, "permanent ACL denial retried temporary creation"
+                assert flags & os.O_EXCL
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(config.os, "open", track_open)
         monkeypatch.setattr(config.os, "replace", replace)
-        started = time.monotonic()
         with pytest.raises(PermissionError) as caught:
             if publisher == "config":
                 config._atomic_write(target, b"new\n", expected_sha256=digest(b"old\n"),
@@ -246,14 +261,12 @@ def test_permanent_DACL_deny_is_not_weakened_or_bypassed(tmp_path, monkeypatch, 
                          "lifecycle": lifecycle._write,
                          "service": lambda p, value: cli._write_service_record(p.parent, value)}[publisher]
                 write(target, {"new": True})
-        elapsed = time.monotonic() - started
-        assert getattr(caught.value, "winerror", None) in {5, 32, 33}
-        assert len(attempts) == 8 and elapsed < 5
+        assert caught.value.errno == errno.EACCES
+        assert len(opens) == 1 and attempts == []
         assert target.read_bytes() == b"old\n"
         assert all(_windows_security_bytes(p) == value for p, value in denied.items())
     finally:
-        for path in [target, tmp_path]:
-            set_descriptor(path, before[path])
+        set_descriptor(tmp_path, before[tmp_path])
     assert list(tmp_path.glob(".app-deepseek-*.tmp")) == []
 
 @pytest.mark.skipif(os.name != "nt", reason="actual Windows lstat/fstat legacy time fields")

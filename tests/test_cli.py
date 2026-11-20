@@ -557,22 +557,31 @@ def test_managed_agent_selection_keeps_supplied_trusted_sha(tmp_path, monkeypatc
 def test_gateway_upgrade_accepts_original_0610_policy_without_rewriting(tmp_path):
     from codex_app_deepseek import gateway_policy
     home = tmp_path / "prior-installation-data"
-    payload = gateway_policy.default_app_policy()
-    payload["policy_origin"].update(
-        policy_id="codex-app-680c4-full-runtime-v1",
-        native_version="0.165.0-alpha.1.2",
-        protocol_commit="6d6ccd32c92d06fc52ecd72712140f24496c30a2",
-    )
-    payload["accepted_models"].remove("gpt-6.1-terra")
+    payload = {
+        "accepted_models": [gateway_policy.PINNED_MODEL, "gpt-5.6-luna", "gpt-6-luna", "gpt-6.1-sol"],
+        "allowed_providers": ["deepseek", "morph/fp8", "primeintellect"],
+        "policy_origin": {
+            "policy_id": "codex-app-680c4-full-runtime-v1",
+            "native_version": "0.165.0-alpha.1.2",
+            "protocol_commit": "6d6ccd32c92d06fc52ecd72712140f24496c30a2",
+            "provider_reasons": {
+                "deepseek": "official_default",
+                "morph/fp8": "strict_json_schema_or_native_peer_history_with_hosted_tools",
+                "primeintellect": "explicit_parallel_tool_calls_false",
+            },
+        },
+    }
     write_config(home, payload)
     path = home / "gateway.json"
     raw = path.read_bytes()
     assert gateway_policy.load_service_config(home).policy_origin == payload["policy_origin"]
-    with pytest.raises(gateway_policy.ServiceConfigError, match="gpt-6.1-terra"):
+    with pytest.raises(gateway_policy.ServiceConfigError) as failure:
         gateway_policy.ensure_app_policy(home)
+    assert "gpt-6.1-terra" in str(failure.value)
+    assert "codex-auto-review" in str(failure.value)
     assert path.read_bytes() == raw
 
-    payload["accepted_models"].append("gpt-6.1-terra")
+    payload["accepted_models"].extend(["codex-auto-review", "gpt-6.1-terra"])
     write_config(home, payload)
     edited = path.read_bytes()
     config, outcome = gateway_policy.ensure_app_policy(home)

@@ -109,9 +109,10 @@ async def test_same_identity_can_change_equivalent_spelling_within_stream(tmp_pa
         assert (await request.json())["provider"]["only"] == [route]
         created = {"type": "response.created", "response": {
             "id": "resp_one", "model": MODEL, "provider": display}}
-        end = terminal([message("{}")])
+        final_item=message("{}")
+        end = terminal([final_item])
         end["response"].update(model="deepseek-v4.1-flash-20261017", provider=route)
-        return web.Response(body=encode_sse(created)+encode_sse(end), content_type="text/event-stream")
+        return web.Response(body=encode_sse(created)+encode_sse({'type':'response.output_item.done','item':final_item})+encode_sse(end), content_type="text/event-stream")
     async with harness(tmp_path, handler) as (client, state):
         reply = await client.post("/v1/responses", headers=HEADERS, json={**body, "stream": True})
         events = read_events(await reply.text())

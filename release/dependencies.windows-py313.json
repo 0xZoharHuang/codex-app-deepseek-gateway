@@ -64,15 +64,18 @@
     },
     {
       "distribution": "aiohttp",
-      "filename": "aiohttp-3.13.2-cp313-cp313-win_amd64.whl",
-      "sha256": "a88d13e7ca367394908f8a276b89d04a3652044612b9a408a0bb22a5ed976a1a",
+      "filename": "aiohttp-3.14.5+cds.1-py3-none-any.whl",
+      "sha256": "f17624f46dd60b35aaf21d172bf10521d161fdf8322541b91c09c5d36bf2b73a",
       "source": {
-        "artifact_sha256": "a88d13e7ca367394908f8a276b89d04a3652044612b9a408a0bb22a5ed976a1a",
-        "artifact_url": "https://files.pythonhosted.org/packages/5d/28/a8a9fc6957b2cee8902414e41816b5ab5536ecf43c3b1843c10e82c559b2/aiohttp-3.13.2-cp313-cp313-win_amd64.whl",
-        "project_json": "https://pypi.org/pypi/aiohttp/3.13.2/json",
-        "type": "pypi"
+        "artifact_sha256": "f17624f46dd60b35aaf21d172bf10521d161fdf8322541b91c09c5d36bf2b73a",
+        "official_upstream_wheel": false,
+        "type": "local_unpublished_upstream_backport",
+        "upstream_patch_sha256": "1c3ca9a9abcea52b70ad85d156ff59784dc06234066166e8dd9192328de10878",
+        "upstream_pr": "https://github.com/aio-libs/aiohttp/pull/14370",
+        "upstream_sdist_sha256": "5558a7f5a05af9ecf744af91e5baefc436f93c9333e656c27ec253f9a6bbe178",
+        "upstream_version": "3.14.5"
       },
-      "version": "3.13.2"
+      "version": "3.14.5+cds.1"
     },
     {
       "distribution": "aiosignal",
@@ -160,25 +163,17 @@
     },
     {
       "distribution": "codex-deepseek-runtime",
-      "filename": "codex_deepseek_runtime-0.7.0-py3-none-any.whl",
-      "sha256": "1976aee41b47a8c9b322f4da1a7f7b355c64343cb6dd5eaa845d0273dee04470",
+      "filename": "codex_deepseek_runtime-0.7.9+cadsg.2-py3-none-any.whl",
+      "sha256": "28ca55004bde2817388c6552074c3b9e154025087629a1f518632d32789a727f",
       "source": {
-        "archive_sha256": "6f4fed84a3e4e65dd405d3a90e62b3d9ecb2a10d863f0ddbbfc82b51a35064a3",
-        "archive_url": "https://codeload.github.com/0xZoharHuang/codex-deepseek-runtime/tar.gz/e83b4b3fa79714fa77b66ba4e96ae10abb9d6aad",
-        "artifact_origin": "two_reproducible_local_wheels_from_exact_public_source",
-        "artifact_sha256": "1976aee41b47a8c9b322f4da1a7f7b355c64343cb6dd5eaa845d0273dee04470",
-        "build_backend": "setuptools.build_meta",
-        "build_tools": {
-          "setuptools": "84.2.0",
-          "wheel": "0.48.0"
-        },
-        "public_source_verified": true,
+        "artifact_origin": "local_offline_immutable_wheel",
+        "artifact_sha256": "28ca55004bde2817388c6552074c3b9e154025087629a1f518632d32789a727f",
+        "public_source_verified": false,
         "reproducibility": "two_independent_local_wheels_equal",
-        "source_commit": "e83b4b3fa79714fa77b66ba4e96ae10abb9d6aad",
-        "source_date_epoch": 1794025472,
-        "type": "fixed_public_source_archive_local_wheel"
+        "source_commit": "66f55c22b2d4b4041099509a014e12e3be780260",
+        "type": "local_unpublished_candidate"
       },
-      "version": "0.7.0"
+      "version": "0.7.9+cadsg.2"
     },
     {
       "distribution": "cryptography",
@@ -627,16 +622,19 @@
   ],
   "protocol_boundary": {
     "pure_files": {
-      "__init__.py": "f97e5df41a08ec4ce4bb059ca7b8dfbcd752878c6bdff502e2f2167f387f8cc7",
+      "__init__.py": "5272b8d30267f2c7332b8a57a409ad5042d8645af5add82b9b12707383235514",
+      "error_privacy.py": "1bab0961dbcd44332e51d93125d0cd8a6cf723419e3964c70bd75a304f804a2d",
       "formats.py": "3f8f027b56731c30ec0ffb518da9a09671059b364785a8e39688fb1052ea8f47",
       "image_selection.py": "b1993584f1893546d536e258285f5cfbffa94c94a643247f1b664db5c169cdd8",
-      "protocol.py": "fd4a552e07c7d054e860926713e843d7f05e75364205a71a17385fcba9118482",
+      "native_context.py": "2fa1b4a2482177f3bfbe896c39d5ed6d58e8b73f6edf6ccaae53f5041b58fae0",
+      "opaque_replay.py": "d62ba9a6d3e1b0eefc543211f564d83e1a3c348480f83c83ca16dcae65a78e18",
+      "protocol.py": "2ecaafc6e241eb01d2901119cc265952a55b215faf0ac5852062542c5eef3b5d",
       "protocol_errors.py": "446636771b39e39d36065a4ace549f4c5608d1f9005ff2723c75a573e1129452",
-      "request_metadata.py": "bc693cd985e62b6e8591223aeb6ee069e77a2e4a585612082348cc2c36ae3cec",
+      "request_metadata.py": "a982532d700f671dfdf516c65bdee2cf19c97fb5b4f3ed86bbed81eee03e3522",
       "search.py": "438a157d92e0c1e717fbfe7c9f7856df1edf38cf3d9a0d63188636e693500030",
-      "structured.py": "8f54e9a5ad190bcfdd9d580adc00b184d5d440cd7376f5c5465a9a6c2e1c9d8a"
+      "structured.py": "d108bf2236ee19a04396dfb3973460516cd6bb2269c613ebd971c7b441010c0c"
     },
-    "source_commit": "e83b4b3fa79714fa77b66ba4e96ae10abb9d6aad"
+    "source_commit": "66f55c22b2d4b4041099509a014e12e3be780260"
   },
   "schema_version": 1,
   "target": {
@@ -645,14 +643,14 @@
   },
   "transport_compatibility": {
     "files": {
-      "image_transport.py": "153536d9c9809fef59d9510def266d77469d37300083c0dbcab8e9d8c998cb5a",
-      "platforms.py": "1bb26549997abfe14facff2e470bb7ce006da5a4a9083695062d2c4da5688c94",
+      "image_transport.py": "d1afe952342c9d79064b510e9aed43b9d7027687d63bb8db8210f2ce811bc518",
+      "platforms.py": "e3df365a1ba3f4f52563307330da56067b9cb132742af30bbfb312440ebc26ef",
       "processes.py": "3ca59198e616ef7c7929b6a54645219e61c278da3b541e4d8872d6bdb95968f3",
       "windows_asyncio.py": "d2778f52c6978dd61c70e0d6c384f012d654bad72ff7119c2baf1e7ae67441a5"
     },
     "license_files": {
-      "codex_deepseek_runtime-0.7.0.dist-info/licenses/licenses/cpython-proactor-PSF.txt": "018bb8be8699b84bd2357128c7f1bd7d77af6ce5bbac143cb0cabb9a8ca3031d"
+      "codex_deepseek_runtime-0.7.9+cadsg.2.dist-info/licenses/licenses/cpython-proactor-PSF.txt": "018bb8be8699b84bd2357128c7f1bd7d77af6ce5bbac143cb0cabb9a8ca3031d"
     },
-    "source_commit": "e83b4b3fa79714fa77b66ba4e96ae10abb9d6aad"
+    "source_commit": "66f55c22b2d4b4041099509a014e12e3be780260"
   }
 }

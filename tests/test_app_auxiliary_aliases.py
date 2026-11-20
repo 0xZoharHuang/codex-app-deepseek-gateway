@@ -6,29 +6,32 @@ from aiohttp import web
 import pytest
 
 from codex_app_deepseek import catalog, gateway_policy as gp
-from test_catalog import bundled
+from test_catalog import bundled, native_models
 from test_bridge import harness, HEADERS, message, terminal
 
 
 def test_fixed_desktop_aliases_use_actual_deepseek_runtime_metadata_without_wildcards():
     source = bundled()
-    misleading = deepcopy(source["models"][1])
-    misleading.update(slug="gpt-6-luna", multi_agent_version="v1", supports_search_tool=False)
-    source["models"].append(misleading)
     before = deepcopy(source)
-    result = catalog.build_catalog(source, native_version=catalog.NATIVE_VERSION)["models"]
-    assert [item["slug"] for item in result] == [
-        catalog.PINNED_MODEL, "gpt-5.6-luna", "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra"]
+    captured = native_models(source)
+    result = catalog.build_catalog(source, native_version=catalog.NATIVE_VERSION)
+    assert [item["slug"] for item in result["models"]] == [
+        catalog.PINNED_MODEL, "gpt-5.6-luna", "codex-auto-review",
+        "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra"]
     assert source == before
-    by_id = {item["slug"]: item for item in result}
-    for alias in ("gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra"):
+    by_id = native_models(result)
+    for alias in ("gpt-5.6-luna", "codex-auto-review", "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra"):
         model = by_id[alias]
+        template = captured[alias]
         assert model["visibility"] == "hide" and model["supported_in_api"] is True
-        assert "not an OpenAI model" in model["description"]
-        for key in ("multi_agent_version", "model_messages", "shell_type",
-                    "node_repl_auto_review_required", "supports_search_tool"):
-            assert model[key] == by_id[catalog.PINNED_MODEL][key]
-    assert by_id["gpt-5.6-luna"]["multi_agent_version"] == "v1"  # existing native alias unchanged
+        assert catalog.PINNED_MODEL in model["description"]
+        for key in ("multi_agent_version", "shell_type", "node_repl_auto_review_required",
+                    "supports_search_tool", "experimental_supported_tools"):
+            assert model[key] == template[key]
+        for key in ("approvals", "permissions", "guardian_v2", "confirmation_policies"):
+            assert model["model_messages"].get(key) == template["model_messages"].get(key)
+    assert by_id["gpt-5.6-luna"]["multi_agent_version"] == "v1"
+    assert by_id["codex-auto-review"]["multi_agent_version"] == "v1"
     with pytest.raises(catalog.CatalogCompatibilityError):
         catalog.build_catalog(bundled(), native_version=catalog.NATIVE_VERSION,
                               auxiliary_aliases=("gpt-6-luna-unqualified",))

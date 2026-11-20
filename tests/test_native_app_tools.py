@@ -141,9 +141,9 @@ def setup(f):
 def test_packaged_inventory_is_hash_only_exact_qualified_source():
     root = Path(__file__).parents[1]
     asset = Path(tools.__file__).parent / "assets" / tools.INVENTORY_NAME
-    assert asset.read_bytes() == (root / "native" / tools.INVENTORY_NAME).read_bytes()
+    assert asset.read_bytes() == (root / "src" / "codex_app_deepseek" / "assets" / tools.INVENTORY_NAME).read_bytes()
     inventory = tools.load_inventory()
-    assert inventory["files_count"] == 860 and inventory["total_bytes"] == 35191141
+    assert inventory["files_count"] == 848 and inventory["total_bytes"] == 28775712
     assert not any(key in inventory for key in ["source", "credentials", "contents"])
 
 

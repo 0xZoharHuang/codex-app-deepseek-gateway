@@ -1,12 +1,26 @@
 # 当前资格与交付索引
 
-本页区分软件、原生产物、实际 App 工作流和外部服务证据。0.2.0 的正式文件以对应发行页的外部 SHA256SUMS.json 核对；[v0.1.0 发行页](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/releases/tag/v0.1.0) 保留 P7 组合的历史资产与索引。外部校验值在归档后生成，不回写 wheel 所用的 README。
+本页记录各固定组合的原生执行和交付范围。目前可从公开发行页取得的稳定资产为 P7 / v0.1.0，使用同一发行页的外部 `SHA256SUMS.json` 核对。 [v0.1.0 发行页](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/releases/tag/v0.1.0)
 
-**下列公开 0.1.0 / P7 固定组合的本地 runtime 范围已分层关闭，最终交付门仍单列。** R27 的正确 typed 图像输入、provider 媒体接受、App 内嵌 PDF 预览，以及正确目录的宿主输出读取均有新证据。原始失败和私有证据保留；本页不公开会话正文、账户凭据、机器身份或闭源 App 代码。
+## O169 真实 Windows App 验收
 
-## 0.2.0 的来源与验收范围
+已测组合为 Windows 10 x64 19045、官方签名 App `26.1111.2228.0`、原生 `0.169.0-alpha.11.1`（上游 `226fa88979b1a9d76dc36f339ee9c5fbdb2c8e7f`）及私有网关清单 SHA-256 `415c112b72766479e2f2022926deeb98ae3a85b737ae8d020c4ed62af03ad7b0`。已安装网关服务源为 `b2919e586e0671f4f8fbe0e0dc0b58c233f81b7a`，实际加载的 `codex.exe` SHA-256 为 `383382f0a0242bd08e276fbf8639675c930559205f9aa909c3457e7df693ff76`。
 
-0.2.0 的 Windows 原生包使用 `native/build-lock.O165-P20-source.json`，SHA256 为 `3736e573e634180a1443b0c3e2cdbbf3d28304cf17d76fd3752aab344356b44c`。网关协议依赖固定 CDS 0.6.10，提交 `6d6ccd32c92d06fc52ecd72712140f24496c30a2`。正式资产的实际来源、安装与 App 验收结果，以对应发行页和版本验收记录核对。
+一次锁定的 Cargo 调用生成六个同源程序，涵盖 CLI、command runner、Windows sandbox setup、managed deny probe、sandbox service 和 Code Mode host。原始构建清单 SHA-256 为 `578681be6b0e187ee703d483ff31ad9a6c8b0da8f9eca91b8761f12f598f807d`。签名 App、原生后端与独立 Windows 配置的实际绑定经回读核对。 [八补丁与六程序源码锁](../native/p169-source-lock.service-restore-acl-order.draft.json)
+
+| 实机观察 | 独立核验结果 |
+| --- | --- |
+| 项目首次普通命令 | 首个项目命令在原生沙箱中成功退出，分派到结束耗时 786 ms。同轮前台工作区授权与 `.git` 拒写先于后台读授权，实际 ACL 掩码经回读核对。这个结果覆盖该新项目和该次刷新。 |
+| Guardian | 原生审查子任务的结构化判定与原生工具结果相符。放行的读取实际执行并成功退出。受保护的写入被拒绝，原生运行器启动和完成均为零，文件保持原样。首次放行的读取因命令路径引用错误退出 1，保留为失败记录。 |
+| 记忆第一阶段 | 原生 v2 作业在来源满足闲置要求后完成提取。原来源保持不变，提取结果和随后纳入合并的来源快照经核对一致。 |
+| 记忆第二阶段 | 首次整合写出的摘要带 UTF-8 BOM，原生校验返回 `failed_invalid_artifacts`，成功水位保持原值。原生重试用自身的 `apply_patch` 写出合格摘要，作业完成并提交选中快照和新的成功水位。 |
+| 冷进程召回 | 原 App 和后端正常退出。新签名 App 与新后端连接同一个已核验网关，新的用户会话完成一次无工具推理。请求中原生注入的摘要与已提交摘要一致，用户可见结果通过独立核对。 |
+
+上述结果来自六份独立复核回执。按回执文件名排序形成的 SHA-256 清单总摘要为 `f5acc659a8fd6bad46da793ca897b7e9e06a211a0c3126946e1ba3c828fefd14`。原始失败和执行证据在私有验收范围内保留。源码资格覆盖上述固定组合。公开二进制交付另需配对构建、公众可获取的固定依赖、外部资产索引，以及从公开下载到隔离安装和实际 App 加载的复测。 [网关构建与离线依赖](gateway-release-build.md)
+
+## 历史 P20 候选的来源与验收范围
+
+该历史候选的 Windows 原生包使用 `native/build-lock.O165-P20-source.json`，SHA-256 为 `3736e573e634180a1443b0c3e2cdbbf3d28304cf17d76fd3752aab344356b44c`。网关协议依赖固定 CDS 0.6.10，提交 `6d6ccd32c92d06fc52ecd72712140f24496c30a2`。以下范围对应 P20 候选的历史验收。
 
 沿用固定版本的 37 项合同。R17（server queue）、R35（额外 UAC/secure desktop）、R36（IAB/CUA）是条件项。R25 的原版 Windows `restore_worktree` 保留同版本负向对照。P7 的历史效果按具体组件与配置承接。本轮核验涵盖：
 

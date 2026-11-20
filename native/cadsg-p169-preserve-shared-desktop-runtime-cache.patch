@@ -1,0 +1,49 @@
+diff --git a/codex-rs/windows-sandbox-service/src/package_lifecycle/cleanup.rs b/codex-rs/windows-sandbox-service/src/package_lifecycle/cleanup.rs
+index 3ce87ef..0bc1f80 100644
+--- a/codex-rs/windows-sandbox-service/src/package_lifecycle/cleanup.rs
++++ b/codex-rs/windows-sandbox-service/src/package_lifecycle/cleanup.rs
+@@ -51,7 +51,7 @@ pub(super) fn clean_up(
+             && !super::registered::owner_allows_cleanup(uninstalling, record)?
+         {
+             // Only the old sandbox resources are repaired on reinstall. Never remove
+-            // the reinstalled app's desktop-created home or runtime cache.
++            // the reinstalled app's desktop-created home.
+             log_cleanup("skipping desktop directories: owner reinstalled the app");
+             return Ok(());
+         }
+@@ -105,33 +105,8 @@ pub(super) fn clean_up(
+             } else {
+                 log_cleanup("skipping codex home: no pinned home");
+             }
+-            // The cache may have been created after provisioning. Pin it only for cleanup.
+-            let mut cache_directory_handles = Vec::new();
+-            if desktop.cache_home.is_dir() {
+-                match crate::ipc::pin_existing_ancestors(
+-                    &desktop.cache_home,
+-                    &mut cache_directory_handles,
+-                ) {
+-                    Ok(()) => {
+-                        record_result(
+-                            "remove codex runtime cache",
+-                            std::fs::remove_dir_all(desktop.cache_home.join("codex-runtimes")),
+-                        );
+-                        // Release only the cache root; its ancestors must remain pinned.
+-                        cache_directory_handles.pop();
+-                        remove_empty_directory(&desktop.cache_home, "cache home");
+-                    }
+-                    Err(error) => {
+-                        log_error(
+-                            EVENT_CLEANUP_DETAIL,
+-                            &format!("skipping runtime cache: could not pin cache home, {error:#}"),
+-                        );
+-                        errors.push(error.to_string());
+-                    }
+-                }
+-            } else {
+-                log_cleanup("skipping cache home: no accessible directory");
+-            }
++            // The desktop runtime cache is shared by all Codex installations for this owner.
++            log_cleanup("preserving shared desktop runtime cache");
+             ensure!(
+                 errors.is_empty(),
+                 "remove desktop directories: {}",

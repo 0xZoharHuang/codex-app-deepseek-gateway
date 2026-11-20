@@ -971,7 +971,8 @@ def test_windows_package_verification_preserves_checks_and_reports_bounded_timeo
     from types import SimpleNamespace
 
     expected = {"files": {"app/ChatGPT.exe": "exe", "app/resources/app.asar": "asar"},
-                "app_resources": {"app/resources/host.exe": {"sha256": "host"}}}
+                "app_resources": {"app/resources/host.exe": {"sha256": "host"}},
+                "absent_app_resources": ["app/resources/retired-runtime.exe"]}
     calls = []
     observed = {"package": {"version": "fixture"}, "files": {"fixture": "unchanged"}}
     monkeypatch.setenv("SystemRoot", "C:/Windows")
@@ -983,7 +984,11 @@ def test_windows_package_verification_preserves_checks_and_reports_bounded_timeo
         assert command[1:4] == ["-NoProfile", "-NonInteractive", "-EncodedCommand"]
         script = base64.b64decode(command[4]).decode("utf-16le")
         encoded_names = script.split("FromBase64String('", 1)[1].split("')", 1)[0]
-        assert json.loads(base64.b64decode(encoded_names)) == [*expected["files"], *expected["app_resources"]]
+        assert json.loads(base64.b64decode(encoded_names)) == {
+            "present": [*expected["files"], *expected["app_resources"]],
+            "absent": expected["absent_app_resources"],
+        }
+        assert "Expected absent signed App resource is present" in script
         assert "Get-AppxPackage -Name OpenAI.Codex" in script
         assert "Get-FileHash -LiteralPath" in script and "-Algorithm SHA256" in script
         assert "Get-AuthenticodeSignature -LiteralPath (Join-Path $p.InstallLocation 'app/ChatGPT.exe')" in script
@@ -1005,11 +1010,20 @@ def test_windows_package_verification_preserves_checks_and_reports_bounded_timeo
     assert len(calls) == 1  # No implicit retry, fallback, or cached acceptance.
 
 
-def own_six_bundle(fixture):
+def own_six_bundle(fixture, monkeypatch):
     paths, expected, path, value, request, backend = fixture
+    root = Path(__file__).resolve().parents[1]
+    lock_path = root / "native/build-lock.O167-P167-source.json"
+    lock = app.load_json(lock_path)
+    expected.update(native_version=lock["native_version"], native_upstream_commit=lock["upstream_commit"])
+    baseline_path = Path(request["baseline"])
+    baseline_path.write_text(json.dumps(expected))
+    monkeypatch.setattr(app, "BASELINE_SHA256", app.sha(baseline_path))
     value = copy.deepcopy(value)
     value.update(kind="cadsg-native-source-bundle", runtime_mode="legacy",
-                 build_lock_sha256="7"*64, candidate_revision="O165")
+                 native_version=lock["native_version"], upstream_commit=lock["upstream_commit"],
+                 source_sha256=lock["prepared_source_sha256"], app_baseline_sha256=app.BASELINE_SHA256,
+                 build_lock_sha256=app.sha(lock_path), candidate_revision=lock["candidate_revision"])
     service = path.parent / "codex-windows-sandbox-service.exe"
     service.write_bytes(b"own fixture service never executed")
     value["outputs"].append({"name":service.name, "path":str(service), "size":service.stat().st_size,
@@ -1017,35 +1031,39 @@ def own_six_bundle(fixture):
     host = path.parent / "codex-code-mode-host.exe"
     host.write_bytes(b"self-built fixture host differs from official fixture")
     for row in value["outputs"]:
-        row["producer_id"] = "O165"
+        row["producer_id"] = lock["candidate_revision"]
         if row["name"] == host.name: row.update(size=host.stat().st_size, sha256=app.sha(host))
     path.write_text(json.dumps(value)); request = {**request, "native_manifest_sha256":app.sha(path)}
     return paths, expected, path, value, request, backend
 
 
-def test_source_bundle_uses_own_host_without_claiming_package_identity(fixture):
-    paths, expected, path, value, request, backend = own_six_bundle(fixture)
+def test_source_bundle_uses_own_host_without_claiming_package_identity(fixture, monkeypatch):
+    paths, expected, path, value, request, backend = own_six_bundle(fixture, monkeypatch)
     checked = app.verify_bundle(path, app.sha(path), expected)
     assert len(checked["files"]) == 6 and "runtime_package" not in checked
     assert checked["files"]["codex-code-mode-host.exe"]["sha256"] != expected["app_resources"]["app/resources/host.exe"]["sha256"]
     assert not backend.spawned
 
 
-@pytest.mark.parametrize("problem", ["registered", "missing_service", "mixed_producer", "corrupt_host", "unmarked"])
-def test_source_bundle_rejects_silent_mode_or_binary_substitution(fixture, problem):
-    paths, expected, path, value, request, backend = own_six_bundle(fixture)
+@pytest.mark.parametrize("problem", ["registered", "missing_service", "mixed_producer", "corrupt_host", "unmarked",
+                                      "old_revision", "wrong_lock", "wrong_prepared_source"])
+def test_source_bundle_rejects_silent_mode_or_binary_substitution(fixture, monkeypatch, problem):
+    paths, expected, path, value, request, backend = own_six_bundle(fixture, monkeypatch)
     if problem == "registered": value["runtime_mode"] = "registered_core"
     elif problem == "missing_service": value["outputs"].pop()
     elif problem == "mixed_producer": value["outputs"][0]["producer_id"] = "official-app"
     elif problem == "corrupt_host": (path.parent/"codex-code-mode-host.exe").write_bytes(b"wrong")
+    elif problem == "old_revision": value["candidate_revision"] = "O165"
+    elif problem == "wrong_lock": value["build_lock_sha256"] = "7" * 64
+    elif problem == "wrong_prepared_source": value["source_sha256"] = "7" * 64
     else: value.pop("kind")
     path.write_text(json.dumps(value))
     with pytest.raises(app.LaunchError): app.verify_bundle(path, app.sha(path), expected)
     assert not backend.spawned
 
 
-def test_prepare_source_bundle_does_not_copy_or_substitute_official_host(fixture):
-    paths, expected, path, value, request, backend = own_six_bundle(fixture)
+def test_prepare_source_bundle_does_not_copy_or_substitute_official_host(fixture, monkeypatch):
+    paths, expected, path, value, request, backend = own_six_bundle(fixture, monkeypatch)
     own_host = app.sha(path.parent/"codex-code-mode-host.exe")
     raw = {key:item for key,item in value.items() if key not in {"app_baseline_sha256","app_package_full_name"}}
     raw["status"] = "built-not-app-qualified"
@@ -1054,9 +1072,27 @@ def test_prepare_source_bundle_does_not_copy_or_substitute_official_host(fixture
     prepared = app.prepare_runtime(raw_path, app.sha(raw_path), Path(request["baseline"]), backend)
     actual = app.load_json(Path(prepared["manifest"]))
     assert actual["kind"] == "cadsg-native-source-bundle" and actual["runtime_mode"] == "legacy"
+    assert actual["candidate_revision"] == "O167"
+    assert {row["producer_id"] for row in actual["outputs"]} == {"O167"}
     assert len(actual["outputs"]) == 6 and app.sha(path.parent/"codex-code-mode-host.exe") == own_host
     assert "app/resources/host.exe" not in actual["app_resource_sources"] and not backend.spawned
     app.verify_bundle(Path(prepared["manifest"]), prepared["manifest_sha256"], expected)
+
+
+def test_retained_legacy_bundle_accepts_only_its_original_165_baseline(fixture, monkeypatch):
+    _, expected, path, value, _, _ = own_six_bundle(fixture, monkeypatch)
+    lock_path = Path(__file__).resolve().parents[1] / "native/build-lock.O165-P20-source.json"
+    lock = app.load_json(lock_path)
+    value.update(native_version=lock["native_version"], upstream_commit=lock["upstream_commit"],
+                 source_sha256=lock["prepared_source_sha256"], build_lock_sha256=app.sha(lock_path),
+                 candidate_revision=lock["candidate_revision"])
+    for row in value["outputs"]:
+        row["producer_id"] = lock["candidate_revision"]
+    path.write_text(json.dumps(value))
+    with pytest.raises(app.LaunchError, match="matching fixed upstream version"):
+        app.verify_bundle(path, app.sha(path), expected)
+    older = {**expected, "native_version": lock["native_version"], "native_upstream_commit": lock["upstream_commit"]}
+    assert app.verify_bundle(path, app.sha(path), older)["source_bundle"]["candidate_revision"] == "O165"
 
 
 def test_official_trace_root_is_explicit_private_per_launch_and_bound_to_receipt(fixture, tmp_path, monkeypatch):

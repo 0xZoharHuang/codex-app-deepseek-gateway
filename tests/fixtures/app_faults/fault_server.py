@@ -383,6 +383,7 @@ class FaultHarness:
         if p.kind=="synthetic_success":
             message={"id":"fixture-message","type":"message","role":"assistant","status":"completed",
                      "content":[{"type":"output_text","text":"Synthetic fixture recovery only.","annotations":[]}]}
+            await response.write(encode_sse({"type":"response.output_item.done","output_index":1,"item":message}))
             await response.write(encode_sse({"type":"response.completed","response":{"id":rid,"status":"completed","output":[synthetic_reasoning_item(rid),message]}}))
         elif p.kind=="response_failed_unknown":
             # A completed-looking snapshot is not an output_item.done dispatch.

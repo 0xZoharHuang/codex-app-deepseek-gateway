@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+from collections import Counter
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
+import hashlib
 import hmac
+import inspect
 from io import BytesIO
 import json
 import math
@@ -22,6 +25,13 @@ from codex_deepseek.protocol import (
     Events, ProtocolError, encode_sse, prepare, validate_response,
     provider_failure_diagnostic, redact_provider_failure,
 )
+try:
+    from codex_deepseek.protocol import INTERRUPTED_CONTEXT_PREFIX, json_evidence_equal
+except ImportError:
+    # The old published dependency lacks the required exact projection checks.
+    INTERRUPTED_CONTEXT_PREFIX = None
+    json_evidence_equal = None
+from codex_deepseek.opaque_replay import opaque_items
 from codex_deepseek.structured import StructuredOutput
 from codex_deepseek.request_metadata import native_request_metadata
 
@@ -33,6 +43,7 @@ from .image_transport import (
 from .image_maintenance import ImageMaintenance
 
 OPENROUTER_RESPONSES = "https://openrouter.ai/api/v1/responses"
+MAX_PENDING_OPAQUE_BYTES = 8 * 1024 * 1024
 # Exact endpoint tag/display-name pairs from OpenRouter's fixed-model endpoint
 # catalog (2026-10-26). These classify only identity fields actually returned;
 # missing provider metadata stays unknown and is never inferred from the route.
@@ -375,6 +386,8 @@ async def _bounded_read(response, limit):
 
 
 def _reasoning_record(item):
+    if item.get("encrypted_content"):
+        return {"id": item.get("id"), "opaque": item["encrypted_content"]}
     parts = item.get("content") or item.get("summary") or []
     if not isinstance(parts, list) or any(
         not isinstance(part, dict) or not isinstance(part.get("text"), str) for part in parts
@@ -409,7 +422,143 @@ def _reasoning_records(items, *, include_continuation=False):
     return result
 
 
-def adapt_reasoning_context(body, payload):
+def _history_anchor_key(value):
+    """Index JSON values by type and structure while sharing immutable text."""
+    kind = type(value)
+    if kind is dict:
+        return kind, frozenset((key, _history_anchor_key(part)) for key, part in value.items())
+    if kind is list:
+        return kind, tuple(map(_history_anchor_key, value))
+    return kind, value
+
+
+def _verify_reasoning_projection(body, payload, registry):
+    """Verify CDS's own moved-history envelope against original positions."""
+    original=body.get('input')
+    items=payload.get('input')
+    if not isinstance(original,list) or not isinstance(items,list) or not items or not INTERRUPTED_CONTEXT_PREFIX:
+        raise ProtocolError('all_turns continuation projection cannot be verified')
+    first=items[0]
+    if not isinstance(first,dict) or first.get('type')!='message' or first.get('role')!='assistant':
+        raise ProtocolError('all_turns continuation projection cannot be verified')
+    content=first.get('content')
+    if not isinstance(content,list) or len(content)!=1 or not isinstance(content[0],dict):
+        raise ProtocolError('all_turns continuation projection cannot be verified')
+    text=content[0].get('text')
+    if content[0].get('type')!='output_text' or not isinstance(text,str) or not text.startswith(INTERRUPTED_CONTEXT_PREFIX):
+        raise ProtocolError('all_turns continuation projection cannot be verified')
+    records=strict_json_loads(text[len(INTERRUPTED_CONTEXT_PREFIX):])
+    if not isinstance(records,list) or not records:raise ProtocolError('Malformed native continuation context')
+    positions=[i for i,item in enumerate(original) if isinstance(item,dict) and item.get('type')=='reasoning']
+    ordinals={position:ordinal for ordinal,position in enumerate(positions)}
+    moved=set();moved_assistant=set();last=-1
+    for record in records:
+        if not isinstance(record,dict) or set(record)-{'input_index','reasoning_index','item'}:
+            raise ProtocolError('Malformed native continuation context')
+        index=record.get('input_index');item=record.get('item')
+        if type(index) is not int or index<=last or index>=len(original) or not isinstance(item,dict):
+            raise ProtocolError('Malformed native continuation context')
+        last=index
+        if not json_evidence_equal(item,original[index]):
+            raise ProtocolError('all_turns continuation item identity mismatch')
+        if item.get('type')=='reasoning':
+            ordinal=record.get('reasoning_index')
+            if index not in ordinals or type(ordinal) is not int or ordinal!=ordinals[index]:
+                raise ProtocolError('all_turns continuation reasoning identity mismatch')
+            moved.add(index)
+        elif item.get('type','message')!='message' or item.get('role')!='assistant' or 'reasoning_index' in record:
+            raise ProtocolError('Unsupported native continuation item')
+        else:
+            moved_assistant.add(index)
+    expected=[_reasoning_record(original[i]) for i in positions if i not in moved]
+    actual=_reasoning_records(items[1:],include_continuation=True)
+    if actual!=expected:
+        raise ProtocolError('all_turns adaptation lost or reordered plaintext reasoning history')
+    # Verify retained assistant messages exactly and in order, including the
+    # explicitly defined CDS additional_tools-to-message projection.
+    def additional_tools_message(item):
+        role=item['role']
+        converted={'type':'message','role':role,'content':[{'type':'output_text' if role=='assistant' else 'input_text','text':json.dumps(item,ensure_ascii=False)}]}
+        if 'phase' in item:converted['phase']=item['phase']
+        elif role=='assistant':converted['phase']='commentary'
+        return converted
+    expected_assistant=[]
+    for index,item in enumerate(original):
+        if not isinstance(item,dict) or item.get('role')!='assistant' or index in moved_assistant:continue
+        if item.get('type','message')=='message':expected_assistant.append(item)
+        elif item.get('type')=='additional_tools':
+            expected_assistant.append(additional_tools_message(item))
+    actual_assistant=[item for item in items[1:] if isinstance(item,dict) and item.get('type','message')=='message' and item.get('role')=='assistant']
+    if not json_evidence_equal(actual_assistant,expected_assistant):
+        raise ProtocolError('all_turns continuation lost, added or reordered an assistant message')
+    # Compare retained reasoning and ordinary messages together so neither can
+    # move across a user/developer message without an explicit failure.
+    original_anchors=[additional_tools_message(x) if x.get('type')=='additional_tools' else x
+                      for i,x in enumerate(original) if i not in moved_assistant and i not in moved
+                      and isinstance(x,dict) and x.get('type','message') in ('message','reasoning','additional_tools')]
+    anchor_keys = {_history_anchor_key(item) for item in original_anchors}
+    peer_indices = {binding['prepared_input_index'] for binding in getattr(registry, 'peer_history_bindings', [])}
+    retained_anchors=[x for i,x in enumerate(items) if i and i not in peer_indices and isinstance(x,dict)
+                      and x.get('type','message') in ('message','reasoning')
+                      and _history_anchor_key(x) in anchor_keys]
+    if not json_evidence_equal(retained_anchors,original_anchors):
+        raise ProtocolError('all_turns continuation reordered original history anchors')
+
+
+def _verify_peer_history_projection(body, payload, registry):
+    """Bind each CDS peer projection to its original item and prepared position."""
+    source = body.get('input')
+    peers = [item for item in source if isinstance(item, dict) and item.get('type') == 'agent_message'] if isinstance(source, list) else []
+    if not peers:
+        return
+    bindings = getattr(registry, 'peer_history_bindings', None)
+    prepared = payload.get('input')
+    if not isinstance(bindings, list) or len(bindings) != len(peers) or not isinstance(prepared, list):
+        raise ProtocolError('Native peer history projection cannot be verified')
+    last = -1
+    mapped_peers = []
+    for peer, binding in zip(peers, bindings):
+        if not isinstance(binding, dict):
+            raise ProtocolError('Native peer history projection cannot be verified')
+        index = binding.get('prepared_input_index')
+        if type(index) is not int or index <= last or index >= len(prepared):
+            raise ProtocolError('Native peer history projection cannot be verified')
+        last = index
+        envelope = {'author': peer.get('author'), 'recipient': peer.get('recipient'), 'content': peer.get('content', [])}
+        digest = hashlib.sha256(json.dumps(envelope, ensure_ascii=False, sort_keys=True,
+                                           separators=(',', ':'), allow_nan=False).encode('utf-8')).hexdigest()
+        if binding.get('native_item_id') != peer.get('id') or binding.get('native_peer_sha256') != digest:
+            raise ProtocolError('Native peer history identity mismatch')
+        mapped = prepared[index]
+        if (not isinstance(mapped, dict) or set(mapped) != {'type', 'role', 'content'}
+                or mapped.get('type') != 'message' or mapped.get('role') != 'user'
+                or not isinstance(mapped.get('content'), list) or not mapped['content']):
+            raise ProtocolError('Native peer history projection mismatch')
+        frame = mapped['content'][0]
+        if (not isinstance(frame, dict) or set(frame) != {'type', 'text'}
+                or frame.get('type') != 'input_text' or not isinstance(frame.get('text'), str)
+                or not json_evidence_equal(strict_json_loads(frame['text']),
+                    {'type': 'agent_message', 'author': peer.get('author'), 'recipient': peer.get('recipient')})
+                or not json_evidence_equal(mapped['content'][1:], peer.get('content', []))):
+            raise ProtocolError('Native peer history projection mismatch')
+        mapped_peers.append(mapped)
+    # An ordinary original user message may coincidentally equal a peer's
+    # projected wire message. Count it as well rather than rejecting it.
+    peer_counts = Counter(map(_history_anchor_key, mapped_peers))
+
+    def count_matching_user_messages(items):
+        keys = (
+            _history_anchor_key(item) for item in items
+            if isinstance(item, dict) and item.get('type', 'message') == 'message' and item.get('role') == 'user'
+        )
+        return Counter(key for key in keys if key in peer_counts)
+
+    if count_matching_user_messages(prepared) != peer_counts + count_matching_user_messages(source):
+        raise ProtocolError('Native peer history projection duplicated or lost')
+
+
+def adapt_reasoning_context(body, payload, *, registry=None):
+    _verify_peer_history_projection(body, payload, registry)
     reasoning = body.get("reasoning") or {}
     if not isinstance(reasoning, dict):
         raise ProtocolError("reasoning must be an object")
@@ -418,22 +567,26 @@ def adapt_reasoning_context(body, payload):
     if reasoning["context"] != "all_turns":
         raise ProtocolError("Only explicit reasoning.context=all_turns is supported")
     original = _reasoning_records(body.get("input"))
-    replayed = iter(_reasoning_records(payload.get("input"), include_continuation=True))
-    # A subsequence preserves order and duplicate occurrences while allowing
-    # CDS's explicitly labelled transport-only markers between model items.
-    for expected in original:
-        if not any(actual == expected for actual in replayed):
-            raise ProtocolError("all_turns adaptation lost or reordered plaintext reasoning history")
+    if getattr(registry,'continuation_context',False):
+        _verify_reasoning_projection(body,payload,registry)
+    else:
+        replayed = iter(_reasoning_records(payload.get("input"), include_continuation=True))
+        # A subsequence preserves order and duplicate occurrences while allowing
+        # CDS's explicitly labelled transport-only markers between model items.
+        for expected in original:
+            if not any(actual == expected for actual in replayed):
+                raise ProtocolError("all_turns adaptation lost or reordered plaintext reasoning history")
     mapping = "native_reasoning_replay"
-    if original and not body.get("tools"):
+    plaintext = [(index, _reasoning_record(item)) for index, item in enumerate(body.get("input") or [])
+                 if isinstance(item, dict) and item.get("type") == "reasoning"
+                 and not item.get("encrypted_content")]
+    if plaintext and not body.get("tools"):
         # DeepSeek ignores historical reasoning_content when no tools are
         # requested. Keep the original reasoning items, and expose the same
         # verbatim material as prior assistant context so Guardian can read it.
         # This is an assistant-context message, never new model reasoning,
         # a human instruction, a tool result, or an approval decision.
-        positions = [index for index, item in enumerate(body["input"])
-                     if isinstance(item, dict) and item.get("type") == "reasoning"]
-        records = [{"input_index": index, **item} for index, item in zip(positions, original)]
+        records = [{"input_index": index, **item} for index, item in plaintext]
         context = {
             "type": "message", "role": "assistant",
             "content": [{"type": "output_text", "text":
@@ -478,6 +631,8 @@ def create_app(
     image_transport_factory=None,
 ) -> web.Application:
     """Caller owns state and AppRunner; use handler_cancellation=True on its runner."""
+    if not isinstance(INTERRUPTED_CONTEXT_PREFIX,str) or not callable(json_evidence_equal) or 'streaming' not in inspect.signature(Events).parameters:
+        raise RuntimeError('Incompatible CDS protocol: verified continuation projection and stream commit boundary are required')
     if settings.upstream_url != OPENROUTER_RESPONSES:
         parsed = urlsplit(settings.upstream_url)
         if (not test_upstream or parsed.scheme != "http"
@@ -590,8 +745,9 @@ def create_app(
             translated["model"] = MODEL
             evidence = state.evidence_view(translated.get("input"))
             payload, registry = prepare(translated, evidence,
-                                        ordinary_default_provider=settings.ordinary_default_provider)
-            adaptations = {**control_adaptations, **adapt_reasoning_context(translated, payload),
+                                        ordinary_default_provider=settings.ordinary_default_provider,
+                                        opaque_replay=True)
+            adaptations = {**control_adaptations, **adapt_reasoning_context(translated, payload, registry=registry),
                            "native_request": native_request}
             output_mapping = getattr(registry, "structured_output_mapping", None)
             if output_mapping is not None:
@@ -616,7 +772,7 @@ def create_app(
                               route_reason=registry.route_reason, context_key=payload.get("prompt_cache_key"),
                               adaptations=adaptations)
         response = None
-        events = Events(registry)
+        events = Events(registry, streaming=bool(body.get("stream")))
         upstream_status = None
         key = None
         image_stack = AsyncExitStack()
@@ -690,6 +846,13 @@ def create_app(
             key = credential_provider()
             if not isinstance(key, str) or not key or any(c.isspace() for c in key):
                 raise RuntimeError("Upstream credential provider returned no usable credential")
+            if opaque_items({"output": payload.get("input")}):
+                try:
+                    state.restore_opaque(payload, key)
+                except ProtocolError as error:
+                    state.finish(receipt, "adapter_error", detail=str(error))
+                    state.delivery(receipt, "failed")
+                    return _error(str(error), 400, receipt=receipt)
             if image_transport_factory is not None:
                 state.image_transport(receipt, consumption_status='preparing')
                 transport = image_transport_factory(request.app[session_key], credential_provider)
@@ -725,22 +888,32 @@ def create_app(
                 upstream_status = upstream.status
                 headers = {**_headers(upstream.headers), "X-Gateway-Request-Id": receipt}
                 if not 200 <= upstream.status < 300:
-                    if image_refs and upstream.status in {400,401,403,404,413,415,422,429}:
-                        await image_prepared.mark_upstream_rejected(upstream.status)
-                        image_terminal = True
-                        state.image_transport(receipt, consumption_status='http_rejected',
-                                              upstream_http_status=upstream.status, provider_terminal='http_rejected')
-                    raw = await _bounded_read(upstream, settings.max_body_bytes)
-                    raw = raw.replace(key.encode(), b"[REDACTED]")
-                    state.finish(receipt, "upstream_error", upstream.status, events)
+                    detail = None
+                    try:
+                        raw = await _bounded_read(upstream, settings.max_body_bytes)
+                    except (aiohttp.ClientError, OSError, TimeoutError, ProtocolError):
+                        # The status and retry advice are already known. A partial
+                        # or oversized diagnostic body cannot change their meaning.
+                        upstream.close()
+                        detail = "Upstream error body could not be read completely."
+                        failure = web.json_response({"error": {
+                            "code": "upstream_error_body_unavailable", "message": detail,
+                        }}, status=upstream_status, headers=headers)
+                    else:
+                        failure = web.Response(body=raw.replace(key.encode(), b"[REDACTED]"),
+                                               status=upstream_status, content_type=upstream.content_type,
+                                               headers=headers)
+                    state.finish(receipt, "upstream_error", upstream_status, events, detail)
                     state.delivery(receipt, "delivered")
-                    return web.Response(body=raw, status=upstream.status,
-                                        content_type=upstream.content_type, headers=headers)
+                    return failure
                 if not body.get("stream", False):
                     result = strict_json_loads(await _bounded_read(upstream, settings.max_body_bytes))
                     reject_credential_response_id(result)
                     validate_response(result)
                     failed = result["status"] == "failed"
+                    opaque = opaque_items(result)
+                    if opaque and (result["status"] != "completed" or provider != PROVIDER):
+                        raise ProtocolError("Opaque reasoning requires an official DeepSeek completion")
                     original = {"type": "response." + result["status"], "response": result}
                     if failed:
                         failure_detail = provider_failure_diagnostic(original)
@@ -755,8 +928,11 @@ def create_app(
                     normalized = events.transform(original)
                     result = next(e["response"] for e in reversed(normalized)
                                   if e["type"] == "response." + result["status"])
-                    state.finish(receipt, events.status, upstream.status, events,
-                                 json.dumps(failure_detail) if failure_detail is not None else None)
+                    committed = state.finish(receipt, events.status, upstream.status, events,
+                                             json.dumps(failure_detail) if failure_detail is not None else None,
+                                             opaque_credential=key if opaque else None)
+                    if opaque and not committed:
+                        raise ProtocolError("Opaque reasoning receipt was not committed")
                     state.delivery(receipt, "delivered")
                     return web.json_response(result, headers=headers)
                 response = web.StreamResponse(headers={
@@ -764,11 +940,23 @@ def create_app(
                 await response.prepare(request)
                 state.delivery(receipt, "streaming")
                 terminal_events = None
+                pending_opaque = None
+                pending_opaque_bytes = 0
                 async for original in sse_events(upstream.content, settings.max_body_bytes):
+                    if pending_opaque is not None and events.terminal:
+                        raise ProtocolError("Provider sent an event after opaque response completion")
                     if not isinstance(original, dict):
                         raise ProtocolError("SSE data must contain an event object")
                     reject_credential_response_id(original.get("response"))
                     kind = original.get("type")
+                    opaque = opaque_items(original)
+                    if opaque:
+                        if provider != PROVIDER:
+                            raise ProtocolError("Opaque reasoning requires an official DeepSeek completion")
+                        if kind == "response.completed" and any(item.get("id") not in events.done for item in opaque):
+                            raise ProtocolError("Streamed opaque reasoning lacks response.output_item.done evidence")
+                        if pending_opaque is None:
+                            pending_opaque = []
                     if kind == "response.failed":
                         failure_detail = provider_failure_diagnostic(original)
                         validate_response(original.get("response"), "failed")
@@ -791,18 +979,37 @@ def create_app(
                             state.progress(receipt, events)
                         if events.terminal:
                             terminal_events = normalized
-                        else:
+                        if pending_opaque is not None and events.terminal and events.status == "failed":
+                            # A failed terminal must never expose uncommitted ciphertext.
+                            terminal_events[-1]["response"]["output"] = []
+                            pending_opaque.clear()
+                        elif pending_opaque is not None:
+                            frames = [encode_sse(native) for native in normalized]
+                            pending_opaque_bytes += sum(map(len, frames))
+                            if pending_opaque_bytes > MAX_PENDING_OPAQUE_BYTES:
+                                raise ProtocolError("Opaque response exceeds the replay evidence budget")
+                            pending_opaque.extend(frames)
+                        elif not events.terminal:
                             for native in normalized:
                                 await response.write(encode_sse(native))
                     if events.terminal and events.status == "failed":
                         break  # Failure is final; do not wait for a hung provider EOF.
                 if not events.terminal or terminal_events is None:
                     raise ProtocolError("Upstream disconnected without a terminal Responses event")
-                # Do not publish completion if a later frame contradicts the terminal.
-                state.finish(receipt, events.status, upstream.status, events,
-                             json.dumps(failure_detail) if failure_detail is not None else None)
-                for native in terminal_events:
-                    await response.write(encode_sse(native))
+                # A validated terminal and clean transport EOF must precede
+                # persistence and delivery of any opaque frame.
+                opaque_completed = pending_opaque is not None and events.status == "completed"
+                if pending_opaque is not None and events.status != "failed" and (
+                        not opaque_completed or not opaque_items({"output": list(events.done.values())})):
+                    raise ProtocolError("Opaque reasoning lacks a completed native replay boundary")
+                committed = state.finish(receipt, events.status, upstream.status, events,
+                                         json.dumps(failure_detail) if failure_detail is not None else None,
+                                         opaque_credential=key if opaque_completed else None)
+                if opaque_completed and not committed:
+                    raise ProtocolError("Opaque reasoning receipt was not committed")
+                frames = pending_opaque if opaque_completed else [encode_sse(native) for native in terminal_events]
+                for frame in frames:
+                    await response.write(frame)
                 await response.write_eof()
                 state.delivery(receipt, "delivered")
                 return response
@@ -847,7 +1054,20 @@ def create_app(
                     state.delivery(receipt, "disconnected")
                 return response
             status = 413 if isinstance(exc, PayloadBudgetExceeded) else 502
-            if isinstance(exc, FileOperationError) and exc.status in {400,401,403,404,409,413,415,422,429,500,502,503,504}:
+            if isinstance(exc, FileOperationError) and exc.status == 413:
+                # A Files endpoint limit is not the model request's context
+                # capacity. Preserve the Files status without asking native
+                # Codex to compact the conversation and retry inference.
+                failure = web.json_response({"error": {
+                    "type": "invalid_request_error",
+                    "code": "provider_compatibility",
+                    "message": "The Files API rejected a file operation (HTTP 413).",
+                    "file_http_status": 413,
+                }}, status=400, headers={"X-Gateway-Request-Id": receipt})
+                for name, value in exc.safe_headers.items():
+                    failure.headers[name] = value
+                return failure
+            if isinstance(exc, FileOperationError) and exc.status in {400,401,403,404,409,415,422,429,500,502,503,504}:
                 status = exc.status
             elif isinstance(exc, ImageTransportError) and status != 413:
                 status = 400

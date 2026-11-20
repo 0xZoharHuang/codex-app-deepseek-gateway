@@ -47,16 +47,27 @@ def test_config_snapshot_parses_and_hashes_same_single_read(tmp_path, monkeypatc
     assert reads == [path] and original(path) == new
 
 
-def test_existing_custom_policy_is_byte_preserved_with_extra_explicit_alias(tmp_path):
-    home = tmp_path / "gateway"; home.mkdir()
-    raw = json.dumps({"upstream_proxy": "http://127.0.0.1:3128",
-                      "accepted_models": ["explicit-helper", *reversed(gp.REQUEST_MODEL_IDS)],
-                      "allowed_providers": list(reversed(gp.DEFAULT_PROVIDERS))}, indent=4).encode()
-    path = home / "gateway.json"; path.write_bytes(raw)
-    config, info = gp.ensure_app_policy(home)
-    gp.require_app_policy(config, ["explicit-helper", *gp.REQUEST_MODEL_IDS])
-    assert path.read_bytes() == raw and info["status"] == "existing_policy_preserved"
-    assert config.policy_origin is None
+@pytest.mark.parametrize("extra_alias", [None, "explicit-helper"])
+def test_existing_custom_policy_is_preserved_and_enforces_app_aliases(tmp_path, extra_alias):
+    home = tmp_path / "gateway"
+    home.mkdir()
+    policy = {"upstream_proxy": "http://127.0.0.1:3128",
+              "accepted_models": list(reversed(gp.REQUEST_MODEL_IDS)),
+              "allowed_providers": list(reversed(gp.DEFAULT_PROVIDERS))}
+    if extra_alias is not None:
+        policy["accepted_models"].append(extra_alias)
+    raw = json.dumps(policy, indent=4).encode()
+    path = home / "gateway.json"
+    path.write_bytes(raw)
+    if extra_alias is None:
+        config, info = gp.ensure_app_policy(home)
+        gp.require_app_policy(config, gp.REQUEST_MODEL_IDS)
+        assert info["status"] == "existing_policy_preserved"
+        assert config.policy_origin is None
+    else:
+        with pytest.raises(gp.ServiceConfigError, match="outside the fixed P169 catalog"):
+            gp.ensure_app_policy(home)
+    assert path.read_bytes() == raw
 
 
 @pytest.mark.parametrize("field", ["accepted_models", "allowed_providers"])

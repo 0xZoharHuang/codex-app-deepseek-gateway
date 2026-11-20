@@ -1,7 +1,8 @@
 """Assemble the raw Windows native distribution; never compile or execute it.
 
-Notice collection copies the same pinned build-time pure helper region as CDS
-native_licenses.py, under Apache-2.0; packaging provenance records source hashes. SPDX data retain their own exact upstream commit and hashes.
+Notice collection derives from the pinned CDS native_licenses.py helpers,
+under Apache-2.0, with Windows filesystem paths adapted at the syscall boundary.
+Packaging provenance records source hashes. SPDX data retain their own exact upstream commit and hashes.
 No CDS runtime, launcher, supervisor or tool execution module is imported.
 """
 from __future__ import annotations
@@ -32,6 +33,9 @@ P19_LOCK_SHA256 = "163f6e61d605adf7d7698835f33b99d48c5cb25f017b8231f5062bd0ffb0a
 P20_LOCK_SHA256 = "3736e573e634180a1443b0c3e2cdbbf3d28304cf17d76fd3752aab344356b44c"
 P21_LOCK_SHA256 = "1a80f6e1e4fdb2f5b255a416f70350b5fd764493322bc463137381900374cdab"
 P167_LOCK_SHA256 = "e0945f5898e6b3f6f4e94224770e8e4420b6bda66f2df284b72a85f59062247f"
+P169_DRAFT_LOCK = ("p169-source-lock.service-restore-acl-order.draft.json",
+                   "0ab81f556d6062026b2ff6194351d697b04483bfc3b55a197a5b32944031ee72")
+SINGLE_PRODUCER_REVISIONS = ("O165", "O167", "O169")
 REVIEWED_SOURCE_LOCKS = (("build-lock.O165-P16-source.json", P16_LOCK_SHA256),
                          ("build-lock.O165-P17-source.json", P17_LOCK_SHA256),
                          ("build-lock.O165-P18-source.json", P18_LOCK_SHA256),
@@ -141,24 +145,31 @@ def indexed_sources(raw, index, index_digest, references_digest, n_lock, j_lock)
                                       for row in actual), "Indexed binary producers differ")
 
 
-def single_graph(lock, native_dir):
+def single_graph(lock, native_dir, *, development_qualification=False):
     """One exact reviewed source and recipe produces the entire native bundle."""
     revision = lock["candidate_revision"]
-    require(revision in ("O165", "O167") and lock["target"] == TARGET,
+    require(revision in SINGLE_PRODUCER_REVISIONS and lock["target"] == TARGET,
             "Unsupported single-producer baseline")
     names = set(lock["binaries"])
     require(len(lock["binaries"]) == len(names) and names in (BINARIES, SOURCE_BINARIES),
             "Single producer must build the exact four or six native targets")
     source_bundle = names == SOURCE_BINARIES
+    if revision == "O169":
+        require(development_qualification and source_bundle,
+                "P169 requires private development qualification of all six binaries")
+        allowed_locks = (P169_DRAFT_LOCK,)
+    else:
+        allowed_locks = REVIEWED_SOURCE_LOCKS
     if source_bundle:
         reviewed = []
-        for name, digest in REVIEWED_SOURCE_LOCKS:
+        for name, digest in allowed_locks:
             candidate = native_dir / name
             if candidate.exists():
                 pinned = plain(candidate)
                 if sha(pinned) == digest and load(pinned) == lock:
                     reviewed.append(name)
         require(len(reviewed) == 1,
+                "Six-target source bundle must match the reviewed P169 candidate lock" if revision == "O169" else
                 "Six-target source bundle must match an explicitly reviewed P16 lock or reviewed P17 lock or reviewed P18 lock or reviewed P19 lock or reviewed P20 lock or reviewed P21 lock or reviewed P167 lock")
     else:
         require(revision == "O165"
@@ -180,6 +191,30 @@ def single_graph(lock, native_dir):
     return {"method":"One exact source fingerprint, Cargo.lock, compiler/profile and locked native target invocation.",
             "Cargo_lock_sha256":lock["cargo_lock_sha256"],
             "producer_sources_remain_separate":False, "producer_id":revision}
+
+
+def p169_build_inputs(raw, source, lock, expected, build):
+    """Read back official V8 inputs used by the exact compile-only candidate."""
+    require(raw.get("status") == "built-not-app-qualified" and raw.get("mode") == "build"
+            and raw.get("runtime_executed") is False and raw.get("app_qualified") is False
+            and raw.get("msvc_sdk_preflight") == {
+                "status": "compile-link-passed", "target": lock["target"],
+                "probe_program_executed": False},
+            "Raw P169 receipt is not from the expected compile-only build")
+    recorded = raw["rusty_v8"]
+    paths = [Path(row["file"]) for row in recorded["files"]]
+    require(len(paths) == 3 and all(item.is_absolute() for item in paths)
+            and len({item.parent for item in paths}) == 1, "P169 recipe requires one official V8 directory")
+    for item in paths:
+        plain(item)
+    observed = build.verified_rusty_v8_inputs(source, paths[0].parent, lock["target"])
+    require(recorded == observed, "Recorded P169 official V8 inputs differ from build readback")
+    fields = ("version", "profile", "target", "source_manifest_sha256")
+    evidence = {**{key: observed[key] for key in fields}, "files": {
+        Path(row["file"]).name: {"sha256": row["sha256"], "size": row["size"]}
+        for row in observed["files"]}}
+    require(evidence == expected, "P169 V8 identity differs from the candidate")
+    return evidence
 
 
 def single_sources(raw, lock, lock_digest, raw_digest, build):
@@ -281,10 +316,20 @@ def shared_graph(n_lock, j_lock, native_dir):
 
 
 # BEGIN PINNED BUILD-TIME NOTICE HELPERS
-def _redirected(path):
+def _notice_io_path(path):
+    """Keep the Windows device prefix out of logical paths and Git arguments."""
     path = Path(path)
-    return path.is_symlink() or bool(
-        getattr(path.stat(follow_symlinks=False), "st_file_attributes", 0) & 0x400)
+    prefix = "\\\\?\\"
+    if os.name != "nt" or str(path).startswith((prefix, "\\\\.\\")):
+        return path
+    absolute = os.path.abspath(path)
+    if absolute.startswith("\\\\"):
+        return Path(prefix + "UNC\\" + absolute[2:])
+    return Path(prefix + absolute)
+
+
+def _redirected(path):
+    return redirected(_notice_io_path(path))
 
 
 # Cargo crates may vendor notices below arbitrary paths. Directory walks never
@@ -324,7 +369,7 @@ def _notice_name(path, source):
 def source_context(package, *, git="git"):
     """Cargo Git identity admits a shared root; arbitrary parent directories do not."""
     source = Path(os.path.abspath(package["manifest_path"])).parent
-    require(source.is_dir(), "Crate source directory is missing: " + str(source))
+    require(_notice_io_path(source).is_dir(), "Crate source directory is missing: " + str(source))
     require(not any(_redirected(p) for p in (source, *source.parents)),
             "Crate source path is redirected: " + str(source))
     context = {"source": source, "root": source, "kind": "crate", "tree": {}, "index": {}, "git_executable": git}
@@ -350,10 +395,11 @@ def source_context(package, *, git="git"):
 
 
 def _git_notice_checkout(root, revision, git):
-    require(root.is_dir() and not any(_redirected(p) for p in (root, *root.parents)),
+    physical_root = _notice_io_path(root)
+    require(physical_root.is_dir() and not any(_redirected(p) for p in (root, *root.parents)),
             "Git notice checkout is redirected or absent: " + str(root))
     observed_root = Path(_git(root, "rev-parse", "--show-toplevel", executable=git).decode().strip())
-    require(observed_root.is_absolute() and observed_root.samefile(root),
+    require(observed_root.is_absolute() and _notice_io_path(observed_root).samefile(physical_root),
             "Git notice path is not its own locked checkout: " + str(root))
     require(_git(root, "rev-parse", "HEAD", executable=git).decode().strip() == revision,
             "Git checkout HEAD differs from Cargo source revision: " + str(root))
@@ -454,10 +500,11 @@ def _resolve_notice(path, source, context):
         relative = current.relative_to(root).as_posix()
         git_name, entry, scope = (_git_entry(context, current) if context["kind"] == "pinned_git_checkout"
                                   else (relative, None, context))
-        actual_link = current.is_symlink()
+        physical = _notice_io_path(current)
+        info = physical.lstat()
+        actual_link = stat.S_ISLNK(info.st_mode)
         git_link = entry is not None and entry[0] == "120000"
-        info = current.lstat()
-        require(not _redirected(current) or actual_link,
+        require(not redirected(physical, info) or actual_link,
                 "Crate notice contains a redirected non-symlink entry: " + str(current))
         if not actual_link and not git_link:
             require(stat.S_ISREG(info.st_mode), "Crate notice is not a regular file: " + str(current))
@@ -470,14 +517,14 @@ def _resolve_notice(path, source, context):
             require(len(target_bytes) <= 4096, "Git notice alias target exceeds bounded bytes")
             target = target_bytes.decode("utf-8")
             if actual_link:
-                require(current.readlink() == Path(target),
+                require(physical.readlink() == Path(target),
                         "Git notice symlink differs from the pinned target: " + str(current))
             else:
-                require(stat.S_ISREG(info.st_mode) and current.read_bytes() == target_bytes,
+                require(stat.S_ISREG(info.st_mode) and physical.read_bytes() == target_bytes,
                         "Materialized Git notice alias differs from its pinned blob: " + str(current))
         else:
             require(context["kind"] == "crate", "Untracked Git notice alias: " + str(current))
-            target = str(current.readlink())
+            target = str(physical.readlink())
         target_path = Path(target)
         require(target and not target_path.is_absolute() and not target_path.drive
                 and not any(ch in target for ch in "\0\r\n"),
@@ -494,7 +541,7 @@ def notice_candidates(source, context=None):
     """No-follow walk; validate aliases before admitting their logical notice path."""
     source = Path(os.path.abspath(source))
     context = context or {"source": source, "root": source, "kind": "crate", "tree": {}, "index": {}}
-    require(source.is_dir(), "Crate source directory is missing: " + str(source))
+    require(_notice_io_path(source).is_dir(), "Crate source directory is missing: " + str(source))
     require(not any(_redirected(p) for p in (source, *source.parents)),
             "Crate source path is redirected: " + str(source))
     pending, candidates, visited = [source], set(), 0
@@ -502,11 +549,11 @@ def notice_candidates(source, context=None):
         folder = pending.pop()
         require(len(folder.relative_to(source).parts) <= MAX_NOTICE_SCAN_DEPTH,
                 "Crate notice scan exceeds the bounded directory depth")
-        with os.scandir(folder) as entries:
+        with os.scandir(_notice_io_path(folder)) as entries:
             for entry in entries:
                 visited += 1
                 require(visited <= MAX_NOTICE_SCAN_ENTRIES, "Crate notice scan exceeds the bounded entry count")
-                path = Path(entry.path)
+                path = folder / entry.name
                 require(path.is_relative_to(source), "Crate notice scan escapes its source: " + str(path))
                 logical_notice = _notice_name(path, source) or path == context.get("declared_notice")
                 git_alias = False
@@ -534,13 +581,14 @@ def _regular_notice_bytes(path, scope):
     require(not any(_redirected(p) for p in (path, *path.parents)),
             "Crate notice path is redirected: " + str(path))
     require(path.is_relative_to(scope), "Crate notice escapes its source: " + str(path))
-    before = path.stat()
+    physical = _notice_io_path(path)
+    before = physical.stat()
     require(stat.S_ISREG(before.st_mode), "Crate notice is not a regular file: " + str(path))
     require(before.st_size <= 16 * 1024 * 1024, "Crate notice exceeds the bounded file size")
-    with path.open("rb") as stream:
+    with physical.open("rb") as stream:
         content = stream.read(16 * 1024 * 1024 + 1)
         opened = os.fstat(stream.fileno())
-    after = path.stat()
+    after = physical.stat()
     fields = lambda st: (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_nlink)
     require(fields(before) == fields(opened) == fields(after) and len(content) == before.st_size,
             "Crate notice changed during copy: " + str(path))
@@ -617,18 +665,25 @@ def _notice_bytes(path, source, context=None):
 
 def collect_licenses(metadata, output, allowed_roots, *, repo=REPO, git="git"):
     """Retain original bytes and attribution; reject missing/unknown declarations."""
-    output = Path(output); output.mkdir(parents=True, exist_ok=False)
+    output = Path(output)
+    physical_output = _notice_io_path(output)
+    physical_output.mkdir(parents=True, exist_ok=False)
     roots = [Path(p).resolve() for p in allowed_roots]
+
     def admitted(path):
-        path = plain(Path(path))
-        require(any(path.resolve().is_relative_to(root) for root in roots), "Crate notice escapes declared source/cache")
-        require(path.stat().st_size <= 16 * 1024 * 1024, "Crate notice exceeds the bounded file size")
-        return path
+        logical = Path(path)
+        physical = plain(_notice_io_path(logical))
+        # Compare canonical filesystem paths without carrying the device prefix
+        # into the logical allowed-roots, Cargo paths or generated attribution.
+        require(any(physical.resolve().is_relative_to(_notice_io_path(root)) for root in roots),
+                "Crate notice escapes declared source/cache")
+        require(physical.stat().st_size <= 16 * 1024 * 1024, "Crate notice exceeds the bounded file size")
+        return logical
     data = load(repo / "native/license-data.json")
     ids = {row["id"] for row in data["texts"]}
     for row in data["texts"]:
         path = plain(repo / "native/licenses/spdx" / (row["id"] + ".txt"))
-        copy_bytes(path, output / "spdx" / path.name, row["sha256"])
+        copy_bytes(path, physical_output / "spdx" / path.name, row["sha256"])
     entries = []
     for package in sorted(metadata["packages"], key=lambda p: p["id"]):
         if not package.get("source"):
@@ -643,7 +698,7 @@ def collect_licenses(metadata, output, allowed_roots, *, repo=REPO, git="git"):
         key = package["name"] + "-" + package["version"] + "-" + hashlib.sha256(package["id"].encode()).hexdigest()[:8]
         require(PurePosixPath(key).name == key and "\\" not in key, "Unsafe crate identity")
         target = output / "crates" / key
-        require(not output.resolve().is_relative_to(source.resolve()),
+        require(not physical_output.resolve().is_relative_to(_notice_io_path(source).resolve()),
                 "License output cannot be inside crate source")
         try:
             candidates = notice_candidates(source, context)
@@ -654,7 +709,7 @@ def collect_licenses(metadata, output, allowed_roots, *, repo=REPO, git="git"):
             candidates.add(p if p.is_absolute() else source / p)
         fallback = not candidates
         if fallback:
-            candidates.update(source.glob("README*"))
+            candidates.update(source / path.name for path in _notice_io_path(source).glob("README*"))
         require(len(candidates) <= MAX_CRATE_NOTICE_FILES,
                 "Crate notice count exceeds the bounded file count")
         notices = []
@@ -668,11 +723,13 @@ def collect_licenses(metadata, output, allowed_roots, *, repo=REPO, git="git"):
             require(notice_bytes <= MAX_CRATE_NOTICE_BYTES,
                     "Crate notices exceed the bounded aggregate size")
             name = str(index) + "-" + path.name
-            dest = target / name; dest.parent.mkdir(parents=True, exist_ok=True)
-            with dest.open("xb") as stream:
+            dest = target / name
+            physical_dest = _notice_io_path(dest)
+            physical_dest.parent.mkdir(parents=True, exist_ok=True)
+            with physical_dest.open("xb") as stream:
                 stream.write(content)
             digest = hashlib.sha256(content).hexdigest()
-            require(dest.stat().st_nlink == 1 and sha(dest) == digest,
+            require(physical_dest.stat().st_nlink == 1 and sha(physical_dest) == digest,
                     "Independent notice copy verification failed")
             notices.append({"file": dest.relative_to(output).as_posix(),
                             "source_file": Path(os.path.relpath(path, source)).as_posix(),
@@ -681,28 +738,36 @@ def collect_licenses(metadata, output, allowed_roots, *, repo=REPO, git="git"):
         require(notices or expression, "Crate has neither notice nor declaration")
         item = {"name": package["name"], "version": package["version"], "source": package["source"],
                 "repository": package.get("repository"), "authors": package.get("authors", []),
-                "declared_license": expression, "manifest_sha256": sha(manifest),
+                "declared_license": expression, "manifest_sha256": sha(_notice_io_path(manifest)),
                 "upstream_notice_files": notices, "README_fallback": fallback}
-        write(target / "attribution.json", item); entries.append(item)
+        write(_notice_io_path(target / "attribution.json"), item); entries.append(item)
     index = {"schema_version": 1, "scope": "External dependency superset of the fixed Windows native workspace; includes build/test and unused workspace dependencies, not a claim all were linked.",
              "spdx_source": data, "packages": entries}
-    write(output / "index.json", index)
+    write(physical_output / "index.json", index)
     return index
 
 
-def validate_tree(root, *, build_lock=None):
+def validate_tree(root, *, build_lock=None, development_qualification=False):
     root = Path(root); inventory = {}
     manifest = load(root / "manifest.json")
     names = binary_names(manifest)
     revision = manifest.get("candidate_revision")
-    single = revision in ("O165", "O167")
+    single = revision in SINGLE_PRODUCER_REVISIONS
+    if revision == "O169":
+        require(development_qualification and build_lock is not None,
+                "P169 staging requires the explicit private candidate build lock")
+        require(manifest.get("status") == "built-not-app-qualified"
+                and manifest.get("build_lock_sha256") == P169_DRAFT_LOCK[1]
+                and manifest.get("distribution", {}).get("App_acceptance_asserted") is False
+                and load(root / "provenance/source.json").get("kind") == "development_qualification",
+                "P169 staging must retain explicit development and unqualified provenance")
     if build_lock is not None:
         # Honor the exact explicitly selected producer lock through staging and
         # archiving too; an unpromoted candidate must not borrow the active lock.
         require(single, "Explicit staging lock requires a single-source producer")
         selected = plain(build_lock)
         cohort = load(selected)
-        single_graph(cohort, REPO / "native")
+        single_graph(cohort, REPO / "native", development_qualification=development_qualification)
         require(manifest.get("build_lock_sha256") == sha(selected),
                 "Staging manifest differs from the explicit build lock")
     else:
@@ -750,11 +815,14 @@ def validate_tree(root, *, build_lock=None):
     return inventory
 
 
-def make_archive(root, archive, epoch, *, build_lock=None):
+def make_archive(root, archive, epoch, *, build_lock=None, development_qualification=False):
     """Exact file allowlist; never archive the input/prepared runtime directory."""
     root, archive = Path(root), Path(archive)
     require(not archive.exists() and not archive.is_relative_to(root), "Archive must be new and outside staging")
-    inventory = validate_tree(root, build_lock=build_lock)
+    if load(root / "manifest.json").get("candidate_revision") == "O169":
+        require(archive.name.endswith(".qualification.tar.gz"),
+                "P169 archive must be a private .qualification.tar.gz artifact")
+    inventory = validate_tree(root, build_lock=build_lock, development_qualification=development_qualification)
     names = binary_names(load(root / "manifest.json"))
     with archive.open("xb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", filename="", mtime=epoch) as compressed:
         with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as stream:
@@ -804,14 +872,17 @@ def main():
     lock_path = plain(args.build_lock)
     n_lock = load(lock_path)
     revision = n_lock.get("candidate_revision")
-    single = revision in ("O165", "O167")
+    single = revision in SINGLE_PRODUCER_REVISIONS
     spec = importlib.util.spec_from_file_location("cag_native_build", REPO / "scripts/build_native.py")
     build = importlib.util.module_from_spec(spec); spec.loader.exec_module(build)
     lock_digest = sha(lock_path)
+    if revision == "O169":
+        require(args.development_qualification and lock_digest == P169_DRAFT_LOCK[1],
+                "P169 requires --development-qualification and the exact explicit candidate build lock")
     if single:
         require(args.producer_references_sha256 is None,
                 "Single-source provenance derives from the exact builder manifest, not mixed references")
-        graph = single_graph(n_lock, native)
+        graph = single_graph(n_lock, native, development_qualification=args.development_qualification)
         outputs = raw_outputs(raw, expected=frozenset(n_lock["binaries"]))
         producers, index, public_raw = single_sources(raw, n_lock, lock_digest, args.native_manifest_sha256, build)
     else:
@@ -848,6 +919,14 @@ def main():
             and before["count"] == n_lock["prepared_source_files"], "Prepared source fingerprint differs")
     lock = source / "codex-rs/Cargo.lock"
     require(sha(lock) == graph["Cargo_lock_sha256"], "Actual Cargo.lock differs")
+    if revision == "O169":
+        require(Path(raw["source"]) == source and Path(raw["output"]) == raw_path.parent.absolute(),
+                "P169 raw receipt must remain in its original prepared source and build output directories")
+        draft = load(plain(native / "p169-admission.draft.json"))
+        require(draft["schema_version"] == 1 and draft["status"] == "draft-only"
+                and draft["native_recipe"]["sha256"] == lock_digest,
+                "Invalid P169 candidate admission draft")
+        producers["rusty_v8"] = p169_build_inputs(raw, source, n_lock, draft["official_v8"], build)
     git = lambda *v: subprocess.check_output([args.git, "-C", str(REPO), *v]).decode("utf-8").strip()
     commit = git("rev-parse", "HEAD"); epoch = int(git("show", "-s", "--format=%ct", commit))
     dirty = bool(git("status", "--porcelain=v1", "-uall"))
@@ -928,11 +1007,13 @@ def main():
         require(sha(native / row["file"]) == row["sha256"], "Native patch changed during packaging")
     require(git("rev-parse", "HEAD") == commit and bool(git("status", "--porcelain=v1", "-uall")) == dirty,
             "Gateway source state changed during packaging")
-    inventory = validate_tree(output, build_lock=lock_path if single else None)
+    inventory = validate_tree(output, build_lock=lock_path if single else None,
+                              development_qualification=args.development_qualification)
     write(output / "provenance/distribution-inventory.json", inventory)
     suffix = ".qualification.tar.gz" if args.development_qualification else ".tar.gz"
     archive = output.parent / (output.name + suffix)
-    packed = make_archive(output, archive, epoch, build_lock=lock_path if single else None)
+    packed = make_archive(output, archive, epoch, build_lock=lock_path if single else None,
+                          development_qualification=args.development_qualification)
     report = {"status":"raw_native_assembled_not_App_qualified", "output":str(output), "archive":str(archive),
               "archive_identity":packed, "manifest_sha256":sha(output / "manifest.json"),
               "raw_binary_count":len(outputs), "external_crates":len(licenses["packages"]),

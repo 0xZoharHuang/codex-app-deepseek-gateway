@@ -30,6 +30,46 @@ def observe_response_streams(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", [413, 429])
+@pytest.mark.parametrize("stream, with_images", [(False, False), (True, True)])
+async def test_upstream_error_keeps_status_when_body_is_truncated(tmp_path, status, stream, with_images):
+    calls = 0
+    backend = ImageFiles()
+    factory = image_factory(tmp_path, backend)[0] if with_images else None
+
+    async def upstream(request):
+        nonlocal calls
+        calls += 1
+        await request.read()
+        response = web.StreamResponse(status=status, headers={
+            "Content-Type": "application/json",
+            "Content-Length": "4096",
+            "Retry-After": "7",
+        })
+        await response.prepare(request)
+        await response.write(b'{"error":"PRIVATE_PARTIAL_DIAGNOSTIC')
+        request.transport.close()
+        return response
+
+    async with harness(tmp_path, upstream, image_transport_factory=factory) as (client, state):
+        body = image_input(stream=stream) if with_images else {
+            "model": MODEL, "input": "synthetic", "stream": stream,
+        }
+        response = await client.post("/v1/responses", json=body, headers=HEADERS)
+        assert response.status == status
+        assert response.headers["Retry-After"] == "7"
+        assert (await response.json())["error"]["code"] == "upstream_error_body_unavailable"
+        assert "PRIVATE_PARTIAL_DIAGNOSTIC" not in await response.text()
+        receipt, = state.list_receipts()
+        assert receipt["status"] == "upstream_error"
+        assert receipt["upstream_status"] == status
+        assert "PRIVATE_PARTIAL_DIAGNOSTIC" not in json.dumps(receipt)
+        assert calls == 1
+        if with_images:
+            assert receipt["adaptations"]["image_transport"]["consumption_status"] == "unknown"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("with_images", [False, True])
 @pytest.mark.parametrize("outcome", ["completed", "rejected", "truncated"])
 async def test_large_response_request_is_exact_owned_stream_on_every_http_outcome(tmp_path, monkeypatch, with_images, outcome):
@@ -189,6 +229,10 @@ async def test_large_files_multipart_preserves_bytes_and_closes_stream(tmp_path,
         if outcome == "cancelled":
             started.set()
             try:
+                # Keep reading so server-side flow control cannot hide the
+                # peer disconnect behind an unread multipart request body.
+                while await part.read_chunk():
+                    pass
                 await asyncio.Event().wait()
             finally:
                 cancelled.set()
@@ -201,7 +245,11 @@ async def test_large_files_multipart_preserves_bytes_and_closes_stream(tmp_path,
         return web.json_response({"id": "or_file_boundary123", "filename": "synthetic.png",
                                   "mime_type": "image/png", "size_bytes": len(content)})
     app = web.Application(); app.router.add_post("/files", upload)
-    async with TestServer(app, handler_cancellation=True) as server, aiohttp.ClientSession() as client:
+    server = TestServer(app)
+    # Bound fixture teardown even if a broken cancellation path leaves its
+    # request handler running; TestServer constructor kwargs are not runner kwargs.
+    await server.start_server(shutdown_timeout=3)
+    async with server, aiohttp.ClientSession() as client:
         class LocalClient:
             def request(self, method, url, **kwargs):
                 assert url == "https://openrouter.ai/api/v1/files"
@@ -212,13 +260,20 @@ async def test_large_files_multipart_preserves_bytes_and_closes_stream(tmp_path,
             task = asyncio.create_task(backend.upload("synthetic", blob, "image/png", "synthetic.png"))
             await asyncio.wait_for(started.wait(), 3)
             task.cancel()
+            done, _ = await asyncio.wait({task}, timeout=3)
+            if task not in done:
+                task.cancel()
+                await asyncio.wait({task}, timeout=1)
+                if task.done() and not task.cancelled():
+                    task.exception()
+                pytest.fail("cancelled upload did not terminate")
             with pytest.raises(asyncio.CancelledError):
-                await task
+                task.result()
             await asyncio.wait_for(cancelled.wait(), 3)
         elif outcome == "rejected":
             with pytest.raises(images.FileOperationError) as error:
                 await backend.upload("synthetic", blob, "image/png", "synthetic.png")
-            assert error.value.status == 400 and error.value.definitely_not_created
+            assert error.value.status == 400 and not error.value.definitely_not_created
         else:
             result = await backend.upload("synthetic", blob, "image/png", "synthetic.png")
             assert result.size_bytes == len(blob)

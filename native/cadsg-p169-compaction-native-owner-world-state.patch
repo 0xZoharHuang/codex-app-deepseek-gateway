@@ -1,0 +1,68 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 425967e..8f1c21a 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -768,6 +768,10 @@ impl ModelClient {
+         codex_model_provider::request_auth_owner(self.state.provider.as_ref())
+     }
+ 
++    pub(crate) fn has_current_auth_owner(&self, expected: Option<&AuthOwner>) -> bool {
++        self.auth_owner().as_ref() == expected && expected.is_none_or(AuthOwner::is_current)
++    }
++
+     fn take_cached_websocket_session(&self) -> WebsocketSession {
+         let mut cached_websocket_session = self
+             .state
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index 03ec062..5e31cac 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -1415,6 +1415,7 @@ async fn install_capacity_replacement(
+     let (initial_context, world_state_baseline) = sess
+         .build_initial_context_with_world_state(step_context, &world_state)
+         .await;
++    let reset_world_state_sections = world_state.full_context_excluded_section_ids().collect();
+     let (mut prefix_context, initial_context) = split_prefix_updates(initial_context);
+     let mut initial_context = merge_world_state_updates(initial_context)
+         .into_iter()
+@@ -1476,9 +1477,10 @@ async fn install_capacity_replacement(
+                 world_state_baseline,
+                 /*rejected_audio_file_ids*/ Default::default(),
+                 CompactedHistoryInstallation::Prefix {
+-                    prefix: recovery.prefix,
++                    prefix: recovery.prefix.clone(),
+                     prefix_context,
+                     initial_context,
++                    reset_world_state_sections,
+                     model_info: &owned_step.settings.model_info,
+                     compaction_response_id: replacement.response_id,
+                     reviewer_compaction_hash: replacement.reviewer_compaction_hash,
+@@ -1502,8 +1504,10 @@ async fn install_capacity_replacement(
+         };
+         let outcome = match (installed, receipt) {
+             (true, Some(receipt))
+-                if owner.services.model_client.auth_owner_generation()
+-                    == recovery.prefix.auth_owner_generation =>
++                if owner
++                    .services
++                    .model_client
++                    .has_current_auth_owner(recovery.prefix.auth_owner.as_ref()) =>
+             {
+                 recovery
+                     .publish_install(
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 69035f3..90969ac 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -4875,7 +4875,10 @@ impl Session {
+                     // Validate immediately before slicing and replacing the captured prefix.
+                     if state.history.history_version() != prefix.generation
+                         || state.history.annotated_items().len() < prefix.len
+-                        || self.services.model_client.auth_owner() != prefix.auth_owner
++                        || !self
++                            .services
++                            .model_client
++                            .has_current_auth_owner(prefix.auth_owner.as_ref())
+                     {
+                         return false;
+                     }

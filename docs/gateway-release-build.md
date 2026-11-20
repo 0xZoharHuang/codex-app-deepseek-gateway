@@ -18,15 +18,39 @@ Supply their exact wheel files too: the controller checks the selected build
 Python's installed tool files against those wheel contents, including vendored
 code, rather than trusting version labels alone.
 
-The current source input is the published CDS0.6.7 release wheel (release427424215),
-with its exact artifact hash, public Git archive URL/hash and six imported
-pure-module hashes recorded in the lock. Existing r4 remains separately qualified
-with0.6.6; r5 must qualify the newly installed combination. This recipe reproduces the gateway wheel and
-manifest from immutable offline wheels; it does not claim to rebuild every
-third-party binary or dependency wheel from source. Dependency wheels themselves
-are shipped in the resulting offline bundle. A new CDS pin must update the
-archive, release artifact and pure-module identities together, then qualify the
-new installed combination before publication.
+### P169 companion inputs
+
+The P169 lock requires the exact `codex-deepseek-runtime==0.7.9+cadsg.2` and
+`aiohttp==3.14.5+cds.1` wheels. Standard public indexes and CDS releases do
+not supply those pinned bytes. The aiohttp backport uses the
+[official 3.14.5 source](https://pypi.org/project/aiohttp/3.14.5/) and
+[upstream patch #14370](https://github.com/aio-libs/aiohttp/pull/14370).
+Achieving the locked wheel SHA also requires the historical wheel layout.
+The CDS input is a build-source reconstruction that reproduces the locked
+wheel. The original Git object recorded by the lock remains unavailable.
+
+If you have the verified qualification attachment
+`cadsg-p169-dependency-sources-exact.tar.xz`, check its SHA-256
+`efd54c3dd836905c5c7a41e8b6d25f4aff4862c74250d2a2c0be971ff5865394`
+before extracting it to a new directory. The attachment is staged for
+qualification and is not currently a public download. Inside its extracted
+`cadsg-p169-dependency-sources` directory, run this on Windows x64 with
+independent CPython 3.13 and Git:
+
+~~~powershell
+& $basePython -I -B .\replay.py --scratch $newReplayDirectory --git $gitExe
+if ($LASTEXITCODE -ne 0) { throw 'Locked dependency replay failed' }
+~~~
+
+Use a new scratch directory outside installed environments. The offline
+runner verifies the bundled build tools, reconstructs both wheels and checks
+them against the committed lock. The outputs are in `cds-wheel` and
+`aiohttp-locked-wheel` under the scratch directory. Use them as additional
+`--dependency-wheelhouse` inputs below. The ordinary installer consumes
+the resulting exact wheel files in the gateway bundle. Public binary
+delivery still requires publicly obtainable pinned dependencies or the
+verified replay attachment, then a clean consumer install and real App
+verification for the published combination.
 
 Obtain the declared wheel inputs before the offline build. The builder never
 downloads, resolves versions, falls back to another source or modifies the build

@@ -7,7 +7,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 import pytest
 
-from codex_deepseek.protocol import MODEL, encode_sse
+from codex_deepseek.protocol import MODEL, encode_sse, INTERRUPTED_CONTEXT_PREFIX
 from codex_app_deepseek.bridge import BridgeSettings, create_app, sse_events
 from codex_app_deepseek.protocol_state import ProtocolState
 
@@ -329,7 +329,8 @@ async def test_guardian_all_turns_keeps_hostile_reasoning_as_verbatim_assistant_
         ]
         assert not any(item.get("role") in {"user", "developer", "system"} and hostile in json.dumps(item)
                        for item in payload["input"])
-        return web.Response(body=encode_sse(terminal([message("deny")])), content_type="text/event-stream")
+        answer=message("deny")
+        return web.Response(body=encode_sse({'type':'response.output_item.done','item':answer})+encode_sse(terminal([answer])), content_type="text/event-stream")
     async with harness(tmp_path, handler, settings={"accepted_models": (MODEL, "gpt-5.6-luna")}) as (client, state):
         body = {"model": "gpt-5.6-luna", "stream": True, "tool_choice": "none",
                 "instructions": instructions, "input": inputs,
@@ -357,8 +358,13 @@ async def test_all_turns_with_tools_preserves_native_reasoning_without_extra_con
     async def handler(request):
         body = await request.json()
         assert body["reasoning"] == {"effort": "high"}
-        assert [item["type"] for item in body["input"]] == ["reasoning", "message"]
-        assert body["input"][0]["content"][0]["text"] == "real prior reasoning"
+        assert [item["type"] for item in body["input"]] == ["message", "message"]
+        projected=body["input"][0]
+        assert projected["role"]=="assistant"
+        text=projected["content"][0]["text"]
+        assert text.startswith(INTERRUPTED_CONTEXT_PREFIX)
+        records=json.loads(text[len(INTERRUPTED_CONTEXT_PREFIX):])
+        assert records==[{"input_index":0,"reasoning_index":0,"item":{"type":"reasoning","id":"r","content":[{"type":"reasoning_text","text":"real prior reasoning"}]}}]
         assert len(body["tools"]) == 1
         return web.json_response(terminal()["response"])
     async with harness(tmp_path, handler) as (client, state):
@@ -394,7 +400,11 @@ async def test_all_turns_fails_closed_if_dependency_drops_reasoning(tmp_path, mo
     original_prepare = module.prepare
     def faulty_prepare(body, state, **options):
         payload, registry = original_prepare(body, state, **options)
-        payload["input"] = [item for item in payload["input"] if item.get("type") != "reasoning"]
+        payload["input"] = [item for item in payload["input"] if item.get("type") != "reasoning"
+                            and not (item.get('type')=='message' and item.get('role')=='assistant'
+                                     and any(isinstance(part,dict) and isinstance(part.get('text'),str)
+                                             and part['text'].startswith(INTERRUPTED_CONTEXT_PREFIX)
+                                             for part in item.get('content',[]) if isinstance(item.get('content'),list)))]
         return payload, registry
     monkeypatch.setattr(module, "prepare", faulty_prepare)
     calls = 0
@@ -407,7 +417,7 @@ async def test_all_turns_fails_closed_if_dependency_drops_reasoning(tmp_path, mo
             "reasoning": {"context": "all_turns"}, "input": [
                 {"type": "reasoning", "content": [{"type": "reasoning_text", "text": "preserve"}]},
                 {"type": "message", "role": "user", "content": "Go"}]}, headers=HEADERS)
-        assert response.status == 400 and "lost or reordered" in await response.text()
+        assert response.status == 400 and "continuation projection cannot be verified" in await response.text()
         assert calls == 0 and state.list_receipts() == []
 
 
@@ -451,7 +461,7 @@ async def test_omitted_tool_status_is_valid_and_keeps_native_dispatch(tmp_path):
     async def handler(request):
         item = {"type": "function_call", "id": "fc_ok", "call_id": "call_ok",
                 "name": "execute", "arguments": "{}"}
-        return web.Response(body=encode_sse(terminal([item])), content_type="text/event-stream")
+        return web.Response(body=encode_sse({'type':'response.output_item.done','item':item})+encode_sse(terminal([item])), content_type="text/event-stream")
     async with harness(tmp_path, handler) as (client, state):
         response = await client.post("/v1/responses", headers=HEADERS, json={
             "model": MODEL, "stream": True,
@@ -488,7 +498,7 @@ async def test_response_observations_are_distinct_from_requested_route(tmp_path,
 async def test_stream_records_only_fields_actually_observed(tmp_path):
     async def handler(request):
         created = {"type": "response.created", "response": {"id": "resp_one", "model": MODEL}}
-        return web.Response(body=encode_sse(created)+encode_sse(terminal()), content_type="text/event-stream")
+        return web.Response(body=encode_sse(created)+encode_sse({'type':'response.output_item.done','item':message()})+encode_sse(terminal()), content_type="text/event-stream")
     async with harness(tmp_path, handler) as (client, state):
         response = await client.post("/v1/responses", headers=HEADERS, json={"model": MODEL, "stream": True})
         frames = read_events(await response.text())
@@ -501,7 +511,7 @@ async def test_stream_records_only_fields_actually_observed(tmp_path):
 @pytest.mark.asyncio
 async def test_http_bridge_scopes_history_attestation_to_request_item_identities(tmp_path):
     routes = []
-    original = {"type": "reasoning", "id": "rs_identity",
+    original = {"type": "reasoning", "id": "rs_identity", "summary": [],
                 "content": [{"type": "reasoning_text", "text": "identical cross-thread words"}]}
     async def handler(request):
         payload = await request.json()
@@ -626,8 +636,8 @@ async def test_image_bridge_sends_exact_bytes_with_one_captured_credential(tmp_p
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('code,expected',[(400,'http_rejected'),(429,'http_rejected'),(408,'unknown'),(500,'unknown')])
-async def test_image_bridge_http_failure_resource_semantics(tmp_path,code,expected):
+@pytest.mark.parametrize('code',[400,408,413,429,500])
+async def test_image_bridge_http_failure_resource_semantics(tmp_path,code):
     backend=ImageFiles();factory,made=image_factory(tmp_path,backend);calls=0
     async def handler(request):
         nonlocal calls
@@ -635,10 +645,9 @@ async def test_image_bridge_http_failure_resource_semantics(tmp_path,code,expect
     async with harness(tmp_path,handler,image_transport_factory=factory) as (client,state):
         response=await client.post('/v1/responses',json=image_input(),headers=HEADERS);await response.read()
         assert response.status==code and calls==1
-        assert state.list_receipts()[0]['adaptations']['image_transport']['consumption_status']==expected
+        assert state.list_receipts()[0]['adaptations']['image_transport']['consumption_status']=='unknown'
         result=await made[0].cleanup(all_unpinned=True)
-        assert result['pinned']==int(expected=='unknown')
-        assert result['all_owned_files_deleted']==(expected=='http_rejected')
+        assert result['pinned']==1 and not result['all_owned_files_deleted']
 
 
 @pytest.mark.asyncio

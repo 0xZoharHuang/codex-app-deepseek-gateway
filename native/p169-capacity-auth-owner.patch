@@ -1,0 +1,152 @@
+diff --git a/codex-rs/core/src/session/capacity_recovery.rs b/codex-rs/core/src/session/capacity_recovery.rs
+index c31116a..b98f3be 100644
+--- a/codex-rs/core/src/session/capacity_recovery.rs
++++ b/codex-rs/core/src/session/capacity_recovery.rs
+@@ -10,6 +10,7 @@ use super::step_context::StepContext;
+ use super::thread_settings;
+ use crate::context_manager::ContextManager;
+ use codex_history::ResponseItemEnvelope;
++use codex_login::AuthOwner;
+ use codex_protocol::error::CodexErr;
+ use codex_protocol::error::CodexErrorDetails;
+ use codex_protocol::models::AudioReference;
+@@ -40,7 +41,7 @@ pub(crate) struct CapacitySend {
+     history: ContextManager,
+     anchor: String,
+     generation: u64,
+-    auth_owner_generation: Option<u64>,
++    auth_owner: Option<AuthOwner>,
+ }
+ 
+ impl CapacitySend {
+@@ -75,7 +76,7 @@ pub(crate) enum CapacityRecoveryOutcome {
+ pub(crate) struct CapacityContinuation {
+     checkpoint: request_capacity::Checkpoint,
+     generation: u64,
+-    auth_owner_generation: Option<u64>,
++    auth_owner: Option<AuthOwner>,
+     old_gap: OldGap,
+ }
+ 
+@@ -174,7 +175,7 @@ impl CapacityRecovery {
+             Ok(proof.map(|old_gap| CapacityContinuation {
+                 checkpoint,
+                 generation: installed.history.history_version(),
+-                auth_owner_generation: self.prefix.auth_owner_generation,
++                auth_owner: self.prefix.auth_owner,
+                 old_gap,
+             }))
+         })
+@@ -608,7 +609,7 @@ impl Session {
+             history: history.clone(),
+             anchor: self.current_window_from_state(&state).0,
+             generation,
+-            auth_owner_generation: self.services.model_client.auth_owner_generation(),
++            auth_owner: self.services.model_client.auth_owner(),
+         })
+     }
+ 
+@@ -626,7 +627,7 @@ impl Session {
+         let history = sent.history.clone();
+         let anchor = sent.anchor.clone();
+         let generation = sent.generation;
+-        let auth_owner = sent.auth_owner_generation;
++        let auth_owner = sent.auth_owner.clone();
+         let response_id = response_id.to_owned();
+         let task = tokio::spawn(async move {
+             let _admission = token;
+@@ -635,12 +636,22 @@ impl Session {
+             let _communication = session.acquire_capacity_persistence_boundary().await?;
+             let _settings_guard = thread_settings::acquire_persistence_lock(&session).await;
+             if session.state.lock().await.history.history_version() != generation
+-                || session.services.model_client.auth_owner_generation() != auth_owner
++                || !session
++                    .services
++                    .model_client
++                    .has_current_auth_owner(auth_owner.as_ref())
+                 || session.live_thread().is_none()
+             {
+                 return Ok::<(), anyhow::Error>(());
+             }
+             session.flush_rollout().await?;
++            if !session
++                .services
++                .model_client
++                .has_current_auth_owner(auth_owner.as_ref())
++            {
++                return Ok(());
++            }
+             let home = step.turn.config.codex_home.clone();
+             let model = step.settings.model_info.slug.clone();
+             let provider = step.turn.config.model_provider_id.clone();
+@@ -711,7 +722,7 @@ impl Session {
+                 prefix: CompactionPrefix {
+                     generation: sent.generation,
+                     len,
+-                    auth_owner_generation: sent.auth_owner_generation,
++                    auth_owner: sent.auth_owner,
+                 },
+                 install_hash,
+                 prefix_bytes: 0,
+@@ -737,8 +748,11 @@ impl Session {
+             || checkpoint.recovery_turn_id.as_deref() != Some(turn.as_str())
+             || checkpoint.binding.history_anchor != sent.anchor
+             || proof.generation != sent.generation
+-            || proof.auth_owner_generation != sent.auth_owner_generation
+-            || self.services.model_client.auth_owner_generation() != sent.auth_owner_generation
++            || proof.auth_owner != sent.auth_owner
++            || !self
++                .services
++                .model_client
++                .has_current_auth_owner(sent.auth_owner.as_ref())
+         {
+             return None;
+         }
+@@ -752,7 +766,7 @@ impl Session {
+         let anchor = sent.anchor.clone();
+         let turn = turn.clone();
+         let generation = sent.generation;
+-        let auth_owner_generation = sent.auth_owner_generation;
++        let auth_owner = sent.auth_owner.clone();
+         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<_>> {
+             let _admission = token;
+             let binding =
+@@ -777,7 +791,7 @@ impl Session {
+                 prefix: CompactionPrefix {
+                     generation,
+                     len: end,
+-                    auth_owner_generation,
++                    auth_owner,
+                 },
+                 install_hash,
+                 prefix_bytes,
+@@ -798,7 +812,10 @@ impl Session {
+     ) -> Option<CapacityRecovery> {
+         let token = self.track_code_mode_message()?;
+         if self.state.lock().await.history.history_version() != sent.generation
+-            || self.services.model_client.auth_owner_generation() != sent.auth_owner_generation
++            || !self
++                .services
++                .model_client
++                .has_current_auth_owner(sent.auth_owner.as_ref())
+         {
+             return None;
+         }
+@@ -810,7 +827,7 @@ impl Session {
+         let anchor = sent.anchor.clone();
+         let mut history = sent.history.clone();
+         let generation = sent.generation;
+-        let auth_owner_generation = sent.auth_owner_generation;
++        let auth_owner = sent.auth_owner.clone();
+         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<_>> {
+             let _admission = token;
+             let binding =
+@@ -844,7 +861,7 @@ impl Session {
+                 prefix: CompactionPrefix {
+                     generation,
+                     len,
+-                    auth_owner_generation,
++                    auth_owner,
+                 },
+                 install_hash,
+                 prefix_bytes,
