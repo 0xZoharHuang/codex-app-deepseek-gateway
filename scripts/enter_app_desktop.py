@@ -28,10 +28,11 @@ PROJECT = "codex-app-deepseek-gateway"
 STATION = "WinSta0"
 DEFAULT = "Default"
 DESKTOP = "CADSG-P169-Acceptance-D857"
+# The release records the signed Store App and its bundled runtime identity.
 BASELINE = {
     "app_version": "26.1111.2228.0",
     "native_version": "0.169.0-alpha.11.1",
-    "native_sha256": "383382f0a0242bd08e276fbf8639675c930559205f9aa909c3457e7df693ff76",
+    "native_sha256": "094d4db493de22025712cc5963854e7654b7c97f4cee795e3e986270a0f4f6b4",
 }
 ENTRY = "venv/Scripts/codex-app-deepseek.exe"
 READ_OBJECTS = 0x0001

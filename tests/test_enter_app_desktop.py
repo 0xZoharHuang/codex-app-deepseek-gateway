@@ -23,11 +23,21 @@ def save(path, value):
 
 
 @pytest.fixture
-def ready(tmp_path):
+def ready(tmp_path, request):
     python = tmp_path / "python.exe"
     python.write_bytes(b"independent")
     root = tmp_path / "managed"
-    baseline = {"project": desktop.PROJECT, "app_baseline": desktop.BASELINE}
+    launch_baseline = json.loads(
+        (Path(__file__).resolve().parents[1] / "src/codex_app_deepseek/assets/app-launch-baseline.json")
+        .read_text(encoding="utf-8")
+    )
+    baseline = {"project": desktop.PROJECT, "app_baseline": {
+        "app_version": launch_baseline["version"],
+        "native_version": launch_baseline["native_version"],
+        "native_sha256": launch_baseline["files"]["app/resources/codex.exe"],
+    }}
+    if getattr(request, "param", False):
+        baseline["app_baseline"]["native_sha256"] = launch_baseline["candidate_native_binary_sha256"]
     digest = hashlib.sha256(json.dumps(baseline).encode()).hexdigest()
     directory = root / "releases" / digest[:20]
     entry = directory / desktop.ENTRY
@@ -52,6 +62,13 @@ def ready(tmp_path):
 def test_only_the_reviewed_active_installation_enters(ready):
     python, root, entry = ready
     assert desktop.verified_entrypoint(root, python) == (root, entry)
+
+
+@pytest.mark.parametrize("ready", [True], ids=["candidate-as-stock"], indirect=True)
+def test_candidate_runtime_digest_cannot_replace_signed_app_digest(ready):
+    python, root, _ = ready
+    with pytest.raises(desktop.DesktopError, match="fixed O169 release"):
+        desktop.verified_entrypoint(root, python)
 
 
 @pytest.mark.parametrize("changed", ["active", "receipt", "manifest", "launcher"])
