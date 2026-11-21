@@ -1119,7 +1119,7 @@ def require_disjoint_apps(backend, owner, paths):
             raise LaunchError("cannot establish an existing App's profile; no launch") from error
 
 
-def validate_request(request, backend=None):
+def validate_request(request, backend=None, *, paths=None):
     require(set(request) <= {"baseline", "native_manifest", "native_manifest_sha256", "app_args", "timeout_seconds", "expected_config_sha256", "trace_root"}, "unknown launch request field")
     backend = backend or WindowsBackend()
     owner = backend.current()
@@ -1127,7 +1127,7 @@ def validate_request(request, backend=None):
     expected = baseline(Path(request["baseline"]).resolve())
     require_app_candidate_ready(expected)
     package = verify_package(backend.package(expected), expected)
-    paths = defaults()
+    paths = defaults() if paths is None else paths
     trace_root = validated_trace_root(request["trace_root"], paths, backend, owner["sid"]) if "trace_root" in request else None
     manifest_path = Path(request["native_manifest"]).resolve()
     bundle = verify_launch_bundle(manifest_path, request["native_manifest_sha256"],
@@ -1166,8 +1166,9 @@ def validate_request(request, backend=None):
             "scope": "validated inputs only; actual App/frontend behavior requires acceptance"}
 
 def prepare_launch(request, backend=None):
-    checked = validate_request(request, backend)
-    root = defaults()["launches"]
+    paths = defaults()
+    checked = validate_request(request, backend, paths=paths)
+    root = paths["launches"]
     root.mkdir(parents=True, exist_ok=True); _private(root, directory=True)
     run = root / uuid.uuid4().hex
     run.mkdir(); _private(run, directory=True)
@@ -1175,6 +1176,7 @@ def prepare_launch(request, backend=None):
         backend = backend or WindowsBackend()
         checked["trace"] = prepare_trace_directory(checked["trace_root"], run.name, backend, checked["owner"]["sid"])
     plan = {"schema_version": 1, "request": request, "validated": checked, "launcher_sha256": sha(__file__),
+            "local_app_data": str(paths["home"].parent),
             "created_at": time.time(), "replay_allowed": False}
     path = run / "plan.json"; save(path, plan)
     return {"run_dir": str(run), "plan": str(path), "plan_sha256": sha(path),
@@ -1182,15 +1184,25 @@ def prepare_launch(request, backend=None):
 
 def inside_launch(plan_path, expected_sha, backend=None):
     backend = backend or WindowsBackend(); plan_path = Path(plan_path)
-    validate_state_paths(defaults())
-    require(sha(plan_path) == expected_sha, "launch plan checksum mismatch")
-    plan = load_json(plan_path)
+    raw = plan_path.read_bytes()
+    require(hashlib.sha256(raw).hexdigest() == expected_sha, "launch plan checksum mismatch")
+    plan = json.loads(raw)
     require(plan["schema_version"] == 1 and plan["launcher_sha256"] == sha(__file__), "launcher changed after admission")
+    # DesktopPackage can reconstruct its environment. Reuse the parent's admitted state only.
+    local = plan.get("local_app_data")
+    require(isinstance(local, str) and Path(local).is_absolute(), "invalid admitted App data directory")
+    paths = defaults({"LOCALAPPDATA": local})
+    validate_state_paths(paths)
     run = plan_path.parent
-    require(run.parent.resolve() == defaults()["launches"].resolve(), "plan is outside owned receipt directory")
+    require(plan_path.name == "plan.json" and re.fullmatch(r"[a-f0-9]{32}", run.name)
+            and run.parent.resolve() == paths["launches"].resolve()
+            and plan_path.resolve() == plan_path.absolute()
+            and not _is_link_or_reparse(plan_path) and not _is_link_or_reparse(run),
+            "plan is outside owned receipt directory")
     started = run / "started.json"
-    with started.open("xb") as handle: handle.write(b"{}")
-    _private(started)
+    with backend.home_guard(run, plan["validated"]["owner"]["sid"]):
+        with started.open("xb") as handle: handle.write(b"{}")
+        _private(started)
     record = {"schema_version": 1, "status": "admitted", "plan_sha256": expected_sha, "replay_allowed": False}
     save(started, record)
     try:
@@ -1202,7 +1214,7 @@ def inside_launch(plan_path, expected_sha, backend=None):
         require_app_candidate_ready(expected)
         require(current["package_full_name"] == expected["package_full_name"], "helper lacks the fixed DesktopPackage identity")
         with backend.launch_lock(current["sid"]), ExitStack() as diagnostic_guards:
-            checked = validate_request(plan["request"], backend)
+            checked = validate_request(plan["request"], backend, paths=paths)
             require(checked["config_sha256"] == plan["validated"]["config_sha256"], "configuration changed after admission")
             require(checked["environment"] == plan["validated"]["environment"], "launch target changed after admission")
             frontend = Path(checked["environment"]["CODEX_ELECTRON_USER_DATA_PATH"])

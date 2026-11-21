@@ -81,7 +81,9 @@ launcher code and trusted manifest, and records the attempt under
 `%LOCALAPPDATA%\codex-app-deepseek-gateway\app-launches`. It uses
 `Invoke-CommandInDesktopPackage` to enter the fixed App package context; the helper
 sets environment variables only on the App child it creates. The package command's
-outer caller environment is not relied upon. A package helper transport test is
+outer caller environment is not relied upon. The signed helper recovers the
+dedicated paths from the checked launch plan and revalidates them before it can
+start the App. A package helper transport test is
 not a replacement for the actual App qualification.
 
 The exact controlled child environment is:

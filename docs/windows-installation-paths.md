@@ -29,6 +29,10 @@ These checks follow the [Windows path contract](https://learn.microsoft.com/en-u
 and [wheel destination schemes](https://packaging.python.org/en/latest/specifications/binary-distribution-format/).
 They do not replace pip's installer or change Windows registry settings.
 
+When binding the App's bundled marketplace, the copy is staged beside its final
+directory under a shorter name. Copying and verifying the original resources
+therefore do not need a longer path than the published resource files.
+
 App observation no longer executes codex.exe from WindowsApps, because the
 packaged executable returned WinError 5 even for --version in an empty dedicated
 CODEX_HOME. It reads the current-user OpenAI.Codex registration, verifies the

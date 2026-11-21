@@ -156,6 +156,26 @@ def test_bind_copies_original_bytes_and_preserves_existing_ownership(fixture):
     assert tools._tree(package / "bundled", inventory) == tools._tree(Path(first["target"]), inventory)
 
 
+def test_resource_staging_path_fits_published_location(fixture, monkeypatch):
+    _, home, _, _, _, _ = fixture
+    target = home / ".tmp/bundled-marketplaces/openai-bundled"
+    rename = Path.rename
+    owned_stage = []
+
+    def verify_rename(path, destination):
+        if Path(destination) == target:
+            assert path.parent == target.parent
+            assert len(str(path).encode("utf-16-le")) <= len(str(target).encode("utf-16-le"))
+            owned_stage.append(path)
+        return rename(path, destination)
+
+    monkeypatch.setattr(Path, "rename", verify_rename)
+    first = bind(fixture)
+    assert first["created_now"] and first["claimed_ownership"]
+    assert len(owned_stage) == 1 and not owned_stage[0].exists()
+    assert bind(fixture)["claimed_ownership"]
+
+
 def test_identical_existing_tree_is_reused_without_claiming(fixture):
     package, home, _, _, _, _ = fixture
     target = home / ".tmp/bundled-marketplaces/openai-bundled"

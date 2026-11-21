@@ -8,9 +8,9 @@ import os
 from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
+from tempfile import mkdtemp
 import time
 import tomllib
-from uuid import uuid4
 import tomlkit
 from . import app_config as ac
 from .paths import _is_link_or_reparse
@@ -203,8 +203,8 @@ def bind_resources(package_root, home, receipt_path, *, owner_sid, package_full_
         owned = bool(previous and previous.get("created") and observed["kind"] == "original")
     else:
         target.parent.mkdir(parents=True, exist_ok=True)
-        stage = target.parent / (".cadsg-original-" + uuid4().hex)
-        stage.mkdir()
+        # Staging must fit whenever the final marketplace path fits.
+        stage = Path(mkdtemp(prefix=".cd-", dir=target.parent))
         ac._private(stage, directory=True)
         try:
             for name, wanted in sorted(inventory["files"].items()):

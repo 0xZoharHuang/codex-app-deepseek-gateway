@@ -141,6 +141,56 @@ def test_mocked_launch_records_exact_backend_and_is_not_acceptance(fixture):
     with pytest.raises(FileExistsError): app.inside_launch(Path(plan["plan"]), plan["plan_sha256"], backend)
     assert len(backend.spawned) == 1
 
+def test_packaged_callback_restores_admitted_profile(fixture, monkeypatch, tmp_path):
+    paths, _, _, _, request, backend = fixture
+    local, ambient = tmp_path, tmp_path / "packaged-default"
+    profile = tmp_path / "owned-profile"
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setenv("USERPROFILE", str(profile))
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-only-private")
+
+    def profile_defaults(environment=None):
+        values = os.environ if environment is None else environment
+        if Path(values["LOCALAPPDATA"]) == local:
+            return paths
+        return {**paths, "launches": ambient / "app-launches"}
+
+    monkeypatch.setattr(app, "defaults", profile_defaults)
+    plan = app.prepare_launch(request, backend)
+    assert "fixture-only-private" not in Path(plan["plan"]).read_text(encoding="utf-8")
+    monkeypatch.setenv("LOCALAPPDATA", str(ambient))
+    monkeypatch.setenv("USERPROFILE", str(ambient))
+    monkeypatch.setenv("HOME", str(ambient))
+    result = app.inside_launch(Path(plan["plan"]), plan["plan_sha256"], backend)
+    assert result["status"] == "started_expected_backend"
+    child = backend.spawned[0][2]
+    assert child["LOCALAPPDATA"] == str(ambient)
+    assert child["USERPROFILE"] == str(ambient)
+    assert child["HOME"] == str(ambient) and "OPENROUTER_API_KEY" not in child
+    assert child["CODEX_HOME"] == str(paths["home"])
+    assert child["CODEX_ELECTRON_USER_DATA_PATH"] == str(paths["frontend"])
+    with pytest.raises(FileExistsError):
+        app.inside_launch(Path(plan["plan"]), plan["plan_sha256"], backend)
+    assert len(backend.spawned) == 1
+    assert os.environ["LOCALAPPDATA"] == str(ambient)
+    assert os.environ["USERPROFILE"] == str(ambient)
+    assert os.environ["HOME"] == str(ambient)
+    assert not (ambient / "app-launches").exists()
+
+
+def test_packaged_callback_rejects_relocated_plan(fixture, tmp_path):
+    _, _, _, _, request, backend = fixture
+    plan = app.prepare_launch(request, backend)
+    source = Path(plan["plan"])
+    moved = tmp_path / "foreign" / source.parent.name / source.name
+    moved.parent.mkdir(parents=True)
+    moved.write_bytes(source.read_bytes())
+    with pytest.raises(app.LaunchError, match="plan is outside owned receipt directory"):
+        app.inside_launch(moved, plan["plan_sha256"], backend)
+    assert not backend.spawned and not (moved.parent / "started.json").exists()
+
+
 @pytest.mark.parametrize("failure", ["wrong-user", "wrong-session", "wrong-package", "new-existing-app", "native-home"])
 def test_inside_failure_does_not_fallback_or_relaunch(fixture, failure):
     paths, expected, path, value, request, backend = fixture
