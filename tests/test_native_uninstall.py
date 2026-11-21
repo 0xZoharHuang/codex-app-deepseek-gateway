@@ -331,7 +331,10 @@ def partial_admission_fixture(bundle, app_fixture, monkeypatch):
     binding_path = bundle.data / "app-binding.json"
     binding_path.write_text(json.dumps(binding))
     monkeypatch.setattr(delivery, "read_binding", lambda *a, **k: binding)
-    monkeypatch.setattr(delivery, "assets", lambda: (Path(request["baseline"]), None))
+    def cleanup_assets(*, for_native_cleanup):
+        assert for_native_cleanup is True
+        return Path(request["baseline"]), None
+    monkeypatch.setattr(delivery, "assets", cleanup_assets)
     pins = []
     @contextmanager
     def pin(path, backend):
@@ -458,7 +461,7 @@ def test_packaged_legacy_cleanup_uses_exact_alias_but_pins_physical_cli(tmp_path
     plan.runtime_package = {"mode": "legacy", "alias_path": str(tmp_path / "qualified" / "cadsg-native-legacy.exe"),
         "descriptor_path": str(tmp_path / "descriptor.json"), "descriptor_sha256": "a" * 64}
     from codex_app_deepseek import app_delivery as delivery
-    monkeypatch.setattr(delivery, "assets", lambda: (None, None))
+    monkeypatch.setattr(delivery, "assets", lambda *, for_native_cleanup: (None, None))
     from codex_app_deepseek import isolated_app as app
     monkeypatch.setattr(app, "baseline", lambda _: {})
     checks = []

@@ -50,13 +50,15 @@ def verify_installed_context(directory, executable, module_path):
         raise DeliveryError("Use the active installed release's codex-app-deepseek.exe")
 
 
-def assets():
+def assets(*, for_native_cleanup=False):
     directory = canonical_path(__file__).parent / "assets"
     baseline = directory / "app-launch-baseline.json"
     launcher = directory / "launch_isolated_app.ps1"
     if not baseline.is_file() or not launcher.is_file():
         raise DeliveryError("Installed App assets are missing; reinstall the verified release")
-    app.require_app_candidate_ready(app.baseline(baseline))
+    expected = app.baseline(baseline)
+    if not for_native_cleanup:
+        app.require_app_candidate_ready(expected)
     if app.sha(launcher) != LAUNCHER_SHA256:
         raise DeliveryError("Packaged App launcher changed; reinstall the verified release")
     return baseline, launcher

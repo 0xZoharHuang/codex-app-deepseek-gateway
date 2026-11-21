@@ -35,6 +35,7 @@ P21_LOCK_SHA256 = "1a80f6e1e4fdb2f5b255a416f70350b5fd764493322bc463137381900374c
 P167_LOCK_SHA256 = "e0945f5898e6b3f6f4e94224770e8e4420b6bda66f2df284b72a85f59062247f"
 P169_DRAFT_LOCK = ("p169-source-lock.service-restore-acl-order.draft.json",
                    "0ab81f556d6062026b2ff6194351d697b04483bfc3b55a197a5b32944031ee72")
+P169_REVIEWED_RAW_MANIFEST_SHA256 = "578681be6b0e187ee703d483ff31ad9a6c8b0da8f9eca91b8761f12f598f807d"
 SINGLE_PRODUCER_REVISIONS = ("O165", "O167", "O169")
 REVIEWED_SOURCE_LOCKS = (("build-lock.O165-P16-source.json", P16_LOCK_SHA256),
                          ("build-lock.O165-P17-source.json", P17_LOCK_SHA256),
@@ -145,9 +146,31 @@ def indexed_sources(raw, index, index_digest, references_digest, n_lock, j_lock)
                                       for row in actual), "Indexed binary producers differ")
 
 
-def single_graph(lock, native_dir, *, development_qualification=False):
+def _require_o169_assembly_mode(revision, development_qualification, public_o169_assembly):
+    require(not public_o169_assembly or (revision == "O169" and not development_qualification),
+            "Public O169 assembly is only for O169 and cannot use development qualification")
+    if revision == "O169":
+        require(development_qualification or public_o169_assembly,
+                "P169 requires private development qualification or explicit --public-o169-assembly")
+
+
+def _verify_reviewed_o169_outputs(raw_digest, outputs):
+    require(raw_digest == P169_REVIEWED_RAW_MANIFEST_SHA256,
+            "Public O169 assembly requires the exact reviewed original raw manifest")
+    baseline_path = REPO / "src/codex_app_deepseek/assets/app-launch-baseline.json"
+    baseline = load(plain(baseline_path))
+    identities = {name: {key: row[key] for key in ("size", "sha256")}
+                  for name, row in outputs.items()}
+    require(baseline.get("candidate_native_manifest_sha256") == raw_digest
+            and identities.keys() == SOURCE_BINARIES
+            and identities == baseline.get("candidate_native_outputs"),
+            "Public O169 native binaries differ from the reviewed App baseline")
+
+
+def single_graph(lock, native_dir, *, development_qualification=False, public_o169_assembly=False):
     """One exact reviewed source and recipe produces the entire native bundle."""
     revision = lock["candidate_revision"]
+    _require_o169_assembly_mode(revision, development_qualification, public_o169_assembly)
     require(revision in SINGLE_PRODUCER_REVISIONS and lock["target"] == TARGET,
             "Unsupported single-producer baseline")
     names = set(lock["binaries"])
@@ -155,8 +178,7 @@ def single_graph(lock, native_dir, *, development_qualification=False):
             "Single producer must build the exact four or six native targets")
     source_bundle = names == SOURCE_BINARIES
     if revision == "O169":
-        require(development_qualification and source_bundle,
-                "P169 requires private development qualification of all six binaries")
+        require(source_bundle, "P169 requires all six binaries from the exact reviewed source")
         allowed_locks = (P169_DRAFT_LOCK,)
     else:
         allowed_locks = REVIEWED_SOURCE_LOCKS
@@ -747,27 +769,37 @@ def collect_licenses(metadata, output, allowed_roots, *, repo=REPO, git="git"):
     return index
 
 
-def validate_tree(root, *, build_lock=None, development_qualification=False):
+def validate_tree(root, *, build_lock=None, development_qualification=False, public_o169_assembly=False):
     root = Path(root); inventory = {}
     manifest = load(root / "manifest.json")
     names = binary_names(manifest)
     revision = manifest.get("candidate_revision")
+    _require_o169_assembly_mode(revision, development_qualification, public_o169_assembly)
     single = revision in SINGLE_PRODUCER_REVISIONS
     if revision == "O169":
-        require(development_qualification and build_lock is not None,
-                "P169 staging requires the explicit private candidate build lock")
+        require(build_lock is not None, "P169 staging requires the explicit reviewed build lock")
+        source_receipt = load(root / "provenance/source.json")
+        kind = "development_qualification" if development_qualification else "clean_source_assembly"
         require(manifest.get("status") == "built-not-app-qualified"
                 and manifest.get("build_lock_sha256") == P169_DRAFT_LOCK[1]
                 and manifest.get("distribution", {}).get("App_acceptance_asserted") is False
-                and load(root / "provenance/source.json").get("kind") == "development_qualification",
-                "P169 staging must retain explicit development and unqualified provenance")
+                and source_receipt.get("kind") == kind,
+                "P169 staging must retain its assembly mode and unqualified App provenance")
+        if public_o169_assembly:
+            raw_digest = source_receipt.get("original_raw_manifest_sha256")
+            producer = load(root / "provenance/producer-references.json")
+            require(source_receipt.get("source_dirty") is False
+                    and producer.get("original_raw_manifest_sha256") == raw_digest,
+                    "Public O169 staging requires clean source and matching original build provenance")
+            _verify_reviewed_o169_outputs(raw_digest, raw_outputs(manifest, expected=SOURCE_BINARIES))
     if build_lock is not None:
         # Honor the exact explicitly selected producer lock through staging and
         # archiving too; an unpromoted candidate must not borrow the active lock.
         require(single, "Explicit staging lock requires a single-source producer")
         selected = plain(build_lock)
         cohort = load(selected)
-        single_graph(cohort, REPO / "native", development_qualification=development_qualification)
+        single_graph(cohort, REPO / "native", development_qualification=development_qualification,
+                     public_o169_assembly=public_o169_assembly)
         require(manifest.get("build_lock_sha256") == sha(selected),
                 "Staging manifest differs from the explicit build lock")
     else:
@@ -815,14 +847,20 @@ def validate_tree(root, *, build_lock=None, development_qualification=False):
     return inventory
 
 
-def make_archive(root, archive, epoch, *, build_lock=None, development_qualification=False):
+def make_archive(root, archive, epoch, *, build_lock=None, development_qualification=False,
+                 public_o169_assembly=False):
     """Exact file allowlist; never archive the input/prepared runtime directory."""
     root, archive = Path(root), Path(archive)
     require(not archive.exists() and not archive.is_relative_to(root), "Archive must be new and outside staging")
     if load(root / "manifest.json").get("candidate_revision") == "O169":
-        require(archive.name.endswith(".qualification.tar.gz"),
-                "P169 archive must be a private .qualification.tar.gz artifact")
-    inventory = validate_tree(root, build_lock=build_lock, development_qualification=development_qualification)
+        if public_o169_assembly:
+            require(archive.name.endswith(".tar.gz") and not archive.name.endswith(".qualification.tar.gz"),
+                    "Public O169 assembly requires a normal .tar.gz archive")
+        else:
+            require(archive.name.endswith(".qualification.tar.gz"),
+                    "P169 archive must be a private .qualification.tar.gz artifact")
+    inventory = validate_tree(root, build_lock=build_lock, development_qualification=development_qualification,
+                              public_o169_assembly=public_o169_assembly)
     names = binary_names(load(root / "manifest.json"))
     with archive.open("xb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", filename="", mtime=epoch) as compressed:
         with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as stream:
@@ -857,7 +895,10 @@ def main():
     parser.add_argument("--git", default="git")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--evidence-dir", type=Path, required=True, help="New private metadata output outside public staging")
-    parser.add_argument("--development-qualification", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--development-qualification", action="store_true")
+    mode.add_argument("--public-o169-assembly", action="store_true",
+                      help="Assemble the exact reviewed O169 producer from clean source for separate public App acceptance")
     args = parser.parse_args()
     source, output, evidence = args.source_root.resolve(), args.output.resolve(), args.evidence_dir.resolve()
     require(not output.exists() and not evidence.exists() and output != evidence
@@ -876,14 +917,17 @@ def main():
     spec = importlib.util.spec_from_file_location("cag_native_build", REPO / "scripts/build_native.py")
     build = importlib.util.module_from_spec(spec); spec.loader.exec_module(build)
     lock_digest = sha(lock_path)
+    _require_o169_assembly_mode(revision, args.development_qualification, args.public_o169_assembly)
     if revision == "O169":
-        require(args.development_qualification and lock_digest == P169_DRAFT_LOCK[1],
-                "P169 requires --development-qualification and the exact explicit candidate build lock")
+        require(lock_digest == P169_DRAFT_LOCK[1], "P169 requires the exact explicit reviewed build lock")
     if single:
         require(args.producer_references_sha256 is None,
                 "Single-source provenance derives from the exact builder manifest, not mixed references")
-        graph = single_graph(n_lock, native, development_qualification=args.development_qualification)
+        graph = single_graph(n_lock, native, development_qualification=args.development_qualification,
+                             public_o169_assembly=args.public_o169_assembly)
         outputs = raw_outputs(raw, expected=frozenset(n_lock["binaries"]))
+        if args.public_o169_assembly:
+            _verify_reviewed_o169_outputs(args.native_manifest_sha256, outputs)
         producers, index, public_raw = single_sources(raw, n_lock, lock_digest, args.native_manifest_sha256, build)
     else:
         outputs = raw_outputs(raw)
@@ -1008,12 +1052,14 @@ def main():
     require(git("rev-parse", "HEAD") == commit and bool(git("status", "--porcelain=v1", "-uall")) == dirty,
             "Gateway source state changed during packaging")
     inventory = validate_tree(output, build_lock=lock_path if single else None,
-                              development_qualification=args.development_qualification)
+                              development_qualification=args.development_qualification,
+                              public_o169_assembly=args.public_o169_assembly)
     write(output / "provenance/distribution-inventory.json", inventory)
     suffix = ".qualification.tar.gz" if args.development_qualification else ".tar.gz"
     archive = output.parent / (output.name + suffix)
     packed = make_archive(output, archive, epoch, build_lock=lock_path if single else None,
-                          development_qualification=args.development_qualification)
+                          development_qualification=args.development_qualification,
+                          public_o169_assembly=args.public_o169_assembly)
     report = {"status":"raw_native_assembled_not_App_qualified", "output":str(output), "archive":str(archive),
               "archive_identity":packed, "manifest_sha256":sha(output / "manifest.json"),
               "raw_binary_count":len(outputs), "external_crates":len(licenses["packages"]),

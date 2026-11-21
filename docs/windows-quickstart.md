@@ -1,78 +1,61 @@
 # Windows 安装、运行与回退
 
-公开 P7 安装请使用 [v0.1.0 固定版本的 Windows 安装说明](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/blob/v0.1.0/docs/windows-quickstart.md)。P169/O169 的私有验收条件和入口见 [README](../README.md#p169-私有资格环境的安装与检查)。
+O169 面向独立的 Windows 10 x64 19045 验收环境。使用独立 CPython 3.13 x64、同一发行标签的 CADSG 制品，以及通过官方渠道取得的签名 Codex App `26.1111.2228.0`。固定原生基线为 `0.169.0-alpha.11.1`。旧 P7 安装及其配套 App 见 [v0.1.0 的 Windows 安装说明](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/blob/v0.1.0/docs/windows-quickstart.md)。
 
-以下保留 P20 候选的组装与验收步骤，使用官方 App 26.1023.6621.0 与 runtime 0.165.0-alpha.1.2。目标用户使用非提升 PowerShell，先准备独立 x64 Python 3.13，本轮实际资格为 3.13.3。首次使用的官方 onboarding 和沙箱设置按 App 正常完成，现有 App/CDS 实例和数据继续使用各自的配置。
+在专用 Windows 用户的普通 PowerShell 操作。初次 App 引导、原生沙箱配置依照 App 提示。验收使用空白专用工程及独立配置，系统防护继续开启。
 
-## 1. 下载并核对外部发行索引
+## 1. 下载和校验同一发行的制品
 
-复现 P20 候选步骤需要对应的网关 zip、原生 tar.gz 和可信的外部 `SHA256SUMS.json`。从该组合的资产索引取得文件名、大小与 SHA，按该摘要验证本地文件。
-
-索引是单独发行资产，不塞回被其校验的归档。网关 zip 内应有 `install_gateway.ps1`、`release.json`、`wheels/`。网关 archive 和 `release.json` 的 SHA 在最终构建后写入外部索引，不硬编码回参与构建的本页。
+从 [GitHub Releases](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/releases) 选择已提供 O169 资产的标签。每个标签的 `SHA256SUMS.json`、网关 ZIP、原生 tar.gz 及依赖源码附包各自单列。最终资格以对应发行记录为准。
 
 ```powershell
+$repo = 'https://github.com/0xZoharHuang/codex-app-deepseek-gateway'
+$tag = Read-Host '输入所选 O169 发行标签'
+if ($tag -notmatch '^v[0-9]+(?:[.][0-9]+){2}(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?$') { throw '标签无效' }
+$basePython = Read-Host '输入独立 Python 3.13 的 python.exe 绝对路径'
 $state = Join-Path $env:LOCALAPPDATA 'codex-app-deepseek-gateway'
 $managed = Join-Path $state 'managed-install'
-$basePython = Read-Host '独立 Python 3.13 的 python.exe 完整路径'
-$gatewayZip = Read-Host '已下载网关 zip 的完整路径'
-$gatewayZipSha = Read-Host '从可信 SHA256SUMS.json 复制该网关 zip 的 SHA256'
-$gatewaySha = Read-Host '从同一索引复制包内 release.json 的 SHA256'
-$nativeArchive = Read-Host '已下载原生 tar.gz 的完整路径'
-$nativeArchiveSha = Read-Host '从 v0.2.0 外部校验索引复制 P20 原生 tar.gz 的 SHA256'
-$rawNativeSha = Read-Host '从同一索引复制 P20 原生 manifest.json 的 SHA256'
-$nativeMemberCount = [int](Read-Host '从同一发行页的原生包库存回执复制普通文件条目数')
-if ((Get-FileHash -LiteralPath $gatewayZip -Algorithm SHA256).Hash -ne $gatewayZipSha) { throw '网关归档 SHA 不符' }
-if ((Get-FileHash -LiteralPath $nativeArchive -Algorithm SHA256).Hash -ne $nativeArchiveSha) { throw '原生归档 SHA 不符' }
-$bundle = Join-Path $state 'downloads\gateway-v0.2.0'
-if (Test-Path -LiteralPath $bundle) { throw '输出目录已存在，请先核原回执，不覆写' }
+$assets = Join-Path $state ('downloads\' + $tag)
+if (Test-Path -LiteralPath $assets) { throw '请检查已存在的下载目录' }
+New-Item -ItemType Directory -Path $assets | Out-Null
+$url = "$repo/releases/download/$tag"
+$indexPath = Join-Path $assets 'SHA256SUMS.json'
+Invoke-WebRequest -UseBasicParsing "$url/SHA256SUMS.json" -OutFile $indexPath
+$index = Get-Content -LiteralPath $indexPath -Raw | ConvertFrom-Json
+if ($index.schema_version -ne 1 -or $index.source_repository -ne $repo -or
+    $index.release_tag -cne $tag -or $index.source_commit -notmatch '^[0-9a-f]{40}$' -or
+    $index.native_tar.build_lock_sha256 -ne '0ab81f556d6062026b2ff6194351d697b04483bfc3b55a197a5b32944031ee72') {
+  throw '发行索引与 O169 组合不符'
+}
+function Get-CADSGAsset($asset) {
+  $name = [string]$asset.filename
+  if ($name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]+$' -or $asset.sha256 -notmatch '^[0-9a-f]{64}$') { throw '资产索引无效' }
+  $path = Join-Path $assets $name
+  Invoke-WebRequest -UseBasicParsing "$url/$name" -OutFile $path
+  if ((Get-Item -LiteralPath $path).Length -ne [long]$asset.bytes -or
+      (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $asset.sha256) { throw "下载校验失败：$name" }
+  $path
+}
+$gatewayZip = Get-CADSGAsset $index.gateway_zip
+$nativeTar = Get-CADSGAsset $index.native_tar
+$bundle = Join-Path $assets 'gateway'
 Expand-Archive -LiteralPath $gatewayZip -DestinationPath $bundle
+$gatewayManifest = Join-Path $bundle 'release.json'
 $installer = Join-Path $bundle 'install_gateway.ps1'
-```
-
-固定原生 tar 为 142,231,452 字节、3,037 个普通文件。它不含闭源 App/Code Mode host。上述两个原生 SHA 还须与可信发行索引对应；不要混用不同版本的资产。
-
-## 2. 正常安装、选择 release 和保存凭据
-
-```powershell
-$reply = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer `
-  -Action Install -ManifestPath (Join-Path $bundle 'release.json') -ManifestSha256 $gatewaySha `
-  -Wheelhouse (Join-Path $bundle 'wheels') -PythonExe $basePython -InstallRoot $managed -DataHome $state
-if ($LASTEXITCODE -ne 0) { throw 'Install 失败，保留原回执' }
-$install = $reply | ConvertFrom-Json
-$reply = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer `
-  -Action Activate -ReleaseId $install.release_id -InstallRoot $managed
-if ($LASTEXITCODE -ne 0) { throw 'Activate 失败，停止后续操作' }
-$active = $reply | ConvertFrom-Json
-$cdag = $active.command
-$python = Join-Path (Split-Path -Parent $cdag) 'python.exe'
-& $cdag --version
-& $cdag setup-credentials
-```
-
-Install 校验所有锁定 wheel，离线创建独立 venv，**不激活、不启动、不配置 App**。Activate 只选择已经验证的 release，已有 `gateway.json` 不被覆盖。`activated_not_started` 不是运行证明。
-
-`setup-credentials` 隐藏输入 OpenRouter key，写入当前 Windows 用户的项目专用 WinCred 项 `ai.codex.app-deepseek.openrouter`；App 通过另一个 `ai.codex.app-deepseek.local-token` 使用本地网关，不获得上游 key。同一 Windows 用户的多个 CADSG home 共享这两个项目凭据项，不谎称每个 home 各有独立 WinCred。
-
-不要将 key 写入命令参数、提示、仓库或日志，不分享 `auth-token` 的 stdout。默认不读取 CDS；仅明确需要从当前用户 CDS 项复制时使用已有的 `setup-credentials --import-existing-cds`。
-
-本轮完整网页任务明确选用 Morph + Firecrawl。若复现这个已验组合，先按下方[模型和网页后端](#模型和网页后端)在服务未启动时显式选择，再继续。省略选择仍保持源码官方/Exa 默认及其参数限制，不自动切换。
-
-## 3. 解压到永久原生版本目录，再 prepare / bind
-
-正常退出占用本项目 profile 的 App，停止本项目网关。不要全局结束 Codex 或其他用户进程。
-
-```powershell
-$nativeInput = Join-Path $state ('native-runtimes\o165-p20-' + $nativeArchiveSha.Substring(0,12))
-# 标准库 data filter；只解压已核定的固定发行归档，输出必须是全新目录。
+if ((Get-FileHash -LiteralPath $gatewayManifest -Algorithm SHA256).Hash -ne $index.gateway_zip.release_manifest_sha256) {
+  throw '网关清单校验失败'
+}
+$release = Get-Content -LiteralPath $gatewayManifest -Raw | ConvertFrom-Json
+if ($release.source_commit -ne $index.source_commit -or $release.app_baseline.app_version -ne '26.1111.2228.0' -or
+    $release.app_baseline.native_version -ne '0.169.0-alpha.11.1') { throw '网关清单不是索引固定的 App 组合' }
+$nativeInput = Join-Path $state ('native-runtimes\o169-' + $index.native_tar.sha256.Substring(0,12))
 $extract = @'
 from pathlib import Path, PurePosixPath
 import sys, tarfile
 archive, root = Path(sys.argv[1]), Path(sys.argv[2])
-if root.exists() or root.is_symlink(): raise SystemExit('Existing native directory: inspect, do not overwrite')
+if root.exists() or root.is_symlink(): raise SystemExit('Native output already exists')
 with tarfile.open(archive, 'r:gz') as tf:
-    members = tf.getmembers()
-    if int(sys.argv[3]) <= 0 or len(members) != int(sys.argv[3]): raise SystemExit('Unexpected native inventory')
-    seen = set()
+    members, seen = tf.getmembers(), set()
     for item in members:
         p = PurePosixPath(item.name)
         if not item.isfile() or p.is_absolute() or '..' in p.parts or ':' in item.name or chr(92) in item.name or item.name.casefold() in seen:
@@ -81,26 +64,56 @@ with tarfile.open(archive, 'r:gz') as tf:
     root.mkdir(parents=True)
     tf.extractall(root, filter='data')
 '@
-& $basePython -I -B -c $extract $nativeArchive $nativeInput $nativeMemberCount
-if ($LASTEXITCODE -ne 0) { throw '解压未完成，保留原状态，不继续绑定' }
-$reply = & $cdag app-prepare-runtime --install-root $managed `
-  --native-manifest (Join-Path $nativeInput 'manifest.json') --native-manifest-sha256 $rawNativeSha
-if ($LASTEXITCODE -ne 0) { throw 'prepare 失败' }
-$prepared = $reply | ConvertFrom-Json
-& $cdag app-bind --install-root $managed --native-manifest $prepared.manifest `
-  --native-manifest-sha256 $prepared.manifest_sha256
-if ($LASTEXITCODE -ne 0) { throw 'bind 失败' }
+& $basePython -I -B -c $extract $nativeTar $nativeInput
+if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath (Join-Path $nativeInput 'manifest.json') -Algorithm SHA256).Hash -ne $index.native_tar.native_manifest_sha256) {
+  throw '原生归档或清单校验失败'
+}
 ```
 
-prepare 在永久版本目录中校验 P20 的六个同源程序，并核对本机已安装的官方 App 和插件资源。生成的 `app-runtime-manifest.json` 包含本机路径，仅供当前用户绑定。多个版本可以并排保留，升级或回滚时使用各自的清单和 SHA。
+依赖源码附包用于重建，普通安装使用已配齐的离线 wheel。官方 App 与其闭源资源另行取得。[网关和锁定依赖构建](gateway-release-build.md)
 
-## 4. 从选定 runtime 生成目录并配置
-
-没有另一个 catalog CLI。使用安装模块公开的 `catalog.build_catalog`，元数据来自上一步实际二进制；以下两个 metadata 命令使用独立 home，不读取默认 `.codex` 或生产 App 会话。
+## 2. 安装、激活并进入独立桌面
 
 ```powershell
-$native = Join-Path $nativeInput 'codex.exe'
-$metadata = Join-Path $state ('catalog-build\o165-p20-' + $rawNativeSha.Substring(0,12))
+$reply = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer `
+  -Action Install -ManifestPath $gatewayManifest -ManifestSha256 $index.gateway_zip.release_manifest_sha256 `
+  -Wheelhouse (Join-Path $bundle 'wheels') -PythonExe $basePython -InstallRoot $managed -DataHome $state
+if ($LASTEXITCODE -ne 0) { throw 'Install 失败，保留原始回执' }
+$install = $reply | ConvertFrom-Json
+$reply = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer `
+  -Action Activate -ReleaseId $install.release_id -InstallRoot $managed
+if ($LASTEXITCODE -ne 0) { throw 'Activate 失败' }
+$active = $reply | ConvertFrom-Json
+$env:CADSG_BOOTSTRAP_PYTHON = $basePython
+$env:CADSG_ASSET_TAG = $tag
+$helper = Join-Path $bundle 'enter_app_desktop.py'
+& $basePython -I -B $helper --install-root $managed --show
+```
+
+Install 校验并安装 wheel，Activate 选择不可变的安装 ID。两步均在启动 App 前完成。示例的脚本宿主参数只作用于本次校验后的安装器子进程。`--show` 在专用 Windows 环境显示本项目私有桌面，供交互验收。结束前正常退出该 App，再关闭私有 PowerShell。无人值守的隔离验收可用 `--script $trustedLocalPs1` 替代 `--show`，执行可信的本地脚本且不切换输入桌面。两种模式互斥。
+
+## 3. 在私有 PowerShell 配置并启动
+
+```powershell
+$managed = $env:CADSG_DESKTOP_INSTALL_ROOT
+$cdag = $env:CADSG_DESKTOP_COMMAND
+$state = Split-Path -Parent $managed
+$assets = Join-Path $state ('downloads\' + $env:CADSG_ASSET_TAG)
+$index = Get-Content -LiteralPath (Join-Path $assets 'SHA256SUMS.json') -Raw | ConvertFrom-Json
+$nativeInput = Join-Path $state ('native-runtimes\o169-' + $index.native_tar.sha256.Substring(0,12))
+$python = Join-Path (Split-Path -Parent $cdag) 'python.exe'
+$port = 42817
+& $cdag setup-credentials
+if ($LASTEXITCODE -ne 0) { throw '凭据设置失败' }
+$reply = & $cdag app-prepare-runtime --install-root $managed `
+  --native-manifest (Join-Path $nativeInput 'manifest.json') --native-manifest-sha256 $index.native_tar.native_manifest_sha256
+if ($LASTEXITCODE -ne 0) { throw 'prepare 失败' }
+$prepared = $reply | ConvertFrom-Json
+$reply = & $cdag app-bind --install-root $managed --native-manifest $prepared.manifest `
+  --native-manifest-sha256 $prepared.manifest_sha256
+if ($LASTEXITCODE -ne 0) { throw 'bind 失败' }
+$bound = $reply | ConvertFrom-Json
+
 $makeCatalog = @'
 from pathlib import Path
 import hashlib, json, os, subprocess, sys
@@ -108,62 +121,35 @@ from codex_app_deepseek.catalog import build_catalog
 native, out = sys.argv[1], Path(sys.argv[2])
 out.mkdir(parents=True, exist_ok=False)
 home = out / 'native-home'; home.mkdir()
-(home / 'config.toml').write_bytes(b'cli_auth_credentials_store="file"\nmcp_oauth_credentials_store="file"\n')
+(home / 'config.toml').write_bytes(b'cli_auth_credentials_store=\x22file\x22\nmcp_oauth_credentials_store=\x22file\x22\n')
 env = {k:v for k,v in os.environ.items() if not k.upper().startswith(('CODEX','OPENAI','OPENROUTER','PYTHONPATH','PYTHONHOME'))}
 env['CODEX_HOME'] = str(home)
-version = subprocess.run([native, '--version'], env=env, check=True, stdout=subprocess.PIPE).stdout.decode('utf-8-sig').strip()
-raw = subprocess.run([native, 'debug', 'models', '--bundled'], env=env, check=True, stdout=subprocess.PIPE).stdout
-(out / 'bundled-models.json').write_bytes(raw)
+version = subprocess.check_output([native, '--version'], env=env).decode('utf-8-sig').strip()
+raw = subprocess.check_output([native, 'debug', 'models', '--bundled'], env=env)
 value = build_catalog(json.loads(raw), native_version=version, multi_agent_version='v2')
 body = (json.dumps(value, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
 path = out / 'deepseek-catalog.json'; path.write_bytes(body)
-print(json.dumps({'path':str(path), 'sha256':hashlib.sha256(body).hexdigest(), 'native_version':version}))
+print(json.dumps({'path':str(path), 'sha256':hashlib.sha256(body).hexdigest()}))
 '@
-$reply = & $python -I -B -c $makeCatalog $native $metadata
-if ($LASTEXITCODE -ne 0) { throw '目录生成失败，不改输入继续' }
+$metadata = Join-Path $state ('catalog-build\o169-' + $index.native_tar.sha256.Substring(0,12))
+$reply = & $python -I -B -c $makeCatalog (Join-Path $nativeInput 'codex.exe') $metadata
+if ($LASTEXITCODE -ne 0) { throw '目录生成失败' }
 $catalog = $reply | ConvertFrom-Json
-& $cdag app-configure --install-root $managed --catalog $catalog.path `
-  --catalog-sha256 $catalog.sha256 --multi-agent-version v2 --port 42817
+$reply = & $cdag app-configure --install-root $managed --catalog $catalog.path `
+  --catalog-sha256 $catalog.sha256 --multi-agent-version v2 --port $port
 if ($LASTEXITCODE -ne 0) { throw 'app-configure 失败' }
-```
-
-这里对可信二进制现场生成的 catalog 计算 SHA 是正常本地来源链；它不能替代下载资产的可信 SHA。app-configure 保存不可变目录，合并独立 App 配置，登记检查点并通过原生 PluginManager 接通官方 AppTools；不写替代 agent/MCP 系统。
-
-`gpt-5.6-luna`、`gpt-6-luna`、`gpt-6.1-sol` 是这份 App/runtime 的明确辅助路由别名，推理仍固定 DeepSeek。Guardian、记忆与压缩不能为通过验收而关闭。默认多智能体 V2；需要 V1 时，另生成 `multi_agent_version='v1'` 的目录并在 app-configure 显式选 v1，再开新 chat；已有会话保留其记录版本。
-
-### 升级已有网关时校准声明的原生版本
-
-已有安装沿用原 InstallRoot、DataHome 和监听端口。正常退出本项目 App、停止该网关。备份 DataHome 下 `gateway.json` 的原始字节和 SHA256，备份目录使用与配置相同的私有权限。prepare 完成后，从已核验的 manifest 读取 `codex.exe` 的 SHA，与发行索引和永久目录中的文件核对。
-
-若 `gateway.json` 声明了旧 `native_sha256`，在网关仍停止时只更新该字段。以备份的原始 SHA 为条件调用已安装模块 `codex_app_deepseek.app_config._atomic_write` 的 `expected_sha256` 参数；冲突则重新读取，不覆盖并发修改。解析写后 JSON 并确认其他键和值与原配置相同，保留原始、写后两个摘要供回滚。回滚时核验当前 native_sha256 等于本次安装值，再基于最新内容、以最新 SHA 作条件恢复旧字段，保留后续无关设置。省略该字段的已有配置可继续使用原选项。
-
-升级前保留原网关的 release ID。记录 app-bind 与 app-configure 各自返回的
-binding_backup。若需恢复旧绑定，先正常退出本项目 App，在当前网关仍激活时执行以下命令，
-把新目录配置的备份放在运行时重绑备份之前。随后分别恢复配置检查点、网关声明并重新激活原版本。
-
-```powershell
-& $cdag app-restore-binding --install-root $managed --backup $configureBackup --backup $bindBackup
-```
-
-命令校验整条变更链和当前绑定，成功时只替换一次。若其间有人选择了其他运行时或目录，
-命令会保留对方的更改。已经选中相同绑定的重复操作没有新备份，只传实际返回的目录。
-
-声明字段记录操作者选择的版本。`diagnose` 单独核对官方签名 App 自带的原生基线；`app-status` 以实际 App 与 backend 的 PID、出生时间、映像路径和 SHA 核验本次加载。切换后同时检查配置摘要、运行服务加载的配置以及实际进程身份。
-
-## 5. 启动并回读同一次操作
-
-```powershell
-& $cdag service-start --install-root $managed --port 42817
-if ($LASTEXITCODE -ne 0) { throw '先检查原服务状态，不重复 start' }
+$configured = $reply | ConvertFrom-Json
+& $cdag service-start --install-root $managed --port $port
+if ($LASTEXITCODE -ne 0) { throw '请回读原网关状态' }
 & $cdag app-check --install-root $managed --accessibility --observation-seconds 120
-if ($LASTEXITCODE -ne 0) { throw '检查未通过，不 launch' }
+if ($LASTEXITCODE -ne 0) { throw 'check 失败' }
 & $cdag app-launch --install-root $managed --accessibility --observation-seconds 120 --wait-seconds 120
 & $cdag app-status --install-root $managed
 ```
 
-冷启动可能超过观察窗口。pending/timeout/unknown **不等于未创建**：先运行 app-status 找到实际 run ID，再用 `app-status --install-root $managed --run-id <实际32位run_id>` 回读原操作。不要重复 launch、全局 kill 或改回旧配置来制造成功。`app-check`、health 与已受理的 GUI 动作均不是整个真实任务通过；还要核实际 App/native 映像与界面。
+凭据由命令交互读取至当前 Windows 用户的项目专用 WinCred；避免写入命令、脚本或日志。目录由已校验原生程序在新 metadata home 生成。App 通过其正常引导和沙箱权限入口完成初始化，验收核对真实 App、后端、工具结果和重新打开的会话。
 
-单次诊断可给 `app-launch` 增加 `--trace-root` 和用户拥有的本地目录。启动器为这次启动创建受保护的子目录，再核对实际 App 与 backend 的环境。官方 trace 会保存请求、图片和工具输出，请只在私有目录保留原始文件。日常启动无需启用该选项。
+外层等待超时时，按 `app-status --install-root $managed --run-id <实际 run_id>` 回读同一次操作。保留 `$install.release_id`、原生目录、绑定备份和已登记的配置检查点以用于回退。[安装版 App 参数](installed-app-entrypoints.md)
 
 ## 模型和网页后端
 
@@ -193,20 +179,39 @@ if ($LASTEXITCODE -ne 0) { throw '检查未通过，不 launch' }
 
 ## 升级、回滚与卸载
 
-升级保留独立 Python、旧网关 release、旧永久原生目录、绑定与登记的检查点。正常退出本项目 App、停止服务后，用新已核包再次 Install，再显式 Activate、prepare/bind/configure/check。不要覆盖运行文件或复制活数据库单文件；需要数据备份时先闭库，保一致性快照与会话。
+升级前正常退出此安装的 App 并停止网关。保留之前的 release ID、原生目录与绑定备份，用已核对的同组合制品执行 Install、Activate 和私有桌面的 prepare、bind、configure 与 check。
+
+在原私有 PowerShell 先确认 App 已正常退出，再恢复本项目选中的绑定与已登记的配置检查点。绑定备份只传真实回执中存在的路径，按从新到旧的顺序传入。需要选择已保留的兼容 release 时，再执行 Activate 并回读验证。
 
 ```powershell
+$basePython = $env:CADSG_BOOTSTRAP_PYTHON
+$installer = Join-Path $assets 'gateway\install_gateway.ps1'
 & $cdag service-stop --install-root $managed
+if ($LASTEXITCODE -ne 0) { throw '先检查实际停止状态' }
+$bindingArgs = @()
+foreach ($backup in @($configured.binding_backup, $bound.binding_backup)) {
+  if ($backup) { $bindingArgs += @('--backup', $backup) }
+}
+if ($bindingArgs.Count) {
+  & $cdag app-restore-binding --install-root $managed @bindingArgs
+  if ($LASTEXITCODE -ne 0) { throw '绑定恢复停止，保留原回执' }
+}
 & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer -Action Rollback -InstallRoot $managed
-# 卸载只针对本项目，仍使用保留的可信安装器/独立 Python。
+if ($LASTEXITCODE -ne 0) { throw '配置恢复未完成，先读回检查点' }
+# 如果选择先前的兼容网关版本：
+# & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer -Action Activate -ReleaseId $compatiblePreviousId -InstallRoot $managed
+```
+
+Rollback 恢复已登记的配置字段，保留后续无关设置。Activate 独立选择网关版本。历史 P7 需要自身匹配的签名 App 和原生包，O169 的 App 安装不提供此前提。不要把旧数据库或旧 binding 直接盖回当前状态。
+
+如果直接卸载当前安装，正常退出该 App 并保留有效绑定和原生目录。退出私有 PowerShell 后，由同一 Windows 用户在专用环境的维护 PowerShell 运行已校验的安装器。若该用户已完成原生沙箱设置，请提升该用户自己的维护 PowerShell；管理员凭据若属于另一用户，停止并保留原绑定。重新赋值下面的路径为本次已记录的安装及验证来源。
+
+```powershell
+$installer = Read-Host '输入先前已校验的 install_gateway.ps1 路径'
+$managed = Read-Host '输入本次记录的 InstallRoot'
+$basePython = Read-Host '输入本次记录的独立 Python 路径'
 & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer `
   -Action Uninstall -InstallRoot $managed -PythonExe $basePython
 ```
 
-Rollback 按原始/已应用/当前内容恢复登记的配置字段，保留后来无关设置；**不自动选择旧 gateway release**。需要旧网关时对保留的 release 执行 `-Action Activate -ReleaseId <旧release ID> -InstallRoot $managed`，再用该版本正常绑定/配置/检查。不要把旧 binding JSON 或整个旧数据库盖回后来工作。原生已知 LF/CRLF 兼容不代表任意旧版本数据库互读。
-
-正常 app-configure 自动登记检查点。仅低层 configure-app 得到未登记 checkpoint 时，使用 `-Action RegisterCheckpoint -Checkpoint <实际checkpoint.json> -InstallRoot $managed`；不要手造检查点。临时操作者设置若不在托管字段内，应保留单独逐字段 CAS 记录，恢复时仅还原自己实际改动且当前仍等于自己的值。
-
-Uninstall 先用原生规则清理本项目自有 namespace，再由独立 Python 两阶段清理文件，默认保留工程、会话、凭据、数据 home 与恢复输入。未知 owner、活任务、冲突或权限不足会停止，不切 full access/改防护绕过。`uninstalled_cleanup_pending` 按同一回执重试收尾；原生清理未知时先检查，必要时才显式 `-RetryNativeCleanup`，不能把未知当完成。
-
-工程需要 Python 本机回环时，可按[命名权限与原生 Windows 设置](windows-local-python-profile.md)配置并从实际 App 验证。
+先检查回执中的实际终态。Uninstall 保留工程、会话、数据和凭据；`uninstalled_cleanup_pending` 需要按同一回执继续处理。 [安装、回滚和卸载机制](lifecycle.md)

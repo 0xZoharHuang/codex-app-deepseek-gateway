@@ -24,13 +24,11 @@ CADSG 面向桌面 App。[CDS](https://github.com/0xZoharHuang/codex-deepseek-ru
 
 P169 的公开二进制交付还需要由公开源码构建并配对校验的网关与原生归档、可获取的锁定依赖、外部资产校验索引，以及消费者从下载到正常隔离安装和实启 App 的复测。 [P169 依赖锁](release/dependencies.windows-py313.json)
 
-## P169 私有资格环境的安装与检查
+## O169 下载和独立运行
 
-以下入口适用于获准的 Windows 验收桌面及其独立用户数据目录。启动器校验 Windows 会话 1 的 `WinSta0` 专用 `CADSG-P169-Acceptance-D857` 桌面、官方 App 签名与资源，以及本机实际加载的后端。O169 使用同一源码锁构建的六个原生程序，装配入口为 `scripts/package_native_release.py --development-qualification`。 [源码锁](native/p169-source-lock.service-restore-acl-order.draft.json) · [私有准入输入](native/p169-admission.draft.json)
+使用同一 GitHub 发行标签的外部 `SHA256SUMS.json`、网关 ZIP 与原生 tar.gz。网关 ZIP 随安装器提供 `enter_app_desktop.py`，通过独立 Python 启动专用 Windows 桌面。安装、实际签名 App 启动、配置回滚及自主卸载各自有可回读终态。 [Windows 下载、安装和回退](docs/windows-quickstart.md)
 
-1. 准备验收用离线网关包、可信 `release.json` SHA-256、同组合的原生归档及其 manifest 摘要。用包内 `install_gateway.ps1` 执行 `-Action Install -ManifestPath $gatewayManifest -ManifestSha256 $gatewaySha -Wheelhouse $wheelhouse -PythonExe $basePython -InstallRoot $managed -DataHome $state`。核对成功回执后执行 `-Action Activate -ReleaseId $releaseId -InstallRoot $managed`，其中 `$releaseId` 为安装回执中的 `release_id`。用激活回执中的 `command` 作为 `$cdag`，运行 `& $cdag setup-credentials` 在 Windows 凭据存储中设置上游认证。
-2. 将已核验的原生归档解压到验收环境的独立永久版本目录。在专用桌面用 `app-prepare-runtime --install-root $managed --native-manifest $rawManifest --native-manifest-sha256 $rawSha` 生成本机清单。将回执中的路径和摘要赋给 `$preparedManifest`、`$preparedSha`，再运行 `app-bind --install-root $managed --native-manifest $preparedManifest --native-manifest-sha256 $preparedSha`。在独立 home 中从同一个 `codex.exe` 读取 `--version` 与 `debug models --bundled`，由安装模块的 `catalog.build_catalog` 生成匹配目录。接着运行 `app-configure --install-root $managed --catalog $catalog --catalog-sha256 $catalogSha --port $port`。
-3. 用 `service-start --install-root $managed --port $port` 启动该网关，`app-check --install-root $managed` 通过后执行一次 `app-launch --install-root $managed`。用 `app-status --install-root $managed` 回读运行。外层等待超时时，用同一 `--run-id` 回读；验收以实际 App 与原生进程身份、工具结果和状态为准。 [安装版 App 入口参数](docs/installed-app-entrypoints.md) · [图片缓存迁移与回滚](docs/image-cache-format.md)
+O169 的公开装配使用 `scripts/package_native_release.py --public-o169-assembly`，固定八个补丁和六件同源原生产物。 [源码锁](native/p169-source-lock.service-restore-acl-order.draft.json) · [公开构建和制品校验](docs/gateway-release-build.md#o169-raw-native-assembly)
 
 如果工程由另一个应用创建在私有目录里，除了工作区权限，还应核对私有父目录的元数据权限。宿主可以在自己创建目录时给已核验的沙箱组设置非继承的 `READ_ATTRIBUTES | SYNCHRONIZE`。[私有工程与错误 267](docs/windows-private-workspace.md)
 
@@ -50,7 +48,7 @@ P169 的公开二进制交付还需要由公开源码构建并配对校验的网
 
 `diagnose` 核对已安装文件、磁盘配置，并对照发行清单的官方 App 基线。`health` 查看运行中的网关，`app-status` 核对实际 App 和后端身份。将示例端口 42817 换成此安装的实际端口。模型路由可另用 OpenRouter generation 回读。
 
-升级或卸载前先结束任务、正常退出此安装的 App，再运行 `& $cdag service-stop --install-root $managed`。保留旧 release、原生版本目录、配置检查点及绑定备份。用 `app-restore-binding --install-root $managed --backup $configureBackup --backup $bindBackup` 按由新到旧的顺序恢复绑定。源自同一受信包的安装器支持 `-Action Rollback -InstallRoot $managed` 恢复已登记的配置检查点，旧网关版本另用 `-Action Activate -ReleaseId $previousReleaseId -InstallRoot $managed` 选择。`-Action Uninstall -InstallRoot $managed -PythonExe $basePython` 清理当前 release 及其托管状态，默认保留用户会话、工程、数据和凭据。 [安装生命周期与回滚](docs/installed-app-entrypoints.md#stop-and-roll-back)
+升级和卸载前正常退出此安装的 App，再停止对应网关。保留绑定备份、已登记的配置检查点和以前的兼容 release，用实际回执核对每一步。 [升级、绑定回滚和卸载](docs/windows-quickstart.md#升级回滚与卸载)
 
 ## 验收和构建来源
 

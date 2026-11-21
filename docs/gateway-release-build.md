@@ -32,8 +32,8 @@ wheel. The original Git object recorded by the lock remains unavailable.
 If you have the verified qualification attachment
 `cadsg-p169-dependency-sources-exact.tar.xz`, check its SHA-256
 `efd54c3dd836905c5c7a41e8b6d25f4aff4862c74250d2a2c0be971ff5865394`
-before extracting it to a new directory. The attachment is staged for
-qualification and is not currently a public download. Inside its extracted
+before extracting it to a new directory. Obtain it from the same verified
+release source when the attachment is available. Inside its extracted
 `cadsg-p169-dependency-sources` directory, run this on Windows x64 with
 independent CPython 3.13 and Git:
 
@@ -105,13 +105,46 @@ the original snapshot bytes exactly. Original source inputs and checkout state
 are rechecked. Two matching artifacts do not independently establish that the
 source is correct or that App works.
 
+## O169 raw native assembly
+
+Run the public packaging mode in the same clean Windows checkout used for the
+gateway build. Keep the reviewed original build manifest in its original
+producer output directory and retain its prepared source and Cargo cache.
+Supply the reviewed digest as the expected input.
+
+~~~powershell
+$reviewedManifestSha = '578681be6b0e187ee703d483ff31ad9a6c8b0da8f9eca91b8761f12f598f807d'
+$lock = Join-Path $PWD 'native\p169-source-lock.service-restore-acl-order.draft.json'
+& $buildPython -I -B .\scripts\package_native_release.py `
+  --public-o169-assembly --source-root $preparedSource `
+  --native-manifest $originalBuildManifest --native-manifest-sha256 $reviewedManifestSha `
+  --build-lock $lock --cargo $cargo --cargo-home $cargoHome --git $gitExe `
+  --output $newPublicStage --evidence-dir $newPrivateEvidence
+if ($LASTEXITCODE -ne 0) { throw 'O169 raw native assembly failed' }
+~~~
+
+The packager checks the fixed lock, original manifest, source fingerprint, V8
+inputs, six exact outputs, and licenses. It emits a raw `.tar.gz`. Archive
+metadata retains `built-not-app-qualified` and `App_acceptance_asserted=false`.
+The same signed App running from bytes downloaded from GitHub is a separate test.
+
+Stage the gateway ZIP and native tar.gz together under a single proved source
+commit. The gateway ZIP includes `release.json`, `wheels/`,
+`install_gateway.ps1` and `enter_app_desktop.py`. Keep the exact dependency
+source attachment available to support replay. Place `SHA256SUMS.json` beside
+the assets with the exact source repository/commit, release tag, filenames,
+byte counts, archive hashes and gateway/native manifest hashes. Include the
+native build lock digest. Verify the downloaded bytes and real App/rollback
+before selecting that exact verified commit and assets for stable delivery.
+
 ## Outputs and delivery boundary
 
 - `wheels/`: exact locked dependency wheels and the newly built gateway wheel.
 - `release.json`: deterministic manifest using the existing installer schema;
   its full source commit, exact Python target, wheel hashes and declared official
   App/native baseline are verified by that source's own `lifecycle.validate_release`.
-- `install_gateway.ps1`: the installer from the same source snapshot.
+- `install_gateway.ps1` and `enter_app_desktop.py`: the installer and standalone
+  desktop entrypoint from the same source snapshot.
 - `dependencies.windows-py313.json`: the exact committed input/source lock.
 - `build-provenance.json`: source inventory, epoch, verified tools, independent
   wheel hashes, payload hashes, manifest hash, installer hash and bootstrap wheel
@@ -165,17 +198,16 @@ cause. They do not print full command arguments, stdout or environment values.
 A byte-reproducible bundle still requires ordinary-user installation and actual
 App qualification; reproducibility alone does not prove file readability.
 
-Development bundles with a local file URI and an unpublished CDS commit are
-not public releases. Replace that dependency pin with the qualified public CDS
-source, rebuild and verify the new combination before public distribution.
+Release inputs include publicly obtainable wheel bytes or a verified, licensed
+source attachment that regenerates the exact locked wheel. Local file URIs and
+private qualification wheelhouses alone do not provide a public build input.
 
 
 ## Native and local-App redistribution boundary
 
 This Python bundle contains the explicitly locked wheels, this project's gateway
-wheel and installer, manifests and provenance. It does not include the four
-self-built Codex native binaries; those are a separate raw native distribution
-assembled as described in [native-build.md](native-build.md#assemble-the-raw-native-release).
+wheel and installer, manifests and provenance. The six O169 source-built Codex
+native programs travel in the separate raw native distribution described above.
 Compiled libraries inside dependency wheels keep their original wheel licenses.
 The CDS dependency is the complete pinned Python wheel, but the gateway's runtime
 import boundary remains the six declared pure protocol modules.
@@ -184,8 +216,8 @@ Do not archive an installed gateway/data directory or a prepared native director
 The official signed desktop App, its ASAR/resources and the Code Mode Host copied
 during local preparation are not public gateway-bundle inputs. The baseline JSON
 contains hashes and resource names, not those App file contents. Users obtain the
-official App separately; public `app-prepare-runtime` verifies it and copies the
-required sidecar into their own local runtime directory.
+official App separately. Public `app-prepare-runtime` verifies it and locally
+prepares the runtime and bundled resources for the selected cohort.
 
 Keep all wheel license/notice files intact. The current installed r4 audit found
 108 declared license files present and matching their installed RECORD hashes;

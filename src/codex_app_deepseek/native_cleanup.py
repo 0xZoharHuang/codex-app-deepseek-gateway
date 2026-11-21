@@ -229,7 +229,7 @@ class Cleanup:
             _drained(self.home, self.executable, self.namespace, self.backend)
             if self.runtime_package is not None:
                 from . import app_delivery as delivery, isolated_app as app
-                expected = app.baseline(delivery.assets()[0])
+                expected = app.baseline(delivery.assets(for_native_cleanup=True)[0])
                 bundle = _cleanup_bundle(Path(self.runtime_package["descriptor_path"]),
                     self.runtime_package["descriptor_sha256"], expected, self.backend, owner, self.home)
                 if bundle.get("runtime_package") != self.runtime_package:
@@ -389,7 +389,9 @@ def admission(root, directory, receipt, *, backend=None, retry_unconfirmed=False
         value = delivery.read_binding(installation, backend, verify_catalog=False)
         manifest = Path(value["native_manifest"])
         resources.enter_context(_pinned_file(manifest, backend))
-        baseline, _ = delivery.assets()
+        # Legacy teardown needs the verified assets and exact owner, but can
+        # run from that owner's separate elevated maintenance console.
+        baseline, _ = delivery.assets(for_native_cleanup=True)
         bundle = _cleanup_bundle(manifest, value["native_manifest_sha256"], app.baseline(baseline), backend, owner, home)
         cli = bundle["files"]["codex.exe"]
         executable = Path(cli["path"])

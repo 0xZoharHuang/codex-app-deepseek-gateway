@@ -310,6 +310,8 @@ def main(argv=None):
     run([args.build_python, "-I", "-S", "-B", "-c", code, work / "a/src", manifest, sha(manifest), wheelhouse], cwd=output, env=env)
     installer = output / "install_gateway.ps1"
     shutil.copyfile(work / "a/scripts/install_gateway.ps1", installer)
+    desktop = output / "enter_app_desktop.py"
+    shutil.copyfile(work / "a/scripts/enter_app_desktop.py", desktop)
     (output / "dependencies.windows-py313.json").write_bytes(lock_bytes)
     proof = {"schema_version": 1, "status": "built_reproducible_not_App_qualified",
              "kind": "development_qualification" if args.development_qualification else "public_source_build",
@@ -322,7 +324,8 @@ def main(argv=None):
              "independent_manifest_sha256": [hashlib.sha256(encoded(release)).hexdigest(), hashlib.sha256(encoded(release_b)).hexdigest()],
              "payload": payload, "manifest": name, "manifest_sha256": sha(manifest),
              "bootstrap_wheel": wheel_a.name, "bootstrap_wheel_sha256": sha(wheel_a),
-             "installer_sha256": sha(installer), "dependencies": lock["dependencies"],
+             "installer_sha256": sha(installer), "desktop_provisioner_sha256": sha(desktop),
+             "dependencies": lock["dependencies"],
              "scope": "Reproduces this gateway wheel and manifest from the same immutable offline dependency wheels; does not rebuild third-party binaries or qualify App behavior"}
     write_json(output / "build-provenance.json", proof)
     shutil.rmtree(work)

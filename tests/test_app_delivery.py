@@ -80,6 +80,9 @@ def test_packaged_candidate_assets_refuse_the_default_desktop(monkeypatch):
     monkeypatch.setattr(app, "_bound_windows_desktop", lambda: (1, "WinSta0", "Default"))
     with pytest.raises(app.LaunchError, match="requires its isolated Windows acceptance desktop"):
         delivery.assets()
+    baseline, launcher = delivery.assets(for_native_cleanup=True)
+    assert app.sha(baseline) == app.BASELINE_SHA256
+    assert app.sha(launcher) == delivery.LAUNCHER_SHA256
 
 def test_bind_is_explicit_verified_and_never_starts_app(fixture):
     f = fixture; result = bind(f)

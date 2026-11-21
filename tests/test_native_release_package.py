@@ -735,3 +735,87 @@ def test_license_scan_walks_long_directory_and_preserves_logical_provenance(tmp_
     assert item["sha256"] == hashlib.sha256(notice_bytes).hexdigest()
     assert (output / item["file"]).read_bytes() == notice_bytes
     assert all(not item["source_file"].endswith(".snap") for item in notices)
+
+
+def test_o169_public_assembly_requires_explicit_mode_and_exact_reviewed_graph():
+    native = ROOT / "native"
+    lock = pack.load(native / pack.P169_DRAFT_LOCK[0])
+    assert pack.single_graph(lock, native, public_o169_assembly=True)["producer_id"] == "O169"
+    assert pack.single_graph(lock, native, development_qualification=True)["producer_id"] == "O169"
+    with pytest.raises(ValueError, match="explicit --public-o169-assembly"):
+        pack.single_graph(lock, native)
+    with pytest.raises(ValueError, match="cannot use development qualification"):
+        pack.single_graph(lock, native, development_qualification=True, public_o169_assembly=True)
+    tampered = {**lock, "prepared_source_sha256": "0" * 64}
+    with pytest.raises(ValueError, match="reviewed P169 candidate lock"):
+        pack.single_graph(tampered, native, public_o169_assembly=True)
+    old = pack.load(native / "build-lock.O167-P167-source.json")
+    with pytest.raises(ValueError, match="only for O169"):
+        pack.single_graph(old, native, public_o169_assembly=True)
+
+
+def test_o169_public_assembly_binds_exact_raw_manifest_and_all_six_outputs():
+    baseline = pack.load(ROOT / "src/codex_app_deepseek/assets/app-launch-baseline.json")
+    outputs = baseline["candidate_native_outputs"]
+    exact = pack.P169_REVIEWED_RAW_MANIFEST_SHA256
+    assert baseline["candidate_native_manifest_sha256"] == exact
+    pack._verify_reviewed_o169_outputs(exact, outputs)
+    with pytest.raises(ValueError, match="exact reviewed original raw manifest"):
+        pack._verify_reviewed_o169_outputs("f" * 64, outputs)
+    modified = copy.deepcopy(outputs)
+    modified["codex.exe"]["sha256"] = "f" * 64
+    with pytest.raises(ValueError, match="reviewed App baseline"):
+        pack._verify_reviewed_o169_outputs(exact, modified)
+
+
+@pytest.mark.parametrize("problem", [None, "wrong_source", "dirty", "wrong_build", "qualified", "wrong_suffix"])
+def test_public_o169_archive_retains_clean_provenance_and_never_asserts_app_acceptance(tmp_path, monkeypatch, problem):
+    lock_path = ROOT / "native" / pack.P169_DRAFT_LOCK[0]
+    lock = pack.load(lock_path)
+    stage = staging(tmp_path)
+    # Synthetic fixture executables exercise assembly only; bind the fake reviewed
+    # byte identities without relaxing the real manifest hash check.
+    for name in pack.SOURCE_BINARIES:
+        (stage / name).write_bytes(name.encode())
+    outputs = {name: {"sha256": pack.sha(stage / name), "size": (stage / name).stat().st_size}
+               for name in sorted(pack.SOURCE_BINARIES)}
+    digest = pack.P169_REVIEWED_RAW_MANIFEST_SHA256
+    manifest_path = stage / "manifest.json"
+    manifest_path.unlink()
+    pack.write(manifest_path, {
+        "schema_version": 1, "status": "built-not-app-qualified", "kind": pack.SOURCE_BUNDLE_KIND,
+        "runtime_mode": "legacy", "candidate_revision": "O169", "build_lock_sha256": pack.sha(lock_path),
+        "outputs": [{"name": name, **data} for name, data in outputs.items()],
+        "distribution": {"App_acceptance_asserted": problem == "qualified"},
+    })
+    pack.write(stage / "provenance/source.json", {
+        "kind": "development_qualification" if problem == "wrong_source" else "clean_source_assembly",
+        "source_dirty": problem == "dirty", "original_raw_manifest_sha256": digest,
+    })
+    producer_path = stage / "provenance/producer-references.json"
+    producer_path.unlink()
+    pack.write(producer_path, {"original_raw_manifest_sha256": "0" * 64 if problem == "wrong_build" else digest})
+    pack.copy_bytes(lock_path, stage / "provenance/O169-original-build-lock.json")
+    for row in lock["patches"]:
+        pack.copy_bytes(ROOT / "native" / row["file"], stage / "provenance/patches" / row["file"])
+
+    baseline_path = ROOT / "src/codex_app_deepseek/assets/app-launch-baseline.json"
+    load_original = pack.load
+    def load_fixture(path):
+        if Path(path) == baseline_path:
+            return {"candidate_native_manifest_sha256": digest, "candidate_native_outputs": outputs}
+        return load_original(path)
+    monkeypatch.setattr(pack, "load", load_fixture)
+
+    package = tmp_path / ("public.qualification.tar.gz" if problem == "wrong_suffix" else "public.tar.gz")
+    if problem:
+        with pytest.raises(ValueError):
+            pack.make_archive(stage, package, 1234567890, build_lock=lock_path, public_o169_assembly=True)
+        assert not package.exists()
+    else:
+        pack.make_archive(stage, package, 1234567890, build_lock=lock_path, public_o169_assembly=True)
+        with tarfile.open(package) as archive:
+            assert {item.name for item in archive.getmembers() if item.name.endswith(".exe")} == pack.SOURCE_BINARIES
+            shipped = json.load(archive.extractfile("manifest.json"))
+            assert shipped["status"] == "built-not-app-qualified"
+            assert shipped["distribution"]["App_acceptance_asserted"] is False
