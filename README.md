@@ -1,6 +1,6 @@
 # Codex App DeepSeek Gateway（CADSG）
 
-CADSG 让 Windows 上的官方 **Codex 桌面 App** 通过 OpenRouter 使用固定版本的 DeepSeek。你仍在 App 中选择工程、审阅 diff、批准命令、恢复会话和使用子智能体。这些操作由 Codex 的原生 runtime 执行。网关负责模型协议、认证和提供方路由。
+CADSG 让 Windows 上的官方 **Codex 桌面 App** 通过 OpenRouter 使用固定版本的 DeepSeek。你仍在 App 中选择工程、审阅 diff、批准命令、恢复会话和使用子智能体。这些操作由 Codex 的原生 runtime 执行。网关负责模型协议、认证、提供方路由与网页后端适配。O169 发布组合还包括锁定的 Codex 原生补丁和 Windows 安装、隔离启动与回滚代码。
 
 ```text
 官方 Windows Codex App（独立 profile）
@@ -18,11 +18,11 @@ CADSG 面向桌面 App。[CDS](https://github.com/0xZoharHuang/codex-deepseek-ru
 
 | 组合 | 当前交付范围 |
 | --- | --- |
-| P7 / `v0.1.0` | 公开 Windows 安装包。固定 Windows 10 x64 19045、官方 App `26.1023.6621.0` 和原生 `0.165.0-alpha.1.2`。按同一发行页的外部 `SHA256SUMS.json` 核对网关 ZIP 与原生 tar.gz。 [发行页](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/releases/tag/v0.1.0) · [该版本的 Windows 安装说明](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/blob/v0.1.0/docs/windows-quickstart.md) |
-| P167 / O167 | 公开候选源码与构建流程。固定原生 `0.167.0-alpha.3.2`。当前可下载的稳定组合仍为 P7。 [P167 候选分支](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/tree/codex/p167-hosted-ci-r626) |
-| P169 / O169 | 本分支的受限 Windows App 源码资格。固定官方签名 App `26.1111.2228.0`、原生 `0.169.0-alpha.11.1` 和独立 CPython 3.13 x64。真实 App 已验证项目首次普通命令的 ACL 顺序、原生 Guardian 放行与拒绝、两阶段记忆及冷进程无工具召回。 [O169 实机验收范围](docs/qualification-status.md#o169-真实-windows-app-验收) |
+| P7 / `v0.1.0` | 历史 Windows 发行版。固定 Windows 10 x64 19045、官方 App `26.1023.6621.0` 和原生 `0.165.0-alpha.1.2`。按同一发行页的外部 `SHA256SUMS.json` 核对网关 ZIP 与原生 tar.gz。 [发行页](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/releases/tag/v0.1.0) · [该版本的 Windows 安装说明](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/blob/v0.1.0/docs/windows-quickstart.md) |
+| P167 / O167 | 公开候选源码与构建流程。固定原生 `0.167.0-alpha.3.2`。 [P167 候选分支](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/tree/codex/p167-hosted-ci-r626) |
+| P169 / O169 / `v0.2.0` | 当前稳定 Windows 发行版。固定 Windows 10 x64 19045、官方签名 App `6.1111.2228.0`、原生 `0.169.0-alpha.11.1` 和独立 CPython 3.13 x64。 [发行页](https://github.com/0xZoharHuang/codex-app-deepseek-gateway/releases/tag/v0.2.0) · [公开安装验收与边界](docs/qualification-status.md#o169-v020-公开安装验收) |
 
-P169 的公开二进制交付还需要由公开源码构建并配对校验的网关与原生归档、可获取的锁定依赖、外部资产校验索引，以及消费者从下载到正常隔离安装和实启 App 的复测。 [P169 依赖锁](release/dependencies.windows-py313.json)
+v0.2.0 的公开安装验收覆盖固定组合的实机路径。各能力的实测范围和仍待确认的路径见资格索引。 [P169 依赖锁](release/dependencies.windows-py313.json)
 
 ## O169 下载和独立运行
 

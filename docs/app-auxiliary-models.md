@@ -19,9 +19,10 @@ being used.
 | gpt-6.1-sol | Desktop visualization and local automation model default | Hidden |
 
 The desktop alias diagnosis below originated with the historical official App
-26.1016.8120.0's codex-app-model-routing defaults in src-CSKkIr_z.js. The current
-target is 26.1023.6621.0 with its separately qualified O165 catalog and the exact
-accepted-name policy above; see the [current ledger](qualification-status.md).
+26.1016.8120.0's codex-app-model-routing defaults in src-CSKkIr_z.js. The O165
+catalog and helper behaviors described below were tested with App 26.1023.6621.0.
+For the O169 v0.2.0 public install and its tested helpers, see the
+[qualification ledger](qualification-status.md#o169-v020-公开安装验收).
 This project does not patch the signed App bundle. A fresh helper can choose the available provider default through the
 native fallback option. A normal helper fork has no such option. For example,
 Rename or Pin can acknowledge the title/pin action while an unconfigured
